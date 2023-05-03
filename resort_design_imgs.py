@@ -17,9 +17,11 @@ def main():
         # 图像读取
         img = cv2.imread(img_dir, 1)
         # 二值化
-        ret, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_TRUNC)  # 这里指定threshold为阈值
+        ret, binary = cv2.threshold(img, threshold, 255, cv2.THRESH_TRUNC)  
+        # 这里指定threshold为阈值
         # Canny边缘检测
-        canny = cv2.Canny(binary, 0, 100)  # 阈值0,100  较小的阈值将间断的边缘连接起来，较大的阈值检测图像中明显的边缘
+        canny = cv2.Canny(binary, 0, 100)  
+        # 阈值0,100  较小的阈值将间断的边缘连接起来，较大的阈值检测图像中明显的边缘
         # 获取边缘最大、最小坐标
         ans, highest_h, highest_w, lowest_h, lowest_w = [], 0, 0, 100000, 100000
         highest_Coordinate, lowest_Coordinate = [0, 0], [0, 0]
@@ -39,19 +41,6 @@ def main():
                     lowest_Coordinate = [lowest_h, lowest_w]
         img_size = [int(highest_w-lowest_w),int(highest_h-lowest_h)]  
         crop = img[lowest_h:highest_h,lowest_w:highest_w]
-        # print(f"Lowest {lowest_Coordinate} Highest {highest_Coordinate} Image_size{img_size}")
-        # if '01' in img_dir:
-        #     # 图像展示
-        #     plt.rcParams['font.sans-serif']=['宋体'] #用来正常显示中文标签 
-        #     plt.rcParams['axes.unicode_minus']=False #用来正常显示负号 #有中文出现的情况，需要u'内容'
-        #     plt.figure(figsize=(10, 8), dpi=100)
-        #     plt.subplot(121), plt.imshow(img, cmap=plt.cm.gray), plt.title('原图')
-        #     plt.xticks([]), plt.yticks([])
-        #     plt.plot(highest_w, highest_h, 'ro', 'MarkerSize', 1)
-        #     plt.plot(lowest_w, lowest_h, 'ro', 'MarkerSize', 1)
-        #     plt.subplot(122), plt.imshow(canny, cmap=plt.cm.gray), plt.title('边缘识别，请确保边缘能被正确识别')
-        #     plt.xticks([]), plt.yticks([])
-        #     plt.show()
         if lowest_h != 0 and lowest_w != 0:
             if not file_over_write:
                 img_dir = img_dir.replace('.jpg','_temp.jpg').replace('.jpeg','_temp.jpeg')
@@ -74,25 +63,31 @@ def main():
         # cv2.destroyAllWindows()
         if not file_over_write:
             out_dir = out_dir.replace('.jpg','_temp.jpg').replace('.jpeg','_temp.jpeg')
-        cv2.imwrite(out_dir, new_img, [cv2.IMWRITE_JPEG_QUALITY, 100]) #  100 最高质量  默认95
+        cv2.imwrite(out_dir, new_img, [cv2.IMWRITE_JPEG_QUALITY, 100]) 
+        #  100 最高质量  默认95
         redpi_img(out_dir)
-    def get_object_size(img_dic,input_threshold): # 获取物品尺寸
+    def get_object_size(img_dic,input_threshold): 
+    # 获取物品尺寸
         object_size = [0,0,0] # width,height,depth
         img_size_1 = [0,0]
         img_size_2 = [0,0]
-        img_front_dir = img_dic[0] #主视图dir
-        img_left_dir = img_dic[2] #左视图dir
+        img_front_dir = img_dic[0]
+        #主视图dir
+        img_left_dir = img_dic[2] 
+        #左视图dir
         img_size_1[0],img_size_1[1] = load_edge_posxy(img_front_dir,input_threshold)
         img_size_2[0],img_size_2[1] = load_edge_posxy(img_left_dir,input_threshold)
         # print(f'>>>Old Size {img_size_1},{img_size_2}')
         abs_rate = round(img_size_1[1]/img_size_2[1],10)
-        resize_img(img_left_dir,img_left_dir,abs_rate,abs_rate) # 覆盖原图
+        resize_img(img_left_dir,img_left_dir,abs_rate,abs_rate) 
+        # 覆盖原图
         img_size_2[0],img_size_2[1] = load_edge_posxy(img_left_dir,input_threshold)
         # print(f'New Size {img_size_1},{img_size_2}')
         object_size = [img_size_1[0],img_size_1[1],img_size_2[0]]
         print(f'>>>Object Size {object_size}')
         text_handleinfo.insert('insert',f'>>>产品尺寸 \n{object_size}\n')
-        return object_size # 主视图为准  宽 高 厚
+        return object_size
+        # 主视图为准  宽 高 厚
 
     def show_img_0(file_dir):
         global inserted_fig_5
@@ -144,7 +139,8 @@ def main():
         canvas_fig_1.create_image((140,140),image = inserted_fig_9)
         canvas_fig_1.pack()
     def adjust_size(img_dic,input_threshold,object_size):
-        for i in range(0,6):# 去背景
+        for i in range(0,6):
+        # 去背景
             if removebg_checkvar.get() == 1:
                 remove_background(img_dic[i])
                 if i == 0:
@@ -176,11 +172,13 @@ def main():
                     text_handleinfo.insert('insert',f'>>>立体图 背景去除完成\n')
                     show_img_7(img_dic[i])
         for i in range(0,6):
-            if i == 0: #主视图
+            if i == 0: 
+            #主视图
                 print('>>>主视图 调整完成')
                 text_handleinfo.insert('insert','>>>主视图 调整完成\n')
                 show_img_0(img_dic[i])
-            elif i == 1: #后视图
+            elif i == 1: 
+            #后视图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 rate_w = round(object_size[0]/img_size[0],10)
                 rate_h = round(object_size[1]/img_size[1],10)
@@ -188,7 +186,8 @@ def main():
                 print('>>>后视图 调整完成')
                 text_handleinfo.insert('insert','>>>后视图 调整完成\n')
                 show_img_1(img_dic[i])
-            elif i == 2:#左视图
+            elif i == 2:
+            #左视图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 rate_w = round(object_size[2]/img_size[0],10)
                 rate_h = round(object_size[1]/img_size[1],10)
@@ -196,7 +195,8 @@ def main():
                 print('>>>左视图 调整完成')
                 text_handleinfo.insert('insert','>>>左视图 调整完成\n')
                 show_img_2(img_dic[i])
-            elif i == 3:#右视图
+            elif i == 3:
+            #右视图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 rate_w = round(object_size[2]/img_size[0],10)
                 rate_h = round(object_size[1]/img_size[1],10)
@@ -204,7 +204,8 @@ def main():
                 print('>>>右视图 调整完成')
                 text_handleinfo.insert('insert','>>>右视图 调整完成\n')
                 show_img_3(img_dic[i])
-            elif i == 4:#俯视图
+            elif i == 4:
+            #俯视图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 rate_w = round(object_size[0]/img_size[0],10)
                 rate_h = round(object_size[2]/img_size[1],10)
@@ -212,7 +213,8 @@ def main():
                 print('>>>俯视图 调整完成')
                 text_handleinfo.insert('insert','>>>俯视图 调整完成\n')
                 show_img_4(img_dic[i])
-            elif i == 5:#仰视图
+            elif i == 5:
+            #仰视图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 rate_w = round(object_size[0]/img_size[0],10)
                 rate_h = round(object_size[2]/img_size[1],10)
@@ -220,7 +222,8 @@ def main():
                 print('>>>仰视图 调整完成')
                 text_handleinfo.insert('insert','>>>仰视图 调整完成\n')
                 show_img_5(img_dic[i])
-            elif i == 6:#立体图
+            elif i == 6:
+            #立体图
                 img_size = load_edge_posxy(img_dic[i],input_threshold)
                 print('>>>立体图 调整完成')
                 text_handleinfo.insert('insert','>>>立体图 调整完成\n')
