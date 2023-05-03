@@ -9,8 +9,8 @@ import ttkthemes
 import windnd
 from PIL import Image, ImageGrab, ImageSequence, ImageTk
 
-img_dic = {0:'',1:'',2:'',3:'',4:'',5:'',6:'',7:'',8:''} # 主 后 左 右 俯 仰 立 状态I 状态II
-def main(in_conn,window_main,user_login,label_lefttimes): 
+def main(): 
+    img_dic = {0:'',1:'',2:'',3:'',4:'',5:'',6:'',7:'',8:''} # 主 后 左 右 俯 仰 立 状态I 状态II
     def remove_background(img):
         return
     def load_edge_posxy(img_dir,threshold): # 获取最大、最小点的坐标
@@ -537,3 +537,4 @@ def main(in_conn,window_main,user_login,label_lefttimes):
     windnd.hook_dropfiles(canvas_fig_9, func = dragged_files_9) # 状态图II
     # window_adjust_imgs.protocol('WM_DELETE_WINDOW',window_close)
     window_adjust_imgs.mainloop() 
+main()
