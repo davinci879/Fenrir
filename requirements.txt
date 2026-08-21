@@ -1,7 +1,6 @@
 PyQt5
 qtawesome
 openai
-sys
 webbrowser
 pdfplumber
 base64
