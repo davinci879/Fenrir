@@ -1,3 +1,20 @@
+**软件主界面**
+<img width="1280" height="1040" alt="图片" src="https://github.com/user-attachments/assets/3a730062-a19d-4094-bdd0-364d2e6ba865" />
+主要功能：
+1 标记自动排列，点击左侧对应的附图标记，在右侧文本框中高亮显示对应内容
+2 附图标记提取，从任意文本中提取出附图标记
+3 通过输入标号快速输入标记名称
+4 文本校验，附图标记一致性校验，撰写质量评分
+<img width="500" height="950" alt="图片" src="https://github.com/user-attachments/assets/b6620aec-6335-4df4-9f0c-64440feee61f" />
+5 批量替换
+<img width="255" height="425" alt="图片" src="https://github.com/user-attachments/assets/81beb618-9c2c-4c90-9baf-b4cdb67617e6" />
+6 一键生成撰写模板
+7 格式自动化，一键加粗预设内容、调整行间距
+8 AI扩写,需在DEEPSEEK或火山模型官网申请AK/SK
+<img width="400" height="150" alt="图片" src="https://github.com/user-attachments/assets/12ce7380-04a0-4087-9d30-c595589968a9" />
+
+
+
 **Fenrir V3.5.15 更新说明**
 1. 功能优化。
 
@@ -6,8 +23,6 @@
 精确，根据左侧附图标记列表中的内容进行标号去除
 
 模糊，去除所有的括号与数字标注
-
-<img width="255" height="425" alt="图片" src="https://github.com/user-attachments/assets/81beb618-9c2c-4c90-9baf-b4cdb67617e6" />
 
 1.2 文本校验，在识别为缺少段落的说明书时，仍会进行附图标记校验
 
@@ -187,7 +202,6 @@ AI接口设置F4
 3.3 新增附图工具
 左侧新增DOCK工具说明书附图（最多支持30图），向其中拖拽图片即可自适应显示。
 
+
 3.4 右上角新增清屏按钮
 点击后会弹出提示，如选择是，则会清空当前文档和附图标记
- 
- 
