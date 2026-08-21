@@ -5049,7 +5049,7 @@ class WindowBook(QWidget):
             if self.txt_type =='claim': # 正常校验权利要求书  多项权利要求
                 self.check_claim()
             elif self.txt_type =='short_for_description': # 说明书分段有问题
-                pass
+                self.check_text_ckmarks_unused()
             elif self.txt_type =='description':# 正常校验说明书
                 self.check_description()
             elif self.txt_type =='other':
