@@ -3,16 +3,12 @@ qtawesome
 openai
 webbrowser
 pdfplumber
-base64
 docx
-volcenginesdkarkruntime
 qdarkstyle
-re
 requests
 json
-os
 operator
 random
-time
 win32api
 win32gui
+volcenginesdkarkruntime
