@@ -4,13 +4,17 @@
 
 主要功能：
 
-1 标记自动排列，点击左侧对应的附图标记，在右侧文本框中高亮显示对应内容
+1 标记自动排列，点击左侧对应的附图标记，在右侧文本框中高亮显示对应内容；自动识别并高亮显示重复的标号/标记名称；高亮显示框选的相同文本。
 
-2 附图标记提取，从任意文本中提取出附图标记
+<img width="1250" height="475" alt="图片" src="https://github.com/user-attachments/assets/95881032-64b6-4101-adb1-d534559d9de7" />
 
-3 通过输入标号快速输入标记名称
+2 附图标记提取，从任意文本中提取出附图标记：框选文本后，批量文本→提取附图标记，快捷键ctrl+Q。
 
-4 文本校验，附图标记一致性校验，撰写质量评分
+<img width="408" height="584" alt="图片" src="https://github.com/user-attachments/assets/b8890940-6888-4650-a84b-0ad8784c17df" />
+
+3 通过输入标号快速输入标记名称：输入对应标号后右上角弹出对应标记，然后按空格。
+
+4 文本校验，附图标记一致性校验，撰写质量评分。
 
 <img width="500" height="950" alt="图片" src="https://github.com/user-attachments/assets/b6620aec-6335-4df4-9f0c-64440feee61f" />
 
@@ -20,13 +24,17 @@
 
 6 一键生成撰写模板
 
-7 格式自动化，一键加粗预设内容、调整行间距
+<img width="376" height="334" alt="图片" src="https://github.com/user-attachments/assets/46c237c8-241c-40c9-ae55-d410e9641cec" />
+
+7 格式自动化，一键加粗预设内容、调整行间距（快捷键F5）;去除格式（快捷键F6）
 
 8 AI扩写,需在DEEPSEEK或火山模型官网申请AK/SK
 
 <img width="400" height="150" alt="图片" src="https://github.com/user-attachments/assets/12ce7380-04a0-4087-9d30-c595589968a9" />
 
+9 提取发明内容（删除权利要求书中的全部附图标记）：框选权利要求书，批量文本→提取发明内容，快捷键ctrl+9
 
+10 一键删除多余的空格、换行符，一键删除/增加段号
 
 
 **Fenrir V3.5.15 更新说明**
