@@ -4854,7 +4854,7 @@ class WindowBook(QWidget):
 
         self.text_checkresult = QTextBrowser()
         self.text_checkresult.setFont(QFont("宋体", 11))
-        self.text_checkresult.setPlaceholderText('> 请选择待校验的文档\n***无需在此处粘贴任何文本***\n***附图标记不能为空***\n> 校验说明书\n请以“技术领域、背景技术、发明内容/实用新型内容、附图说明、具体实施方式”分段\n> 校验权利要求书\n***权利要求尽量不要分段***\n***最多支持50项权利要求***')
+        self.text_checkresult.setPlaceholderText('> 请选择待校验的文档\n***无需在此处粘贴任何文本***\n***附图标记不能为空***\n> 校验说明书\n请以“技术领域、背景技术、发明内容/实用新型内容、附图说明、具体实施方式”分段\n> 校验权利要求书\n***每项权利要求尽量撰写在一段中***\n***最多支持50项权利要求***')
         self.text_checkresult.mouseReleaseEvent = self.fn_highlight_figmarks_2
         self.text_checkresult.setMinimumWidth(300)
 
