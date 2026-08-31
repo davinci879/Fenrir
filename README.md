@@ -18,7 +18,7 @@
 
 <img width="500" height="950" alt="图片" src="https://github.com/user-attachments/assets/b6620aec-6335-4df4-9f0c-64440feee61f" />
 
-5 批量替换
+5 批量替换：去除多余空格，快捷键：ctrl+T；去除多余换行符，快捷键：ctrl+R
 
 <img width="255" height="425" alt="图片" src="https://github.com/user-attachments/assets/81beb618-9c2c-4c90-9baf-b4cdb67617e6" />
 
