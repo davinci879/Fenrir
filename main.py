@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(self.type_toolbar)
         # 选择输入方式
         self.combo_typev = QComboBox()
-        self.combo_typev.addItems(['(Num)', '（Num）', '[Num]', 'Num','Void'])
+        self.combo_typev.addItems(['(Num)', '（Num）', '[Num]', 'Num','-Num-'])
         self.combo_typev.setToolTip('选择技术特征模式')
         self.combo_typev.setCurrentIndex(0)
         # 选择背景色
@@ -4648,7 +4648,7 @@ class MainWindow(QMainWindow):
     def space_out_words(self):
         global global_active_textcomponent,global_active_figmark,write_auto
         insert_word = self.word_array[0]
-        self.type_v = self.combo_typev.currentText() # 选择 '(Num)', '（Num）', '[Num]', 'Num','Void'
+        self.type_v = self.combo_typev.currentText() # 选择 '(Num)', '（Num）', '[Num]', 'Num','-Num-'
         for key in self.fig_dic:
             if insert_word == key[1]:
                 if self.type_v == '(Num)':
