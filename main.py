@@ -6450,11 +6450,11 @@ class QTextEditWithLineNum(QTextEdit):
         super().__init__(parent)
         
         self.left_margin = 0
-        self.line_draw_height = 1
-        self.max_width = 12
-        self.min_width = 2
-        self.dark_color = QColor("#FFFFFF")
-        self.light_color = QColor("#8c9196")
+        self.line_draw_height = 2
+        self.max_width = 20
+        self.min_width = 8
+        self.dark_color = QColor("#FB8073") # 长线条颜色
+        self.light_color = QColor("#8c9196") # 短线条颜色
         # 光标在viewport上的Y坐标
         self.cursor_vp_y = 0.0
         self.verticalScrollBar().valueChanged.connect(self.update)
@@ -6473,7 +6473,7 @@ class QTextEditWithLineNum(QTextEdit):
         self.setAcceptDrops(True)
         self.strPathFile = ""
         self.document().blockCountChanged.connect(self.update_line_num_width)
-
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # 隐藏垂直滚动条
         self.verticalScrollBar().valueChanged.connect(self.lineNumberArea.update)
         # self.textChanged.connect(self.lineNumberArea.update)
         # self.cursorPositionChanged.connect(self.lineNumberArea.update)
@@ -6484,10 +6484,9 @@ class QTextEditWithLineNum(QTextEdit):
         self.timer.start(120)
     def update_cursor_y(self):
         cursor = self.textCursor()
-        # 获取光标全局矩形
         rect = self.cursorRect(cursor)
         # 转换到视口坐标
-        self.cursor_vp_y = rect.center().y()
+        self.cursor_doc_y = rect.y() + self.verticalScrollBar().value()
         self.update()
 
     def paintEvent(self, event):
@@ -6499,44 +6498,44 @@ class QTextEditWithLineNum(QTextEdit):
         painter.setRenderHint(QPainter.Antialiasing, False)
 
         vp_rect = vp.rect()
-        line_spacing = 8  # 文本行间距，用于生成背景线条
+        line_spacing = 10  # 文本行间距，用于生成背景线条
+        # 文档Y → 当前视口Y
+        cursor_doc_y = self.cursor_doc_y - self.verticalScrollBar().value()
+        focus_line_idx = round(cursor_doc_y / line_spacing)
 
         # 遍历视口内所有行，生成等间隔横线
-        start_y = 0
+        y = 0
         end_y = vp_rect.height()
-        # 计算主线对应的行号
-        focus_line_idx = round(self.cursor_vp_y / line_spacing)
-
-        y = start_y
         while y <= end_y:
             line_idx = round(y / line_spacing)
             diff = abs(line_idx - focus_line_idx)
+            # 离光标行越近宽度越大，光标行 = max_width
             current_w = self.max_width - diff
             if current_w < self.min_width:
                 current_w = self.min_width
 
-            if abs(y - self.cursor_vp_y) < (line_spacing / 2):
+            if abs(y - cursor_doc_y) < (line_spacing / 2):
                 pen = QPen(self.dark_color, self.line_draw_height)
             else:
                 pen = QPen(self.light_color, self.line_draw_height)
+
             pen.setCapStyle(Qt.FlatCap)
             painter.setPen(pen)
-
-            x_start = self.width() - 30
+            x_start = self.width() - 20 #- int(y / 9)*2
             x_end = x_start - current_w
             p1 = QPointF(x_start, y)
             p2 = QPointF(x_end, y)
             painter.drawLine(p1, p2)
 
             y += line_spacing
-
+            
         painter.end()
     def lineNumberAreaWidth(self):
         block_count = self.document().blockCount()
         max_value = max(1, block_count)
         d_count = len(str(max_value))
         _width = self.fontMetrics().width('9') * d_count + 5
-        return _width
+        return 15 #_width
     def update_line_num_width(self):
         self.setViewportMargins(self.lineNumberAreaWidth() + 5, 0, 0, 0)
     
