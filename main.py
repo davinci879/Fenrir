@@ -6448,6 +6448,19 @@ class QTextEditWithLineNum(QTextEdit):
     sendmsg = pyqtSignal(object)
     def __init__(self, parent=None):
         super().__init__(parent)
+        
+        self.left_margin = 0
+        self.line_draw_height = 1
+        self.max_width = 12
+        self.min_width = 2
+        self.dark_color = QColor("#FFFFFF")
+        self.light_color = QColor("#8c9196")
+        # 光标在viewport上的Y坐标
+        self.cursor_vp_y = 0.0
+        self.verticalScrollBar().valueChanged.connect(self.update)
+        self.cursorPositionChanged.connect(self.update_cursor_y)
+        self.textChanged.connect(self.update_cursor_y)
+        
         shortcut_txt_1 = "AI功能快捷键：\nAlt+Q：AI填充\nAlt+W：AI续写\nAlt+E：AI润色\nAlt+R：概念查询\nAlt+T：文本翻译\n"
         shortcut_txt_2 = "模板快捷键：\nAlt+1：OA答复\nAlt+2：说明书\nAlt+3：权利要求书\nAlt+4：复审请求\nAlt+5：无效宣告请求\nAlt+6：AI撰写说明书\n"
         shortcut_txt_3 = "批量文本快捷键：\nCtrl+1：A => A1\nCtrl+2：A => A(1)\nCtrl+3：1 => A1\nCtrl+4：1 => A(1)\nCtrl+5：A1/(1) => A\nCtrl+6：A1 => A(1)\nCtrl+7：A(1) => A1\nCtrl+8：合并附图标记\nCtrl+9：提取发明内容\n"
@@ -6469,6 +6482,55 @@ class QTextEditWithLineNum(QTextEdit):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update)
         self.timer.start(120)
+    def update_cursor_y(self):
+        cursor = self.textCursor()
+        # 获取光标全局矩形
+        rect = self.cursorRect(cursor)
+        # 转换到视口坐标
+        self.cursor_vp_y = rect.center().y()
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        vp = self.viewport()
+        painter = QPainter(vp)
+        if not painter.isActive():
+            return
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        vp_rect = vp.rect()
+        line_spacing = 8  # 文本行间距，用于生成背景线条
+
+        # 遍历视口内所有行，生成等间隔横线
+        start_y = 0
+        end_y = vp_rect.height()
+        # 计算主线对应的行号
+        focus_line_idx = round(self.cursor_vp_y / line_spacing)
+
+        y = start_y
+        while y <= end_y:
+            line_idx = round(y / line_spacing)
+            diff = abs(line_idx - focus_line_idx)
+            current_w = self.max_width - diff
+            if current_w < self.min_width:
+                current_w = self.min_width
+
+            if abs(y - self.cursor_vp_y) < (line_spacing / 2):
+                pen = QPen(self.dark_color, self.line_draw_height)
+            else:
+                pen = QPen(self.light_color, self.line_draw_height)
+            pen.setCapStyle(Qt.FlatCap)
+            painter.setPen(pen)
+
+            x_start = self.width() - 30
+            x_end = x_start - current_w
+            p1 = QPointF(x_start, y)
+            p2 = QPointF(x_end, y)
+            painter.drawLine(p1, p2)
+
+            y += line_spacing
+
+        painter.end()
     def lineNumberAreaWidth(self):
         block_count = self.document().blockCount()
         max_value = max(1, block_count)
