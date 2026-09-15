@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall('font-size:\d+pt',ori_html) + re.findall('font-size:\d+pt',ori_html)
+            find_txt = re.findall(r'font-size:\d+pt',ori_html) + re.findall(r'font-size:\d+pt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall('font-size:\d\dpt',ori_html) + re.findall('font-size:\dpt',ori_html)
+            find_txt = re.findall(r'font-size:\d\dpt',ori_html) + re.findall(r'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall('font-size:\d\dpt',ori_html) + re.findall('font-size:\dpt',ori_html)
+            find_txt = re.findall(r'font-size:\d\dpt',ori_html) + re.findall(r'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -620,10 +620,10 @@ class MainWindow(QMainWindow):
         global line_height
         line_height = round(float(self.combo_lineheight.currentText()),1)
         ori_html = global_active_textcomponent.toHtml()
-        find_txt = re.findall('margin-top:\d\dpx',ori_html) + re.findall('margin-top:\dpx',ori_html)
+        find_txt = re.findall(r'margin-top:\d\dpx',ori_html) + re.findall(r'margin-top:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-top:{line_height*5}px')
-        find_txt = re.findall('margin-bottom:\d\dpx',ori_html) + re.findall('margin-bottom:\dpx',ori_html)
+        find_txt = re.findall(r'margin-bottom:\d\dpx',ori_html) + re.findall(r'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-bottom:{line_height*5}px')
         global_active_textcomponent.setHtml(ori_html)
@@ -664,10 +664,10 @@ class MainWindow(QMainWindow):
         cursor.setCharFormat(format)
 
         ori_html = global_active_textcomponent.toHtml()
-        find_txt = re.findall('margin-top:\d\dpx',ori_html) + re.findall('margin-top:\dpx',ori_html)
+        find_txt = re.findall(r'margin-top:\d\dpx',ori_html) + re.findall(r'margin-top:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-top:0px')
-        find_txt = re.findall('margin-bottom:\d\dpx',ori_html) + re.findall('margin-bottom:\dpx',ori_html)
+        find_txt = re.findall(r'margin-bottom:\d\dpx',ori_html) + re.findall(r'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-bottom:0px')
         global_active_textcomponent.clear()
@@ -699,11 +699,11 @@ class MainWindow(QMainWindow):
             format_array.append(f'实施例{i}')
             format_array.append(f'证据{i}')
             format_array.append(f'{i}：')
-            format_array.append(f'{i}\.')
-            format_array.append(f'\u2029{i}\.')
+            format_array.append(f'{i}\\.')
+            format_array.append(f'\u2029{i}\\.')
             format_array.append(f'\u2029{i}、')
         for i in range(1,999):
-            format_array.append(f'\u2029\[%04d]' % i)
+            format_array.append(f'\u2029\\[%04d]' % i)
         font_format = QTextCharFormat()
         font_format.setFontWeight(QFont.Bold)
         # global_active_textcomponent.setStyleSheet('margin-bottom: 20px; margin-top: 20px;')
@@ -2518,8 +2518,8 @@ class MainWindow(QMainWindow):
         if mark == '.' or not mark:
             return
         try:
-            mark = mark.replace('\u2029','\n').replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)').replace('[','\[').replace(']','\]')
-            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)')
+            mark = mark.replace('\u2029','\n').replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)').replace('[','\\[').replace(']','\\]')
+            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)')
             if self.ck_1.checkState() == 0: # 未选中
                 all_txt = all_txt.lower()
                 mark = mark.lower()
@@ -2533,7 +2533,7 @@ class MainWindow(QMainWindow):
                 index = match.start()
                 cursor = input_component.textCursor()
                 cursor.setPosition(index)
-                bracket_count = len(re.findall('\(|\)|\{|\}|\[|\]',mark))
+                bracket_count = len(re.findall(r'\\(|\\)|\\{|\\}|\\[|\\]',mark))
                 if index - len(mark) < 0:
                     cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
                 else:
@@ -2551,8 +2551,8 @@ class MainWindow(QMainWindow):
         if mark == '.' or not mark:
             return
         try:
-            mark = mark.replace('\u2029','\n').replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)').replace('[','\[').replace(']','\]')
-            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)')
+            mark = mark.replace('\u2029','\n').replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)').replace('[','\\[').replace(']','\\]')
+            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)')
             if self.ck_1.checkState() == 0: # 未选中
                 all_txt = all_txt.lower()
                 mark = mark.lower()
@@ -2566,7 +2566,7 @@ class MainWindow(QMainWindow):
                 index = match.start()
                 cursor = input_component.textCursor()
                 cursor.setPosition(index)
-                bracket_count = len(re.findall('\(|\)|\{|\}|\[|\]',mark))
+                bracket_count = len(re.findall(r'\\(|\\)|\\{|\\}|\\[|\\]',mark))
                 if index - len(mark) < 0:
                     cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
                 else:
@@ -2579,7 +2579,7 @@ class MainWindow(QMainWindow):
             all_txt_without_dots = all_txt
             select_txt = global_active_textcomponent.textCursor().selectedText()
             select_txt_without_dots = select_txt
-            for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！&——+\{\}【】‘；：”“’。，、？\'：；':
+            for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！&——+\\{\\}【】‘；：”“’。，、？\'：；':
                 select_txt_without_dots = select_txt_without_dots.replace(_, '')
                 all_txt_without_dots = all_txt_without_dots.replace(_, '')
             len_all = len(all_txt)
@@ -2965,7 +2965,7 @@ class MainWindow(QMainWindow):
         if not in_txt:
             return
         # 给附图标记加括号
-        find_txt = re.findall(f'.\d\d?\d?\d?[a-z|A-Z]?.',in_txt)
+        find_txt = re.findall(rf'.\d\d?\d?\d?[a-z|A-Z]?.',in_txt)
         if find_txt:
             for _ in find_txt:
                 if ('（' in _ and '）' in _) or ('(' in _ and ')' in _):
@@ -3399,7 +3399,7 @@ class MainWindow(QMainWindow):
             # 删除带括号标记
             new_select_txt = delete_bracketmarks_mohu(select_txt)
             #  删除所有非括号标记
-            find_txt_array = re.findall('.?\d.',new_select_txt)
+            find_txt_array = re.findall(r'.?\d.',new_select_txt)
             for _old in find_txt_array:
                 if '.' not in _old and '据' not in _old and '求' not in _old and '至' not in _old and '~' not in _old and '-' not in _old and '或' not in _old and '图' not in _old:
                     _new = _old
@@ -3450,7 +3450,7 @@ class MainWindow(QMainWindow):
         select_txt = cursor.selectedText().strip('\u2029\r\t') + '。' # .lstrip('1234567890')
         if select_txt:
             new_select_txt = select_txt
-            find_txt = re.findall(f'.\d\d?\d?\d?[a-z|A-Z]?.',new_select_txt)
+            find_txt = re.findall(rf'.\d\d?\d?\d?[a-z|A-Z]?.',new_select_txt)
             if find_txt:
                 for _ in find_txt:
                     if '图' in _:
@@ -3458,7 +3458,7 @@ class MainWindow(QMainWindow):
                     elif _[0] not in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' and _[-1] not in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
                         new_select_txt = new_select_txt.replace(_,_[0]+'(' + _[1:-1] + ')' +_[-1])
             # 删除权利要求(x)的括号
-            find_txt = re.findall(f'权利要求\(.*?\)',new_select_txt)
+            find_txt = re.findall(f'权利要求\\(.*?\\)',new_select_txt)
             if find_txt:
                 for _ in find_txt:
                     new_select_txt = new_select_txt.replace(_,_.replace('(','').replace(')',''))
@@ -3555,7 +3555,7 @@ class MainWindow(QMainWindow):
             for num in range(99,0,-1):
                 new_select_txt = new_select_txt.replace(f"{num}.",'')
             # 将“根据权利要求……,其特征在于：” 替换为”进一步的“
-            find_txt_array = re.findall('根据.*?，其特征在于：',new_select_txt)
+            find_txt_array = re.findall(r'根据.*?，其特征在于：',new_select_txt)
             for _ in find_txt_array:
                 new_select_txt = new_select_txt.replace(_,'进一步的，')
             new_select_txt = new_select_txt.replace('一种','该').replace('其特征是：','其技术要点是：').replace('其特征在于：','其技术要点是：')
@@ -3572,7 +3572,7 @@ class MainWindow(QMainWindow):
         select_txt = refine_intxt(select_txt)
         if select_txt:
             # 给附图标记加括号
-            find_txt = re.findall(f'.\d\d?\d?\d?[a-z|A-Z]?.',select_txt)
+            find_txt = re.findall(rf'.\d\d?\d?\d?[a-z|A-Z]?.',select_txt)
             if find_txt:
                 for _ in find_txt:
                     if ('（' in _ and '）' in _) or ('(' in _ and ')' in _):
@@ -3592,7 +3592,7 @@ class MainWindow(QMainWindow):
         select_txt = cursor.selectedText().strip('\u2029\r\t')
         if select_txt:
             new_select_txt = select_txt
-            del_array = re.findall('\[\d\d\d\d\]',select_txt)
+            del_array = re.findall(r'\\[\d\d\d\d\\]',select_txt)
             for _ in del_array:
                 new_select_txt = new_select_txt.replace(_ + ' \u2029','').replace(_ + '\u2029','').replace(_ + ' ','').replace(_,'')
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
@@ -3710,7 +3710,7 @@ class MainWindow(QMainWindow):
         all_txt_without_dots = all_txt
         select_txt = global_active_textcomponent.textCursor().selectedText()
         select_txt_without_dots = select_txt
-        for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！#——+\{\}【】‘；：”“’。，、？\'：；':
+        for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！#——+\\{\\}【】‘；：”“’。，、？\'：；':
             select_txt_without_dots = select_txt_without_dots.replace(_, '')
             all_txt_without_dots = all_txt_without_dots.replace(_, '')
         len_all = len(all_txt)
@@ -3761,12 +3761,12 @@ class MainWindow(QMainWindow):
                     for i in range(0,5):
                         cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,1)
                         select_txt = cursor.selectedText().replace(')','）').replace('(','（')
-                        if select_txt[-1] in '（）[]<>《》\{\}':
+                        if select_txt[-1] in '（）[]<>《》\\{\\}':
                             self.total_key = ''
                             break
-                        elif len(select_txt) > 1 and select_txt[0] in '1234567890' and select_txt[0] not in '（）[]<>《》\{\}':
+                        elif len(select_txt) > 1 and select_txt[0] in '1234567890' and select_txt[0] not in '（）[]<>《》\\{\\}':
                             self.total_key = select_txt[0:-1]
-                        elif len(select_txt) > 1 and select_txt[0] in '（）[]<>《》\{\}':
+                        elif len(select_txt) > 1 and select_txt[0] in '（）[]<>《》\\{\\}':
                             break
                         elif len(select_txt) > 1 and select_txt[0] not in '1234567890':
                             break
@@ -3837,7 +3837,7 @@ class MainWindow(QMainWindow):
                         for i in range(0,10): # 判断前十个字符是否为数字
                             if base_txt[i] not in '01234567890' and base_txt[i] in '.、：:)）':
                                 base_num = base_txt[0:i]
-                                base_title = re.findall('一种(.*?)，',base_txt.replace(',','，')) + re.findall('根据.*?所述的(.*?)，',base_txt.replace(',','，'))
+                                base_title = re.findall(r'一种(.*?)，',base_txt.replace(',','，')) + re.findall(r'根据.*?所述的(.*?)，',base_txt.replace(',','，'))
                                 if base_title:
                                     base_title = base_title[0]
                                 else:
@@ -4311,7 +4311,7 @@ class MainWindow(QMainWindow):
                 end_txt = end_txt.strip('\n\r\t\u2029')
             if before_txt == ' ':
                 all_txt = global_active_textcomponent.toHtml()
-                rep_array = re.findall('>.*?<',all_txt)
+                rep_array = re.findall(r'>.*?<',all_txt)
                 temp_array = []
                 for item in rep_array:
                     if ' ' in item:
@@ -4408,7 +4408,7 @@ class MainWindow(QMainWindow):
                     end_txt = end_txt.strip('\n\r\t\u2029')
                 if before_txt == ' ':
                     all_txt = global_active_textcomponent.toHtml()
-                    rep_array = re.findall('>.*?<',all_txt)
+                    rep_array = re.findall(r'>.*?<',all_txt)
                     temp_array = []
                     for item in rep_array:
                         if ' ' in item:
@@ -4913,8 +4913,8 @@ class WindowBook(QWidget):
         if mark == '.' or not mark:
             return
         try:
-            mark = mark.replace('\u2029','\n').replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)').replace('[','\[').replace(']','\]')
-            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\{').replace('}','\}').replace('(','\(').replace(')','\)')
+            mark = mark.replace('\u2029','\n').replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)').replace('[','\\[').replace(']','\\]')
+            all_txt = input_component.toPlainText().replace('\u2029','\n')#.replace('{','\\{').replace('}','\\}').replace('(','\\(').replace(')','\\)')
             matches = re.finditer(mark, all_txt, re.S)
             format = QTextCharFormat()
             format.setBackground(QColor(highlight_color))
@@ -4925,7 +4925,7 @@ class WindowBook(QWidget):
                 index = match.start()
                 cursor = input_component.textCursor()
                 cursor.setPosition(index)
-                bracket_count = len(re.findall('\(|\)|\{|\}|\[|\]',mark))
+                bracket_count = len(re.findall(r'\\(|\\)|\\{|\\}|\\[|\\]',mark))
                 if index - len(mark) < 0:
                     cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
                 else:
@@ -4958,7 +4958,7 @@ class WindowBook(QWidget):
                 index = match.start()
                 cursor = text_component.textCursor()
                 cursor.setPosition(index)
-                if '\(' in mark:
+                if '\\(' in mark:
                     cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark)-2)
                 else:
                     cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
@@ -5073,7 +5073,7 @@ class WindowBook(QWidget):
         for index,num in enumerate(self.fig_dic):
             mark = self.fig_dic[num]
             mark_count = re.findall(mark,self.all_txt)
-            num_count = re.findall(f'{mark}{num}',self.all_txt)  + re.findall(f'\({num}\)',self.all_txt.replace('（','(').replace('）',')'))
+            num_count = re.findall(f'{mark}{num}',self.all_txt)  + re.findall(f'\\({num}\\)',self.all_txt.replace('（','(').replace('）',')'))
             item_1 = QTableWidgetItem(num)
             item_2 = QTableWidgetItem(mark)
             item_3 = QTableWidgetItem(str(len(num_count)))
@@ -5119,7 +5119,7 @@ class WindowBook(QWidget):
             for num in [r'\d{4}[a-z]',r'\d{3}[a-z]',r'\d{4}',r'\d{2}[a-z]',r'\d{3}',r'\d{2}',r'\d[a-z]',r'\d{1}',r'[a-z]']:
                 find_txt = []
                 if self.txt_type == 'claim': # 被核对文本为权利要求书   仅含独权？
-                    find_txt = re.findall(f'{mark}\({num}\)',self.all_txt.replace('（','(').replace('）',')'))
+                    find_txt = re.findall(f'{mark}\\({num}\\)',self.all_txt.replace('（','(').replace('）',')'))
                 elif self.txt_type == 'other':  # 被核对文本为其他
                     find_txt = re.findall(f'{mark}{num}',self.all_txt)
                 find_txt = list(set(find_txt))
@@ -5248,7 +5248,7 @@ class WindowBook(QWidget):
     ''' 校验说明书 '''
     def get_para_sen_index(self,error,para_txt):  # 判断错误位于说明书的第几段第几句
         # 判断段落号
-        para_index = re.findall('\[\d\d\d\d\]',para_txt)
+        para_index = re.findall(r'\\[\d\d\d\d\\]',para_txt)
         if para_index:
             para_index = para_index[0]
         else:
@@ -5417,7 +5417,7 @@ class WindowBook(QWidget):
     ''' 校验权利要求 '''                
     def check_preliminary(self): #校验末尾'句号'
         self.all_txt = '\u2029' + self.all_txt + '\u2029'
-        split_array = [f'\u2029{i}\.' for i in range(50,0,-1)] + [f'\u2029{i}、' for i in range(50,0,-1)]# +  [f'\u2029{i}' for i in range(50,0,-1)]
+        split_array = [f'\u2029{i}\\.' for i in range(50,0,-1)] + [f'\u2029{i}、' for i in range(50,0,-1)]# +  [f'\u2029{i}' for i in range(50,0,-1)]
         self.claim_array = re.split('|'.join(split_array),self.all_txt)
         while '' in self.claim_array:
             try:
@@ -5431,7 +5431,7 @@ class WindowBook(QWidget):
         for claim_index,claim in enumerate(self.claim_array):
             claim_index += 1
             claim = claim.replace(' ','')
-            if len(re.findall('。',claim)) >= 2: # 校验多个句号
+            if len(re.findall(r'。',claim)) >= 2: # 校验多个句号
                 self.ckresult_txt += f'权利要求<{claim_index}>含有多个“。”\u2029'
                 self.dataframe_list.append(['','标点',f'权{claim_index}','含有多个"。"','-10'])
                 self.claim_check_flag = False 
@@ -5468,7 +5468,7 @@ class WindowBook(QWidget):
     def get_fore_char(self): # 获取前序部分、特征部分
         for index,claim in self.claim_dic.items():
             find_txt = []
-            for _ in ['权力要求书(.*)其特征','权利要求书(.*)其特征','权力要求(.*)其特征','权利要求(.*)其特征','1\.(.*)其特征','、(.*)其特征']:# 获取前序部分
+            for _ in ['权力要求书(.*)其特征','权利要求书(.*)其特征','权力要求(.*)其特征','权利要求(.*)其特征','1\\.(.*)其特征','、(.*)其特征']:# 获取前序部分
                 try:
                     find_txt = re.findall(_,claim[0])
                     if find_txt:
