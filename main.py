@@ -6451,15 +6451,25 @@ class QTextEditWithLineNum(QTextEdit):
         
         self.left_margin = 0
         self.line_draw_height = 2
-        self.max_width = 20
+        self.max_width = 18
         self.min_width = 8
         self.dark_color = QColor("#FB8073") # 长线条颜色
         self.light_color = QColor("#8c9196") # 短线条颜色
         # 光标在viewport上的Y坐标
         self.cursor_vp_y = 0.0
+
+        # 动画间隔100ms持续播放
+        self.wave_timer = QTimer(self)
+        self.wave_timer.setInterval(80)
+        self.wave_timer.timeout.connect(self.on_wave_tick)
+        self.wave_phase = 0
+        # 18 → 8 递减8 8 →18递增，总步数：18-8 = 10，往返一轮20步
+        self.phase_cycle_len = 20
+        self.wave_timer.start()
+
         self.verticalScrollBar().valueChanged.connect(self.update)
-        self.cursorPositionChanged.connect(self.update_cursor_y)
-        self.textChanged.connect(self.update_cursor_y)
+        self.cursorPositionChanged.connect(self.update_cursor_doc_y)
+        self.textChanged.connect(self.update_cursor_doc_y)
         
         shortcut_txt_1 = "AI功能快捷键：\nAlt+Q：AI填充\nAlt+W：AI续写\nAlt+E：AI润色\nAlt+R：概念查询\nAlt+T：文本翻译\n"
         shortcut_txt_2 = "模板快捷键：\nAlt+1：OA答复\nAlt+2：说明书\nAlt+3：权利要求书\nAlt+4：复审请求\nAlt+5：无效宣告请求\nAlt+6：AI撰写说明书\n"
@@ -6482,13 +6492,29 @@ class QTextEditWithLineNum(QTextEdit):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update)
         self.timer.start(120)
-    def update_cursor_y(self):
+
+    def update_cursor_doc_y(self):
         cursor = self.textCursor()
         rect = self.cursorRect(cursor)
-        # 转换到视口坐标
         self.cursor_doc_y = rect.y() + self.verticalScrollBar().value()
         self.update()
 
+    def on_wave_tick(self):
+        self.wave_phase = (self.wave_phase + 1) % self.phase_cycle_len
+        # 【关键】定时器触发动画帧，强制重绘viewport，持续刷新动画
+        self.viewport().update()
+
+    def get_wave_width(self, base_width, phase_offset):
+        # base_width <= 8 的线条固定为3，不参与动画
+        if base_width <= 8:
+            return 8
+        # 只有 base_width >=8 的线条参与 8~20循环
+        total_phase = (self.wave_phase + phase_offset) % self.phase_cycle_len
+        if total_phase <= 9:
+            w = 18 - total_phase
+        else:
+            w = 8 + (total_phase - 10)
+        return w
     def paintEvent(self, event):
         super().paintEvent(event)
         vp = self.viewport()
@@ -6496,12 +6522,11 @@ class QTextEditWithLineNum(QTextEdit):
         if not painter.isActive():
             return
         painter.setRenderHint(QPainter.Antialiasing, False)
-
         vp_rect = vp.rect()
         line_spacing = 10  # 文本行间距，用于生成背景线条
-        # 文档Y → 当前视口Y
-        cursor_doc_y = self.cursor_doc_y - self.verticalScrollBar().value()
-        focus_line_idx = round(cursor_doc_y / line_spacing)
+
+        cursor_vp_y = self.cursor_doc_y - self.verticalScrollBar().value()
+        focus_line_idx = round(cursor_vp_y / line_spacing)
 
         # 遍历视口内所有行，生成等间隔横线
         y = 0
@@ -6509,23 +6534,24 @@ class QTextEditWithLineNum(QTextEdit):
         while y <= end_y:
             line_idx = round(y / line_spacing)
             diff = abs(line_idx - focus_line_idx)
-            # 离光标行越近宽度越大，光标行 = max_width
-            current_w = self.max_width - diff
-            if current_w < self.min_width:
-                current_w = self.min_width
 
-            if abs(y - cursor_doc_y) < (line_spacing / 2):
+            base_width = self.max_width - diff
+            if base_width < self.min_width:
+                base_width = self.min_width
+
+            line_w = self.get_wave_width(base_width, phase_offset=diff)
+
+            if abs(y - cursor_vp_y) < (line_spacing / 2):
                 pen = QPen(self.dark_color, self.line_draw_height)
             else:
                 pen = QPen(self.light_color, self.line_draw_height)
 
             pen.setCapStyle(Qt.FlatCap)
             painter.setPen(pen)
-            x_start = self.width() - 20 #- int(y / 9)*2
-            x_end = x_start - current_w
-            p1 = QPointF(x_start, y)
-            p2 = QPointF(x_end, y)
-            painter.drawLine(p1, p2)
+
+            x_start = self.width() - 20
+            x_end = x_start - line_w
+            painter.drawLine(QPointF(x_start, y), QPointF(x_end, y))
 
             y += line_spacing
             
@@ -6538,7 +6564,7 @@ class QTextEditWithLineNum(QTextEdit):
         return 15 #_width
     def update_line_num_width(self):
         self.setViewportMargins(self.lineNumberAreaWidth() + 5, 0, 0, 0)
-    
+
     def dragMoveEvent(self, event):
         if event.mimeData().hasUrls():
             event.accept()
@@ -6546,8 +6572,8 @@ class QTextEditWithLineNum(QTextEdit):
             event.ignore()
     def dropEvent(self, event):
         self.strPathFile = event.mimeData().text().replace('file:///', '')
-        self.start_work()
-    def start_work(self):
+        self.drop_start_work()
+    def drop_start_work(self):
         if self.strPathFile.endswith('.jpg') or self.strPathFile.endswith('.png') or self.strPathFile.endswith('.bmp') or self.strPathFile.endswith('.jpeg') or self.strPathFile.endswith('.gif'):
             try:
                 image = QImage(self.strPathFile)
