@@ -27,15 +27,16 @@ def refine_array(in_array, type):
 
 def split_marks_bysort(all_marks):  # 按顺序排列
     temp_array, figmarks_array = [], []
-    temp_array = all_marks.replace('\r','\u2029').replace('\t','\u2029').replace('\n','\u2029').replace(',','，').replace(';','；').split('\u2029')
+    temp_array = re.split(r'\u2029|\r|\t|\n', all_marks.strip('\r\n\t\u2029'))
+
     for mark1 in temp_array:
         if '；' in mark1:
-            _temp = mark1.split('；')
+            _temp = re.split('；|；',mark1)
             for mark2 in _temp:
                 if len(mark2.split('、')) > 2:
                     figmarks_array += mark2.split('、')
-                elif len(mark2.split('，')) > 2:
-                    figmarks_array += mark2.split('，')
+                elif len(re.split(',|，',mark2)) > 2:
+                    figmarks_array += re.split(',|，',mark2)
                 else:
                     figmarks_array.append(mark2.replace('、', ''))
         else:
@@ -52,26 +53,24 @@ def split_marks_bysort(all_marks):  # 按顺序排列
             fig_num, fig_text = judge_mark(item.replace(' ', ''))
             if len(fig_num) == i or len(fig_num.strip('abcdefghijklmnopqrstuvwxyz')) == i:
                 figmarks_array.append(f'{fig_num} {fig_text}'.strip('，。,；;'))
-                # if len(figmarks_array) == len(all_marks.replace('\n','\u2029').split('\u2029|、|；')):
-                #     return figmarks_array
     return figmarks_array
 
 
 def split_marks(all_marks):  # 上下位排列
     temp_array, figmarks_array = [], []
-    temp_array = all_marks.replace('\r','\u2029').replace('\t','\u2029').replace('\n','\u2029').replace(',','，').replace(';','；').split('\u2029')
+    temp_array = re.split(r'\u2029|\r|\t|\n', all_marks.strip('\r\n\t\u2029'))
     for mark1 in temp_array:
-        if '；' in mark1:
-            _temp = mark1.split('；')
+        if '；' in mark1 or ';' in mark1:
+            _temp = re.split('；|；',mark1)
             for mark2 in _temp:
                 if len(mark2.split('、')) > 2:
                     figmarks_array += mark2.split('、')
-                elif len(mark2.split('，')) > 2:
-                    figmarks_array += mark2.split('，')
+                elif len(re.split(',|，',mark2)) > 2:
+                    figmarks_array += re.split(',|，',mark2)
                 else:
                     figmarks_array.append(mark2.replace('、', ''))
         else:
-            figmarks_array += re.split('、|，',mark1)
+            figmarks_array += re.split('、|，|,',mark1)
     # 将标号与文字用空格间隔
     temp_array = figmarks_array
     figmarks_array = []
@@ -152,12 +151,12 @@ def search_marks(intxt): # 获取标记名称
     intxt = intxt.replace('(', '（').replace(')', '）').replace(',', '，').replace(';', '；').replace(':', '：').replace('-', '').replace('—', '').replace('：', '').replace('为', '')
     all_array = []
     for _ in ['所述', '通过', '设置', '而且', '并且', '包括', '以及', '从', '该', '的', '且', '与', '是', '以', '将', '向', '沿', '即', '在', '有', '和', '使', '、', '；', '。', '，', '：']:
-        all_array += re.findall(f'{_}(.*?)\（\d', intxt)
-        all_array += re.findall(f'{_}(.*?)\d', intxt)
+        all_array += re.findall(rf'{_}(.*?)\（\d', intxt)
+        all_array += re.findall(rf'{_}(.*?)\d', intxt)
         all_array += re.findall(f'{_}(.*?)[a-zA-Z]', intxt)
     all_array += re.findall(f'所述(.*?组件)', intxt)
     all_array += re.findall(f'、(.*?)和', intxt)
-    all_array += re.findall(f'(.*?)\d）的', intxt)
+    all_array += re.findall(rf'(.*?)\d）的', intxt)
     all_array += re.findall(f'，(.*?)包括', intxt)
     for i in range(0, len(all_array)):
         item_temp = ''
@@ -174,7 +173,7 @@ def search_marks(intxt): # 获取标记名称
         item_temp = item.split('固定')[-1]
         if len(item_temp) >= 3:
             item = item.split('固定')[-1]
-        item = item.strip('：')
+        item = item.strip('：\u2029\r\t')
         if len(item) >= 2:
             all_array[i] = item
         else:
@@ -314,7 +313,7 @@ def completion_marks(rep_type, all_marks, new_txt):
 def delete_bracketmarks_mohu(intxt):
     del_array = []
     intxt = intxt.replace('(','（').replace(')','）')
-    del_array = re.findall('（.*?）', intxt)# + re.findall(mark+'[.*?]', intxt) + re.findall(mark+'{.*?}', intxt)
+    del_array = re.findall(f'（.*?）', intxt)# + re.findall(mark+'[.*?]', intxt) + re.findall(mark+'{.*?}', intxt)
     for item in del_array:
         intxt = intxt.replace(item, '')
     return intxt
@@ -332,16 +331,16 @@ def delete_bracketmarks(intxt,all_marks):
 # 获得附图标记 type6
 def get_figmarks(in_array, intxt):
     # 删除段号
-    para_num = re.findall('\[\d\d?\d?\d?\]',intxt)
+    para_num = re.findall(rf'\[\d\d?\d?\d?\]',intxt)
     for _ in para_num:
         intxt = intxt.replace(_,'')
     figmarks_array = []
     for item in in_array:
-        for word in ['\d{4}[a-z]', '\d{3}[a-z]', '\d{4}', '\d{2}[a-z]', '\d{3}', '\d{2}', '\d[a-z]', '\d{1}', '[a-z]']:
+        for word in [rf'\d{4}[a-z]', rf'\d{3}[a-z]', rf'\d{4}', rf'\d{2}[a-z]', rf'\d{3}', rf'\d{2}', rf'\d[a-z]', rf'\d{1}', rf'[a-z]']:
             try:
                 search_txt = re.findall(f'{item}({word})', intxt)
                 search_txt += re.findall(f'{item}（({word})）', intxt)
-                search_txt += re.findall(f'{item}\(({word})\)', intxt)
+                search_txt += re.findall(f'{item}\\(({word})\\)', intxt)
                 if search_txt and search_txt[0][0] != '0':
                     figmarks_array.append(f'{search_txt[0]}{item}')
                     break
@@ -473,7 +472,7 @@ def get_claimtree(all_forepart_array):
     for part_index,forepart in enumerate(all_forepart_array):
         if '至' in forepart and part_index != 0:
             fore_num = int(forepart.split('至')[0])
-            for search_ in ['至(\d{2})', '至(\d{1})']:
+            for search_ in [rf'至(\d{2})', rf'至(\d{1})']:
                 back_num = re.findall(search_, forepart)
                 if back_num:
                     back_num = int(back_num[0])
@@ -541,7 +540,7 @@ def get_claimtree(all_forepart_array):
 # text_component中高亮设置与mark相似的文本
 def get_similar_markindex(all_txt, mark,text_component,type_highlight_color):
     tag_index, para_index = 0, 0
-    para_array = re.split('\n', all_txt)
+    para_array = re.split('\n|\u2029', all_txt)
     similar_txt_array = []
     similar_txt = ''
     for _ in mark:
@@ -640,7 +639,7 @@ def refine_ai_claim(in_txt):
     else:
         in_txt = out_txt
         out_txt = ''
-        in_array = re.split('；|\.|\n',in_txt)
+        in_array = re.split(rf'；|\.|\n',in_txt)
         for _ in in_array:
             out_txt += f'{_}；'
         return out_txt.replace('，；','；')
@@ -648,7 +647,7 @@ def refine_ai_claim(in_txt):
 
 def refine_ai_others(in_txt):
     out_txt= ''
-    in_array = re.split('；|\.|。|\n',in_txt)
+    in_array = re.split(rf'；|\.|。|\n',in_txt)
     for _ in in_array:
         out_txt += f'{_}；'
     return out_txt.replace('，；','；')
@@ -657,33 +656,33 @@ def refine_ai_others(in_txt):
         
 def refine_mutilines(in_txt):
     # 删除OCR识别的多余内容
-    all_txt_array = in_txt.replace('\r','').replace('\u2029','\n').split('\n')
+    all_txt_array = re.split('\r|\n|\t|\u2029',in_txt.strip('\r\n\t\u2029'))
     all_txt = ''
     for _ in all_txt_array:
-        del_txt = re.findall('\d.*?说 明 书.*?页',_,re.S) + re.findall('CCNN|CN.*?页',_,re.S)# re.findall('\d.*?/.*?页',_) 
+        del_txt = re.findall(rf'\d.*?说 明 书.*?页',_,re.S) + re.findall(f'CCNN|CN.*?页',_,re.S)# re.findall(f'\d.*?/.*?页',_) 
         if del_txt:
             _ = _.replace(del_txt[0],'')
         if not _:
             continue
         if _[-1] == '。':
-            all_txt += (_ + '\n')
+            all_txt += (_ + '\u2029')
         else:
             all_txt += _
     # 说明书分段
-    all_txt = all_txt.replace('。[','。\n[').replace(' .','. ')
+    all_txt = all_txt.replace('。[','。\u2029[').replace(' .','. ')
     for _ in ['技术领域','背景技术','发明内容','实用新型内容','附图说明','具体实施方式']:
-        all_txt = all_txt.replace(f'{_}[',f'{_}\n[').replace(f'{_}',f'{_}\n')
+        all_txt = all_txt.replace(f'{_}[',f'{_}\u2029[').replace(f'{_}',f'{_}\u2029')
     # 权利要求换行
     for i in range(1,50):
-        all_txt = all_txt.replace(f'。{i}.',f'。\n{i}.')
-    all_txt = all_txt.replace('技术领域\n','\n技术领域\n').replace('技术领域\n，','技术领域，').replace('\n技术领域\n。','技术领域。').replace('\n技术领域，','技术领域，').replace('；[','；\n[').replace('：[','；\n[').replace('\n\n','\n')
+        all_txt = all_txt.replace(f'。{i}.',f'。\u2029{i}.')
+    all_txt = all_txt.replace('技术领域\u2029','\u2029技术领域\u2029').replace('技术领域\u2029，','技术领域，').replace('\u2029技术领域\u2029。','技术领域。').replace('\u2029技术领域，','技术领域，').replace('；[','；\u2029[').replace('：[','；\u2029[').replace('\u2029\u2029','\u2029')
     
     return all_txt
 
 
 # 获取所有附图标记
 def get_mark_nums(in_txt): 
-    part_array = re.findall('（.*?）',in_txt)
+    part_array = re.findall(f'（.*?）',in_txt)
     part_array = list(set(part_array))
     part_array.sort()
     return part_array
