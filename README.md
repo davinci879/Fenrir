@@ -50,7 +50,11 @@
 
 1.3 隐藏了原有滚动条，改为脉动效果，最高点为橙色，并且随光标运动
 
-<img width="68" height="622" alt="图片" src="https://github.com/user-attachments/assets/6672c3dd-045e-4e89-b849-e1d3d6898b95" />
+<img width="68" height="622" alt="图片" src="https://github.com/user-attachments/assets/4a998a23-202a-42a9-b1b6-bd8e8713d541" />
+
+
+
+
 
 
 **Fenrir V3.5.14 更新说明**
