@@ -936,7 +936,7 @@ class MainWindow(QMainWindow):
         self.search_fill_1.setMaximumWidth(600)
         self.search_fill_1.setFixedHeight(25)
 
-        self.search_box = BreathTextEdit()
+        self.search_box = QLineEdit()
         font = QFont()
         font.setPointSize(9)
 
@@ -2400,7 +2400,7 @@ class MainWindow(QMainWindow):
         self.tab_name_widget.setFixedSize(220,50)
         self.tab_name_widget.setWindowFlags(Qt.FramelessWindowHint) # 隐藏标题栏
 
-        self.tab_name_text = BreathTextEdit()
+        self.tab_name_text = QLineEdit()
         self.tab_name_text.setPlaceholderText('输入文档标题')
         self.tab_name_text.setMinimumHeight(30)
         self.tab_name_text.setMinimumWidth(200)
@@ -3568,7 +3568,7 @@ class MainWindow(QMainWindow):
         global global_active_textcomponent,global_active_figmark
         # 统一标点符号
         cursor = global_active_textcomponent.textCursor()
-        select_txt = cursor.selectedText().strip('\u2029\r\t')
+        select_txt = cursor.selectedText().strip(r'\u2029\r\t')
         select_txt = refine_intxt(select_txt)
         if select_txt:
             # 给附图标记加括号
@@ -4268,8 +4268,7 @@ class MainWindow(QMainWindow):
         array_txt = global_active_figmark.toPlainText().replace(' ','')
         for i in '0123456789':
             array_txt = array_txt.replace(i,'')
-        # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_before)
-        # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_after)
+    
     def fn_more(self):
         global rep_model
         if rep_model == 1:
@@ -4480,15 +4479,7 @@ class MainWindow(QMainWindow):
         self.word_array = self.text_genword.toPlainText().replace('\n','\u2029').strip('\u2029\r ').split('\u2029')
         self.word_array = list(set(self.word_array))
         self.image_keywords()
-        # cursor = global_active_textcomponent.textCursor()
-        # cursor.movePosition(QTextCursor.Left, 2)
-        # cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(self.ori_keywords)-1)
-        # cursor.deleteChar()
-        # cursor.insertText(self.out_keywords)
-        # self.total_key = ''
-        # self.word_array = ''
-        # self.out_keywords = ''
-        # self.ori_keywords = ''
+        
     def image_keywords(self):
         for _ in self.word_array:
             if len(_) >= 5:
@@ -4675,134 +4666,6 @@ class MainWindow(QMainWindow):
                 self.word_array = ''
                 if self.window_show:self.window_show.close()
                 break
-class LoginWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        global window_main
-        self.dragging = False
-        self.in_widget = window_main
-        txt_read = open('login.txt', 'r', encoding='utf-8').read()
-        self.user_login = ''
-        self.user_password = ''
-        self.user_superkey = ''
-        try:
-            self.user_login = txt_read.split('\n')[0].split('=')[-1]
-            self.user_password = txt_read.split('\n')[1].split('=')[-1]
-            self.user_superkey = txt_read.split('\n')[2].split('=')[-1]
-        except:
-            self.user_login = ''
-            self.user_password = ''
-        self.closeEvent = self.closeEvent
-        self.login_ui()
-            
-    def closeEvent(self,event):
-        self.close()
-        if self.in_widget:self.in_widget.close()
-
-    def login_ui(self):
-        self.status_wait = False
-        self.user_level = ''
-        self.fig_txt_array_temp = []
-        self.main_login_layout = QGridLayout(self)
-        self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.setWindowTitle(f"FENRIR ver{version}")
-        self.setWindowFlags(Qt.FramelessWindowHint) # 隐藏标题栏
-        # logo
-        self.label_logo = QLabel()
-        self.label_logo.setToolTip('点击')
-        self.label_logo.setMaximumHeight(300)
-        self.label_logo.setScaledContents(True)
-        self.label_logo.mousePressEvent = self.change_pic
-
-        self.change_pic(self.event)
-        # 获取窗口坐标系
-        screen = QDesktopWidget().screenGeometry()
-        size = self.geometry()
-        self.setFixedSize(350, 420)
-        self.move(int((screen.width() - size.width()) / 2)+150, int((screen.height() - size.height()) / 2))
-        self.mousePressEvent = self.start_drag
-        self.mouseReleaseEvent = self.window_pressrelease
-        self.closeEvent = self.closeEvent
-
-        self.text_user = QLineEdit()
-        self.text_user.setPlaceholderText('用户名')
-        self.text_user.setMaximumHeight(30)
-        self.text_user.setMinimumWidth(300)
-        self.text_user.insert(self.user_login)
-
-        self.text_password = QLineEdit()
-        self.text_password.setPlaceholderText('密码')
-        self.text_password.setMaximumHeight(30)
-        self.text_password.setMinimumWidth(300)
-        self.text_password.insert(self.user_password)
-        self.text_password.setEchoMode(QLineEdit.Password)
-
-        self.bt_login = QPushButton(QIcon(qta.icon('fa5b.wolf-pack-battalion')),'')
-        self.bt_login.setIconSize(QSize(40, 40))
-        self.bt_login.setMaximumHeight(40)
-        self.bt_login.setToolTip('账号注册请访问 http://www.fenrir.fun/register')
-        self.bt_login.clicked.connect(self.fn_login)
-        
-        self.label_login_status = QLabel()
-        self.label_login_status.setStyleSheet("color : red")
-
-        self.main_login_layout.addWidget(self.label_logo,0,0,2,2)
-        self.main_login_layout.addWidget(self.text_user,5,0,1,2)
-        self.main_login_layout.addWidget(self.text_password,6,0,1,2)
-        self.main_login_layout.addWidget(self.bt_login,7,0,1,2)
-        
-        self.show()
-    def window_pressrelease(self,event):
-        self.dragging = False
-    def start_drag(self, event):
-        self.dragging = True
-        self.old_pos = event.globalPos()
-    def mouseMoveEvent(self, event):
-        if self.dragging:
-            delta = QPoint(event.globalPos() - self.old_pos)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = event.globalPos()
-            self.move(QCursor().pos().x() - 150,QCursor().pos().y() - 150)
-        
-    def change_pic(self,event):
-        self.old_pos = self.pos()
-        self.dragging = True
-        index = int(random.randint(1,6))
-        self.movie = QMovie("./ui/%02d.gif" % index)
-        self.label_logo.setMovie(self.movie)
-        self.movie.start()
-    def fn_login(self):
-        user = self.text_user.text()
-        password = self.text_password.text()
-        if not user:
-            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-            self.label_login_status.setText('请输入用户名')
-            return
-        elif not password:
-            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-            self.label_login_status.setText('请输入密码')
-            return
-        else:
-            self.label_login_status.setText('')
-            data = {"username": user,
-                    "password": password,
-                    }
-            try:
-                response = requests.post('http://www.fenrir.fun/postlogin', data=data)
-            except:
-                QMessageBox.critical(self, "连接失败", "服务器连接失败，请联系管理员")
-                return
-            json_data = json.loads(response.text)
-            if json_data['Status'] == 'OK':
-                txt_write = open('login.txt', 'r', encoding='utf-8').read().replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[0], '[user]=' + user).replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[1], '[password]=' + password)
-                open('login.txt', 'w+', encoding='utf-8').write(txt_write)
-                self.close()
-                self.in_widget.show()
-                self.setWindowTitle(f"FENRIR ver{version} | {user}")
-                self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-            else:
-                self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-                self.label_login_status.setText('用户名或密码错误，请重试！')
 
 class WindowBook(QWidget):
     def __init__(self,active_figmark,active_textcomponent,status,dock_mark):
@@ -4854,7 +4717,7 @@ class WindowBook(QWidget):
 
         self.text_checkresult = QTextBrowser()
         self.text_checkresult.setFont(QFont("宋体", 11))
-        self.text_checkresult.setPlaceholderText('> 请选择待校验的文档\n***无需在此处粘贴任何文本***\n***附图标记不能为空***\n> 校验说明书\n请以“技术领域、背景技术、发明内容/实用新型内容、附图说明、具体实施方式”分段\n> 校验权利要求书\n***每项权利要求尽量撰写在一段中***\n***最多支持50项权利要求***')
+        self.text_checkresult.setPlaceholderText('> 请选择待校验的文档\n***无需在此处粘贴任何文本***\n***附图标记不能为空***\n> 校验说明书\n请以“技术领域、背景技术、发明内容/实用新型内容、附图说明、具体实施方式”分段\n> 校验权利要求书\n***权利要求尽量不要分段***\n***最多支持50项权利要求***')
         self.text_checkresult.mouseReleaseEvent = self.fn_highlight_figmarks_2
         self.text_checkresult.setMinimumWidth(300)
 
@@ -5707,7 +5570,7 @@ class Worker_ai_doubao(QThread):
         self.in_txt = in_txt
         if not user:
             self.client = Ark(ak="", sk="")
-            self.model = ''
+            self.model = 'ep-20250722155445-m4sqq'
         else:
             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
             ak = doubao_array[0]
@@ -6357,6 +6220,7 @@ class OcrDropTextEdit(QTextEdit):
         self.setPlaceholderText("按照下述格式粘贴后，将自动整理格式\n例1：\n1壳体、2把手、3内壁\n例2：\n1壳体、11把手；2内壁\n例3：\n1壳体；2把手；3内壁\n例4：\n1壳体，2把手，3内壁")
         self.setToolTip('按Ctrl点击相应标记，可同时高亮显示多个技术特征')
         self.setUndoRedoEnabled(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # 隐藏垂直滚动条
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasUrls():
@@ -6402,7 +6266,7 @@ class Worker_Start(QThread):
             self.count += 1
             time.sleep(0.5)
         self.progress.emit(self.count)
-class Window_Start(QWidget):
+class Window_Start(QWidget):# 启动界面
     def __init__(self):
         super().__init__()
         self.start_ui()
@@ -6444,6 +6308,7 @@ class Window_Start(QWidget):
 
         self.start_layout.addWidget(self.label_logo,1,0)
         self.show()
+
 class QTextEditWithLineNum(QTextEdit):
     sendmsg = pyqtSignal(object)
     def __init__(self, parent=None):
@@ -6489,9 +6354,6 @@ class QTextEditWithLineNum(QTextEdit):
         # self.cursorPositionChanged.connect(self.lineNumberArea.update)
         self.update_line_num_width()
         self.counter = 0
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update)
-        self.timer.start(120)
 
     def update_cursor_doc_y(self):
         cursor = self.textCursor()
@@ -6505,16 +6367,20 @@ class QTextEditWithLineNum(QTextEdit):
         self.viewport().update()
 
     def get_wave_width(self, base_width, phase_offset):
-        # base_width <= 8 的线条固定为3，不参与动画
-        if base_width <= 8:
-            return 8
-        # 只有 base_width >=8 的线条参与 8~20循环
         total_phase = (self.wave_phase + phase_offset) % self.phase_cycle_len
-        if total_phase <= 9:
-            w = 18 - total_phase
+        # base_width<= 12：8~12往返动画
+        if base_width <= 9:
+            if total_phase <= 7:
+                w = 12 - total_phase * (2 / 9)
+            else:
+                w = 8 + (total_phase - 10) * (2 / 9)
+            return w
         else:
-            w = 8 + (total_phase - 10)
-        return w
+        # base_width >= 12 的线条参与 8~18循环
+            if total_phase <= 9:
+                w = 18 - total_phase
+            else:
+                w = 8 + (total_phase - 10)
     def paintEvent(self, event):
         super().paintEvent(event)
         vp = self.viewport()
@@ -6651,70 +6517,7 @@ class QTextEditWithLineNum(QTextEdit):
             top = bottom
             bottom = top + int(self.document().documentLayout().blockBoundingRect(block).height())
             blockNumber += 1
-    def update(self):
-        if self.counter % 30 == 0:
-            self.setStyleSheet("QTextEdit {border: 1px solid #19232d;}")
-        elif self.counter % 30 == 1:
-            self.setStyleSheet("QTextEdit {border: 1px solid #212f3c;}")
-        elif self.counter % 30 == 2:
-            self.setStyleSheet("QTextEdit {border: 1px solid #2a3a4b;}")
-        elif self.counter % 30 == 3:
-            self.setStyleSheet("QTextEdit {border: 1px solid #32465a;}")
-        elif self.counter % 30 == 4:
-            self.setStyleSheet("QTextEdit {border: 1px solid #3a5269;}")
-        elif self.counter % 30 == 5:
-            self.setStyleSheet("QTextEdit {border: 1px solid #435d78;}")
-        elif self.counter % 30 == 6:
-            self.setStyleSheet("QTextEdit {border: 1px solid #4b6987;}")
-        elif self.counter % 30 == 7:
-            self.setStyleSheet("QTextEdit {border: 1px solid #547596;}")
-        elif self.counter % 30 == 8:
-            self.setStyleSheet("QTextEdit {border: 1px solid #5c80a5;}")
-        elif self.counter % 30 == 9:
-            self.setStyleSheet("QTextEdit {border: 1px solid #648cb4;}")
-        elif self.counter % 30 == 10:
-            self.setStyleSheet("QTextEdit {border: 1px solid #6d98c3;}")
-        elif self.counter % 30 == 11:
-            self.setStyleSheet("QTextEdit {border: 1px solid #75a3d2;}")
-        elif self.counter % 30 == 12:
-            self.setStyleSheet("QTextEdit {border: 1px solid #7dafe1;}")
-        elif self.counter % 30 == 13:
-            self.setStyleSheet("QTextEdit {border: 1px solid #86bbf0;}")
-        elif self.counter % 30 == 14:
-            self.setStyleSheet("QTextEdit {border: 1px solid #8ec7ff;}")
-        elif self.counter % 30 == 15:
-            self.setStyleSheet("QTextEdit {border: 1px solid #8ec7ff;}")
-        elif self.counter % 30 == 16:
-            self.setStyleSheet("QTextEdit {border: 1px solid #8ec7ff;}")
-        elif self.counter % 30 == 17:
-            self.setStyleSheet("QTextEdit {border: 1px solid #86bbf0;}")
-        elif self.counter % 30 == 18:
-            self.setStyleSheet("QTextEdit {border: 1px solid #7dafe1;}")
-        elif self.counter % 30 == 19:
-            self.setStyleSheet("QTextEdit {border: 1px solid #75a3d2;}")
-        elif self.counter % 30 == 20:
-            self.setStyleSheet("QTextEdit {border: 1px solid #6d98c3;}")
-        elif self.counter % 30 == 21:
-            self.setStyleSheet("QTextEdit {border: 1px solid #648cb4;}")
-        elif self.counter % 30 == 22:
-            self.setStyleSheet("QTextEdit {border: 1px solid #5c80a5;}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QTextEdit {border: 1px solid #547596;}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QTextEdit {border: 1px solid #4b6987;}")
-        elif self.counter % 30 == 24:
-            self.setStyleSheet("QTextEdit {border: 1px solid #435d78;}")
-        elif self.counter % 30 == 25:
-            self.setStyleSheet("QTextEdit {border: 1px solid #3a5269;}")
-        elif self.counter % 30 == 26:
-            self.setStyleSheet("QTextEdit {border: 1px solid #32465a;}")
-        elif self.counter % 30 == 27:
-            self.setStyleSheet("QTextEdit {border: 1px solid #2a3a4b;}")
-        elif self.counter % 30 == 28:
-            self.setStyleSheet("QTextEdit {border: 1px solid #212f3c;}")
-        if self.counter % 30 == 29:
-            self.setStyleSheet("QTextEdit {border: 1px solid #11171e;}")
-        self.counter += 1
+    
 class LineNumPaint(QWidget):
     def __init__(self, q_edit):
         super().__init__(q_edit)
@@ -6724,151 +6527,6 @@ class LineNumPaint(QWidget):
     def paintEvent(self, event):
         self.q_edit_line_num.lineNumberAreaPaintEvent(event)
     
-class BreathLineEdit(QLineEdit): # 呼吸灯
-    def __init__(self):
-        global version
-        super().__init__()
-        self.counter = 0      
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update)
-        self.timer.start(140)
-    def update(self):
-        if self.counter % 30 == 0:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #19232d;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 1:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #212f3c;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 2:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #2a3a4b;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 3:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #32465a;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 4:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #3a5269;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 5:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #435d78;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 6:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #4b6987;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 7:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #547596;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 8:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #5c80a5;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 9:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #648cb4;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 10:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #6d98c3;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 11:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #75a3d2;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 12:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #7dafe1;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 13:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #86bbf0;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 14:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #8ec7ff;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 15:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #8ec7ff;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 16:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #8ec7ff;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 17:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #86bbf0;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 18:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #7dafe1;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 19:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #75a3d2;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 20:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #6d98c3;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 21:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #648cb4;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 22:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #5c80a5;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #547596;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #4b6987;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 24:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #435d78;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 25:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #3a5269;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 26:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #32465a;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 27:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #2a3a4b;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 28:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #212f3c;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        if self.counter % 30 == 29:
-            self.setStyleSheet("QLineEdit {background-color: black;color: white; border: 1px solid #11171e;} QLineEdit:focus{background-color:#212e3b;color: white}")
-        self.counter += 1
-
-class BreathTextEdit(QTextEdit): # 呼吸灯
-    def __init__(self):
-        global version
-        super().__init__()
-        self.counter = 0
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update)
-        self.timer.start(150)
-    def update(self):
-        if self.counter % 30 == 0:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #19232d;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 1:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #212f3c;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 2:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #2a3a4b;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 3:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #32465a;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 4:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #3a5269;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 5:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #435d78;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 6:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #4b6987;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 7:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #547596;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 8:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #5c80a5;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 9:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #648cb4;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 10:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #6d98c3;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 11:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #75a3d2;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 12:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #7dafe1;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 13:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #86bbf0;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 14:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #8ec7ff;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 15:
-            pass
-        elif self.counter % 30 == 16:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #8ec7ff;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 17:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #86bbf0;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 18:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #7dafe1;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 19:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #75a3d2;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 20:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #6d98c3;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 21:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #648cb4;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 22:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #5c80a5;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #547596;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 23:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #4b6987;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 24:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #435d78;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 25:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #3a5269;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 26:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #32465a;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 27:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #2a3a4b;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        elif self.counter % 30 == 28:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #212f3c;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        if self.counter % 30 == 29:
-            self.setStyleSheet("QTextEdit {background-color: black;color: white; border: 1px solid #11171e;} QTextEdit:focus{background-color:#212e3b;color: white}")
-        self.counter += 1
 class NewWindow(QWidget):
     def __init__(self,tab_index):
         super().__init__()
@@ -6883,7 +6541,6 @@ class NewWindow(QWidget):
 
         self.mousePressEvent = self.mouse_press_event
         # self.new_text_editor.mousePressEvent = self.mouse_press_event
-
         self.new_layout.addWidget(self.new_mark_editor, 0, 0, 1, 1)
         self.new_layout.addWidget(self.new_text_editor, 0, 1, 1, 1)
 
@@ -6944,6 +6601,7 @@ messages = []
 xinghuo_messages = []
 model_api = 'Doubao'
 deep_model = 'deepseek-chat'
+
 if __name__ == '__main__':
     ct = win32api.GetConsoleTitle()
     hd = win32gui.FindWindow(0, ct)
