@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall(r'font-size:\d+pt',ori_html) + re.findall(r'font-size:\d+pt',ori_html)
+            find_txt = re.findall(rf'font-size:\d+pt',ori_html) + re.findall(rf'font-size:\d+pt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall(r'font-size:\d\dpt',ori_html) + re.findall(r'font-size:\dpt',ori_html)
+            find_txt = re.findall(rf'font-size:\d\dpt',ori_html) + re.findall(rf'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
             ori_html = global_active_textcomponent.toHtml()
-            find_txt = re.findall(r'font-size:\d\dpt',ori_html) + re.findall(r'font-size:\dpt',ori_html)
+            find_txt = re.findall(rf'font-size:\d\dpt',ori_html) + re.findall(rf'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
             global_active_textcomponent.setHtml(ori_html)
@@ -620,10 +620,10 @@ class MainWindow(QMainWindow):
         global line_height
         line_height = round(float(self.combo_lineheight.currentText()),1)
         ori_html = global_active_textcomponent.toHtml()
-        find_txt = re.findall(r'margin-top:\d\dpx',ori_html) + re.findall(r'margin-top:\dpx',ori_html)
+        find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-top:{line_height*5}px')
-        find_txt = re.findall(r'margin-bottom:\d\dpx',ori_html) + re.findall(r'margin-bottom:\dpx',ori_html)
+        find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-bottom:{line_height*5}px')
         global_active_textcomponent.setHtml(ori_html)
@@ -664,10 +664,10 @@ class MainWindow(QMainWindow):
         cursor.setCharFormat(format)
 
         ori_html = global_active_textcomponent.toHtml()
-        find_txt = re.findall(r'margin-top:\d\dpx',ori_html) + re.findall(r'margin-top:\dpx',ori_html)
+        find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-top:0px')
-        find_txt = re.findall(r'margin-bottom:\d\dpx',ori_html) + re.findall(r'margin-bottom:\dpx',ori_html)
+        find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-bottom:0px')
         global_active_textcomponent.clear()
@@ -693,20 +693,29 @@ class MainWindow(QMainWindow):
         self.fn_reset_allformat()
         # line_height = int(self.combo_lineheight.currentText())
         format_array = open('./data/format_array.txt','r',encoding='utf-8').read().split()
+        # 序号加粗
         for i in range(1,30):
             format_array.append(f'步骤S{i}')
+            format_array.append(f'步骤K{i}')
+            format_array.append(f'步骤P{i}')
             format_array.append(f'步骤{i}')
             format_array.append(f'实施例{i}')
+            format_array.append(f'区别特征{i}')
+            format_array.append(f'区别技术特征{i}')
+            format_array.append(f'针对区别技术特征{i}')
+            format_array.append(f'对于区别技术特征{i}')
+            format_array.append(f'基于区别技术特征{i}，其实际所要解决的技术问题是')
             format_array.append(f'证据{i}')
             format_array.append(f'{i}：')
-            format_array.append(f'{i}\\.')
+            format_array.append(rf'{i}\.')
+            format_array.append(f'D{i}')
             format_array.append(f'\u2029{i}\\.')
             format_array.append(f'\u2029{i}、')
+        # 段号加粗
         for i in range(1,999):
-            format_array.append(f'\u2029\\[%04d]' % i)
+            format_array.append(f'\u2029[%04d]' % i)
         font_format = QTextCharFormat()
         font_format.setFontWeight(QFont.Bold)
-        # global_active_textcomponent.setStyleSheet('margin-bottom: 20px; margin-top: 20px;')
 
         cursor = global_active_textcomponent.textCursor()
         for _ in format_array:
@@ -1297,8 +1306,8 @@ class MainWindow(QMainWindow):
             self.fn_animation(self.window_symbol,0.0,1.0)
             self.animation.start()
             self.window_symbol.show()
-
-        self.auto_complete(self.text_genword.toPlainText().split('\n') + global_active_figmark.toPlainText().split('\n'),self.text_tool_highlight)
+        in_array = re.split('\n|\u2029',self.text_genword.toPlainText()) + re.split('\n|\u2029',global_active_figmark.toPlainText())
+        self.auto_complete(in_array,self.text_tool_highlight)
 
     def fn_marktab_changed(self):
         global tab_widget_mark,mark_editor_array
@@ -2090,25 +2099,18 @@ class MainWindow(QMainWindow):
         array_2 = ['≦','≧','≡','×','÷','≤','≥','≈','≠','∞','∝','∽','∈','±','※','√','≌','∫','‰','℅','∮','△']
         array_3 = ['→','←','↑','↓','↘','↖','↗','↙']
         array_4 = ['Αα','Ββ','Γγ','Δδ','Εε','Ζζ','Ηη','Θθ','Ιι','Κκ','Λλ','Μμ','Νν','Ξξ','Ππ','Ρρ','Σσ','Ττ','Υυ','Φφ','Χχ','Ψψ','Ωω']
-        array_5 = ['kg/m3','g/cm3','°','℃','℉','km','cm','mm','μm','nm','kg','mg','μg','ng','lbs','kPa','MPa','bar','kw·h','GW','m/s','km/h']
+        array_5 = ['kg/m3','g/cm3','°','℃','℉','km','cm','mm','μm','nm','kg','mg','μg','ng','lbs','kPa','MPa','bar','kw·h','GW','m/s','km/h','dB']
 
         lb_array_1 = [Label_Symbol(global_active_textcomponent,array_1[i]) for i in range(len(array_1))]
         lb_array_2 = [Label_Symbol(global_active_textcomponent,array_2[i]) for i in range(len(array_2))]
         lb_array_3 = [Label_Symbol(global_active_textcomponent,array_3[i]) for i in range(len(array_3))]
         lb_array_4 = [Label_Symbol(global_active_textcomponent,array_4[i]) for i in range(len(array_4))]
         lb_array_5 = [Label_Symbol(global_active_textcomponent,array_5[i]) for i in range(len(array_5))]
-
-        label_symbol_logo = QLabel()
-        movie = QMovie(f"./ui/news.gif")
-        label_symbol_logo.setScaledContents(True)
-        label_symbol_logo.setMovie(movie)
-        label_symbol_logo.setFixedSize(230,60)
         
-        bt_close = QPushButton('X')
+        bt_close = QPushButton('×')
         bt_close.setToolTip('关闭')
+        bt_close.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
         bt_close.clicked.connect(self.symbol_close)
-        movie.start()
-        self.layout_windowsymbol.addWidget(label_symbol_logo,0,0,1,line_length)
         self.layout_windowsymbol.addWidget(QLabel('<标点>'),1,0,1,1)
         self.layout_windowsymbol.addWidget(bt_close,1,line_length-1,1,1)
 
@@ -2219,35 +2221,6 @@ class MainWindow(QMainWindow):
             html = f"<img src=\"{file_path}\" alt=\"{os.path.basename(file_path)}\" width=\"{width}\" height=\"{height}\" />"
             cursor.insertHtml(html)
  
-    def show_new_window(self):
-        global tab_count_array,tab_widget_text,tab_widget_mark,window_show_array,text_editor_array,mark_editor_array,window_show_text_array,window_show_mark_array
-        global global_active_textcomponent,global_active_figmark
-        self.index = tab_widget_text.currentIndex()
-        if self.index == -1:
-            return
-        tab_widget_text.removeTab(self.index)
-        tab_widget_mark.removeTab(self.index)
-        # 校正 self.index
-        for _ in tab_count_array:
-            if _ <= self.index:
-                self.index += 1
-        tab_count_array.append(self.index)
-
-        tab_name = self.tab_name_array[self.index]
-        new_window = window_show_array[self.index]
-        new_window.setWindowTitle(tab_name)
-        
-        all_txt = open(f'./data/text_saver_{self.index + 1}.html','r',encoding='utf-8').read()
-        marks_txt = open(f'./data/marks_saver_{self.index + 1}.txt', 'r', encoding='utf-8').read()
-
-        new_window.new_text_editor.setHtml(all_txt)
-        new_window.new_mark_editor.setPlainText(marks_txt)
-
-        global_active_textcomponent = new_window.new_text_editor
-        global_active_figmark = new_window.new_mark_editor
-
-        new_window.setGeometry(400, 400, 800, 600)   
-        new_window.show()
     def fn_tabbar_click(self):
         self.tab_drag_flag = True
         self.start_drag_pos = (QCursor.pos().x(),QCursor.pos().y())
@@ -2258,24 +2231,18 @@ class MainWindow(QMainWindow):
         abs_y = abs(self.end_drag_pos[1] - self.start_drag_pos[1])
         # print('Start_point',self.start_drag_pos,'Abs_x,Abs_y',abs_x,abs_y,self.tab_drag_flag)
         if self.start_drag_pos != (0,0) and self.tab_drag_flag and (abs_x > 0 or abs_y > 0):
-            self.show_new_window()
             self.start_drag_pos = (0,0)
             self.tab_drag_flag = False
-    def fn_tabbar_mousepress_event(self,event):
-        if event.button() == 2:
-            self.show_new_window()
+
     def add_texteditors(self):
-        global tab_widget_text,text_editor_array,window_show_array,window_show_text_array,window_show_mark_array,global_active_textcomponent,global_active_figmark
+        global tab_widget_text,text_editor_array,window_show_text_array,window_show_mark_array,global_active_textcomponent,global_active_figmark 
         # 多标签文本
         tab_widget_text = QTabWidget()
         tab_widget_text.setMouseTracking(True)
-        tab_widget_text.tabBarClicked.connect(self.fn_tabbar_click)
-        tab_widget_text.mouseMoveEvent = self.fn_tabbar_move
-        # tab_widget_text.mousePressEvent = self.fn_tabbar_mousepress_event
+
         text_editor_array = [QTextEditWithLineNum() for i in range(30)]
         window_show_text_array = [QTextEditWithLineNum() for i in range(30)]
         window_show_mark_array = [OcrDropTextEdit() for i in range(30)]
-        window_show_array = [NewWindow(i) for i in range(30)]
         
         self.contextMenu_array = [_ for _ in range(30)]
         global_active_textcomponent = text_editor_array[0]
@@ -2979,7 +2946,7 @@ class MainWindow(QMainWindow):
         # 输出结果
         return '\n'.join(mark_array)
     def fn_textuserword_focusout(self,event):
-        all_txt_array = self.text_genword.toPlainText().replace('\n','\u2029').strip('\u2029\r ').split('\u2029')
+        all_txt_array = re.split('\n|\u2029',self.text_genword.toPlainText().strip('\r\t\n\u2029'))
         all_txt_array = refine_array(all_txt_array, 'set')
         all_txt_array.sort()
         self.text_genword.clear()
@@ -3355,8 +3322,8 @@ class MainWindow(QMainWindow):
         repeat_mark_dic = {}
         cursor = global_active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
-        figmarks_array = all_marks.replace('\r','\u2029').replace('\t','\u2029').replace('\n','\u2029').replace(',','，').replace(';','；').split('\u2029')
+        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('	', ' ').replace(',','，').strip('。\r\n\t\u2029')
+        figmarks_array = re.split('\r|\n|\t|\u2029',all_marks)
         # 判断重复标记
         for item_1 in figmarks_array:
             for item_2 in figmarks_array:
@@ -3592,7 +3559,7 @@ class MainWindow(QMainWindow):
         select_txt = cursor.selectedText().strip('\u2029\r\t')
         if select_txt:
             new_select_txt = select_txt
-            del_array = re.findall(r'\\[\d\d\d\d\\]',select_txt)
+            del_array = re.findall(rf'\[\d\d\d\d\]',select_txt)
             for _ in del_array:
                 new_select_txt = new_select_txt.replace(_ + ' \u2029','').replace(_ + '\u2029','').replace(_ + ' ','').replace(_,'')
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
@@ -3609,7 +3576,7 @@ class MainWindow(QMainWindow):
         para_array = []
         para_index = 1
         for para in txt_array:
-            # 删除短号
+            # 删除段号
             if para.strip('\n\u2029\r\t') in '技术领域 背景技术 发明内容 实用新型内容 附图说明 具体实施方式'.split(' ') or para == '':
                 para_array.append(para)
             # 增加短号
@@ -3790,8 +3757,10 @@ class MainWindow(QMainWindow):
         if model_type == '联想':
             self.get_totalkeys()
             try:
-                if self.checkbox_markcheck.checkState() == 2: # 查找未使用标记
+                # 高亮未使用标记
+                if self.checkbox_markcheck.checkState() == 2: 
                     self.check_text_figmarks_unused()
+                # 编号联想输入
                 elif event.key() in [i for i in range(48,58)] or event.key() in [i for i in range(65,72)] and write_auto == '关闭':  # '1234567890abcdefg'未选中自动补全附图标记
                     self.get_word_array()
                     modifiers = event.modifiers()
@@ -3804,7 +3773,8 @@ class MainWindow(QMainWindow):
                     elif modifiers & (Qt.ControlModifier | Qt.AltModifier):
                         return
                     self.fn_show_window()
-                elif self.checkbox_userwords.checkState() == 2 and self.total_key and event.modifiers() == Qt.ControlModifier and event.key() == 96:
+                # 关键词联想输入
+                elif self.checkbox_userwords.checkState() == 2 and self.total_key and event.modifiers() == Qt.ControlModifier and event.key() == 96: 
                     self.fn_show_window_keywords()
                 elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_Return: # 判断序号 并自动续写
                     cursor = global_active_textcomponent.textCursor()
@@ -3813,6 +3783,7 @@ class MainWindow(QMainWindow):
                     cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,2) # 包括前文1段内容
                     base_txt = cursor.selectedText()
                     cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                
                 if base_txt[0:2] == '步骤':
                     base_num = base_txt[2]
                     cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock)
@@ -4268,7 +4239,8 @@ class MainWindow(QMainWindow):
         array_txt = global_active_figmark.toPlainText().replace(' ','')
         for i in '0123456789':
             array_txt = array_txt.replace(i,'')
-    
+        # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_before)
+        # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_after)
     def fn_more(self):
         global rep_model
         if rep_model == 1:
@@ -4329,8 +4301,9 @@ class MainWindow(QMainWindow):
             self.window_rep.hide()
             self.on_lineheight_changed()
         elif rep_model == 1:
-            before_array = self.text_rep_left.toPlainText().strip('\n\u2029').split('\n')
-            end_array = self.text_rep_right.toPlainText().strip('\n\u2029').split('\n')
+            before_array = re.split('\n | \u2029',self.text_rep_left.toPlainText().strip('\n\u2029'))
+            end_array = re.split('\n | \u2029',self.text_rep_right.toPlainText().strip('\n\u2029'))
+            
             all_txt = global_active_textcomponent.toHtml()
             if before_array and len(before_array) == len(end_array):
                 for i in range(0,len(before_array)):
@@ -4479,7 +4452,15 @@ class MainWindow(QMainWindow):
         self.word_array = self.text_genword.toPlainText().replace('\n','\u2029').strip('\u2029\r ').split('\u2029')
         self.word_array = list(set(self.word_array))
         self.image_keywords()
-        
+        # cursor = global_active_textcomponent.textCursor()
+        # cursor.movePosition(QTextCursor.Left, 2)
+        # cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(self.ori_keywords)-1)
+        # cursor.deleteChar()
+        # cursor.insertText(self.out_keywords)
+        # self.total_key = ''
+        # self.word_array = ''
+        # self.out_keywords = ''
+        # self.ori_keywords = ''
     def image_keywords(self):
         for _ in self.word_array:
             if len(_) >= 5:
@@ -4666,6 +4647,182 @@ class MainWindow(QMainWindow):
                 self.word_array = ''
                 if self.window_show:self.window_show.close()
                 break
+class LoginWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        global window_main
+        self.dragging = False
+        self.in_widget = window_main
+        self.get_sysinfo()
+        txt_read = open('login.txt', 'r', encoding='utf-8').read()
+        self.user_login = ''
+        self.user_password = ''
+        self.user_superkey = ''
+        try:
+            self.user_login = txt_read.split('\n')[0].split('=')[-1]
+            self.user_password = txt_read.split('\n')[1].split('=')[-1]
+            self.user_superkey = txt_read.split('\n')[2].split('=')[-1]
+        except:
+            self.user_login = ''
+            self.user_password = ''
+        self.closeEvent = self.closeEvent
+        self.login_ui()
+            
+    def closeEvent(self,event):
+        self.close()
+        if self.in_widget:self.in_widget.close()
+
+    def login_ui(self):
+        self.status_wait = False
+        self.user_level = ''
+        self.fig_txt_array_temp = []
+        self.main_login_layout = QGridLayout(self)
+        self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+        self.setWindowTitle(f"FENRIR ver{version}")
+        self.setWindowFlags(Qt.FramelessWindowHint) # 隐藏标题栏
+        # logo
+        self.label_logo = QLabel()
+        self.label_logo.setToolTip('点击')
+        self.label_logo.setMaximumHeight(300)
+        self.label_logo.setScaledContents(True)
+        self.label_logo.mousePressEvent = self.change_pic
+
+        self.change_pic(self.event)
+        # 获取窗口坐标系
+        screen = QDesktopWidget().screenGeometry()
+        size = self.geometry()
+        self.setFixedSize(350, 420)
+        self.move(int((screen.width() - size.width()) / 2)+150, int((screen.height() - size.height()) / 2))
+        self.mousePressEvent = self.start_drag
+        self.mouseReleaseEvent = self.window_pressrelease
+        self.closeEvent = self.closeEvent
+
+        self.text_user = QLineEdit()
+        self.text_user.setPlaceholderText('用户名')
+        self.text_user.setMaximumHeight(30)
+        self.text_user.setMinimumWidth(300)
+        self.text_user.insert(self.user_login)
+
+        self.text_password = QLineEdit()
+        self.text_password.setPlaceholderText('密码')
+        self.text_password.setMaximumHeight(30)
+        self.text_password.setMinimumWidth(300)
+        self.text_password.insert(self.user_password)
+        self.text_password.setEchoMode(QLineEdit.Password)
+
+        self.bt_login = QPushButton(QIcon(qta.icon('fa5b.wolf-pack-battalion')),'')
+        self.bt_login.setIconSize(QSize(40, 40))
+        self.bt_login.setMaximumHeight(40)
+        self.bt_login.setToolTip('账号注册请访问 http://www.fenrir.fun/register')
+        self.bt_login.clicked.connect(self.fn_login)
+        
+        self.label_login_status = QLabel()
+        self.label_login_status.setStyleSheet("color : red")
+
+        self.main_login_layout.addWidget(self.label_logo,0,0,2,2)
+        self.main_login_layout.addWidget(self.text_user,5,0,1,2)
+        self.main_login_layout.addWidget(self.text_password,6,0,1,2)
+        self.main_login_layout.addWidget(self.bt_login,7,0,1,2)
+        
+        self.show()
+    def send_state_login(self, state ,user):
+        global version
+        if not user or user == 'admin':
+            return
+        try:
+            log_time = time.ctime(time.time())
+            data = {"user": user,
+                    "state": state,
+                    "log_time": log_time,
+                    "version": version,
+                    "ip": self.ip,
+                    "mac": self.mac,
+                    "sysinfo": self.sysinfo_json,
+                    }
+            requests.post('http://www.fenrir.fun/api/sendstate', json=data)
+        except Exception as e:
+            print(e)
+    def window_pressrelease(self,event):
+        self.dragging = False
+    def start_drag(self, event):
+        self.dragging = True
+        self.old_pos = event.globalPos()
+    def mouseMoveEvent(self, event):
+        if self.dragging:
+            delta = QPoint(event.globalPos() - self.old_pos)
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+            self.old_pos = event.globalPos()
+            self.move(QCursor().pos().x() - 150,QCursor().pos().y() - 150)
+        
+    def change_pic(self,event):
+        self.old_pos = self.pos()
+        self.dragging = True
+        index = int(random.randint(1,6))
+        self.movie = QMovie("./ui/%02d.gif" % index)
+        self.label_logo.setMovie(self.movie)
+        self.movie.start()
+    
+    def get_sysinfo(self):
+        self.sysinfo_json = {'主机名':'','OS名称':'','OS版本':'','域':'','登录服务器':'','系统制造商':''}
+        info = os.popen('systeminfo').read().replace('. ','')
+        while '  ' in info:
+            info = info.replace('  ',' ')
+        sysinfo = info.split('\n')
+        for index,item in enumerate(sysinfo):
+            if '主机名' in item:
+                self.sysinfo_json['主机名'] = item.split(':')[1].strip(' ')
+            elif 'OS' in item and '名称' in item and 'bios' not in item.lower():
+                self.sysinfo_json['OS名称'] = item.split(':')[1].strip(' ')
+            elif 'OS 版本' in item:
+                self.sysinfo_json['OS版本'] = item.split(':')[1].strip(' ')
+            elif '域' in item:
+                self.sysinfo_json['域'] = item.split(':')[1].strip(' ')
+            elif '登录服务器' in item:
+                self.sysinfo_json['登录服务器'] = item.split(':')[1].strip(' ')
+            elif '系统制造商' in item:
+                self.sysinfo_json['系统制造商'] = item.split(':')[1].strip(' ')
+    def get_wanip(self):
+        self.ip = requests.get('http://ipinfo.io/ip').text
+    def get_mac(self):
+        info = os.popen('ipconfig /all').read()
+        mac_all = re.findall(r'物理地址.*:(.*)\n',info)
+        if mac_all:
+            self.mac = mac_all[0].strip(' ')
+    def fn_login(self):
+        user = self.text_user.text()
+        password = self.text_password.text()
+        if not user:
+            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
+            self.label_login_status.setText('请输入用户名')
+            return
+        elif not password:
+            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
+            self.label_login_status.setText('请输入密码')
+            return
+        else:
+            self.label_login_status.setText('')
+            self.get_wanip()
+            self.get_mac()
+            data = {"username": user,
+                    "password": password,
+                    }
+            try:
+                response = requests.post('http://www.fenrir.fun/postlogin', data=data)
+            except:
+                QMessageBox.critical(self, "连接失败", "服务器连接失败，请联系管理员")
+                return
+            json_data = json.loads(response.text)
+            if json_data['Status'] == 'OK':
+                txt_write = open('login.txt', 'r', encoding='utf-8').read().replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[0], '[user]=' + user).replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[1], '[password]=' + password)
+                open('login.txt', 'w+', encoding='utf-8').write(txt_write)
+                self.close()
+                self.in_widget.show()
+                self.send_state_login('Login' ,user)
+                self.setWindowTitle(f"FENRIR ver{version} | {user}")
+                self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+            else:
+                self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
+                self.label_login_status.setText('用户名或密码错误，请重试！')
 
 class WindowBook(QWidget):
     def __init__(self,active_figmark,active_textcomponent,status,dock_mark):
@@ -4917,15 +5074,19 @@ class WindowBook(QWidget):
                 self.check_description()
             elif self.txt_type =='other':
                 self.check_text_ckmarks_unused()
-            
-            self.marks_consistent() # 附图标记一致性
-            self.marks_to_table() # 将校验结果反应在表格中
-            self.get_score_from_list() # 结论
-            self.add_num_to_data() # 为dataframe编号列赋值
+            # 附图标记一致性
+            self.marks_consistent() 
+            # 将校验结果反应在表格中
+            self.marks_to_table() 
+            # 结论
+            self.get_score_from_list() 
+            # 为dataframe编号列赋值
+            self.add_num_to_data() 
             self.text_checkresult.insertPlainText(self.ckresult_txt)
         if self.txt_type =='description' and self.des_check_flag:
             self.status.showMessage('正在给出进一步撰写建议，请稍后...')
-            self.ai_suggestion() # 修改建议
+            # 修改建议
+            self.ai_suggestion() 
         else:
             self.status.showMessage('校验完成')
             self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
@@ -4979,7 +5140,7 @@ class WindowBook(QWidget):
                 self.marks_dic[item.split(' ')[1]] = item.split(' ')[0] # {'1':'壳体'}
         # 查找附图标记
         for mark in self.marks_dic:
-            for num in [r'\d{4}[a-z]',r'\d{3}[a-z]',r'\d{4}',r'\d{2}[a-z]',r'\d{3}',r'\d{2}',r'\d[a-z]',r'\d{1}',r'[a-z]']:
+            for num in [rf'\d{4}[a-z]',rf'\d{3}[a-z]',rf'\d{4}',rf'\d{2}[a-z]',rf'\d{3}',rf'\d{2}',rf'\d[a-z]',rf'\d{1}',rf'[a-z]']:
                 find_txt = []
                 if self.txt_type == 'claim': # 被核对文本为权利要求书   仅含独权？
                     find_txt = re.findall(f'{mark}\\({num}\\)',self.all_txt.replace('（','(').replace('）',')'))
@@ -5111,7 +5272,7 @@ class WindowBook(QWidget):
     ''' 校验说明书 '''
     def get_para_sen_index(self,error,para_txt):  # 判断错误位于说明书的第几段第几句
         # 判断段落号
-        para_index = re.findall(r'\\[\d\d\d\d\\]',para_txt)
+        para_index = re.findall(rf'\\[\d\d\d\d\\]',para_txt)
         if para_index:
             para_index = para_index[0]
         else:
@@ -5510,9 +5671,11 @@ class Worker_ai_deepseek(QThread):
         self.result = ''
         self.in_txt = in_txt
         if not user:
+            deepseek_array = open('./data/deepseek_token.txt','r').read().split('\n')
+            ak = deepseek_array[0]
             self.client = OpenAI(api_key="", base_url="https://api.deepseek.com")
         else:
-            doubao_array = open('./data/deepseek_token.txt','r').read().split('\n')
+            doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
             ak = doubao_array[0]
             self.client = OpenAI(api_key=ak, base_url="https://api.deepseek.com")
         self.text_out = in_widget
@@ -5570,7 +5733,7 @@ class Worker_ai_doubao(QThread):
         self.in_txt = in_txt
         if not user:
             self.client = Ark(ak="", sk="")
-            self.model = 'ep-20250722155445-m4sqq'
+            self.model = ''
         else:
             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
             ak = doubao_array[0]
@@ -5849,11 +6012,9 @@ class SwitchBtn_1(QWidget):
         painter.save()
         if self.checked:
             painter.setPen(self.textColorOn)
-            # painter.drawText(0, 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter, self.textOn)
             painter.drawText(int(self.space * 4), 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter,self.textOn)
         else:
             painter.setPen(self.textColorOff)
-            # painter.drawText(int(self.width() / 2), 0,int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter, self.textOff)
             painter.drawText(int(self.width() / 2), 0, int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter,self.textOff)
         painter.restore()
     def drawBg(self, event, painter):
@@ -5993,11 +6154,9 @@ class SwitchBtn_2(QWidget):
         painter.save()
         if self.checked:
             painter.setPen(self.textColorOn)
-            # painter.drawText(0, 0, int(self.width() / 2) + self.space * 2, self.height(), Qt.AlignCenter, self.textOn)
             painter.drawText(self.space * 4, 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter,self.textOn)
         else:
             painter.setPen(self.textColorOff)
-            # painter.drawText(self.width() / 2, 0,int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter, self.textOff)
             painter.drawText(int(self.width() / 2), 0, int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter,self.textOff)
         painter.restore()
     def drawBg(self, event, painter):
@@ -6256,58 +6415,6 @@ class OcrDropTextEdit(QTextEdit):
         
     def update_text(self,in_txt):
         self.insertPlainText('\n' + in_txt)
-class Worker_Start(QThread):
-    progress = pyqtSignal(int)
-    def __init__(self):
-        super().__init__()
-        self.count = 0
-    def run(self):
-        for i in range(0,2):
-            self.count += 1
-            time.sleep(0.5)
-        self.progress.emit(self.count)
-class Window_Start(QWidget):# 启动界面
-    def __init__(self):
-        super().__init__()
-        self.start_ui()
-        self.start_thread = Worker_Start()
-        self.start_thread.progress.connect(self.fn_worker_start)
-        self.start_thread.start()
-    def fn_worker_start(self):
-        self.hide()
-        window_login = LoginWindow()
-        window_login.show()
-
-    def start_ui(self):
-        self.start_layout = QGridLayout(self)
-        self.setWindowTitle(f"FENRIR ver{version}")
-        self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.setStyleSheet("background-color: white")
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-
-        screen = QDesktopWidget().screenGeometry()
-        self.move(int((screen.width() - 300) / 2), int((screen.height() - 210) / 2))
-        self.setFixedSize(400, 210)
-        self.label_start_1 = QLabel(f'FENRIR ver{version} 启动中...')
-        self.label_start_1.setStyleSheet("background-color: white;color:black")
-        self.label_start_1.setMaximumHeight(30)
-
-        self.label_start_2 = QLabel('© Fenrir. All Rights Reserved.')
-        self.label_start_2.setStyleSheet("background-color: white;color:black")
-        self.label_start_2.setMaximumHeight(30)
-
-        self.label_logo = QLabel()
-        movie = QMovie(f"./ui/start.gif")
-        self.label_logo.setScaledContents(True)
-        self.label_logo.setMovie(movie)
-        self.label_logo.setMinimumWidth(400)
-        self.label_logo.setMinimumHeight(200)
-        movie.start()
-        self.start_layout.addWidget(self.label_start_1,0,0)
-        self.start_layout.addWidget(self.label_start_2,0,1)
-
-        self.start_layout.addWidget(self.label_logo,1,0)
-        self.show()
 
 class QTextEditWithLineNum(QTextEdit):
     sendmsg = pyqtSignal(object)
@@ -6369,9 +6476,9 @@ class QTextEditWithLineNum(QTextEdit):
     def get_wave_width(self, base_width, phase_offset):
         total_phase = (self.wave_phase + phase_offset) % self.phase_cycle_len
         # base_width<= 12：8~12往返动画
-        if base_width <= 9:
-            if total_phase <= 7:
-                w = 12 - total_phase * (2 / 9)
+        if base_width <= 8:
+            if total_phase <= 9:
+                w = 13 - total_phase * (2 / 9)
             else:
                 w = 8 + (total_phase - 10) * (2 / 9)
             return w
@@ -6380,7 +6487,8 @@ class QTextEditWithLineNum(QTextEdit):
             if total_phase <= 9:
                 w = 18 - total_phase
             else:
-                w = 8 + (total_phase - 10)
+                w = 9 + (total_phase - 10)
+            return w
     def paintEvent(self, event):
         super().paintEvent(event)
         vp = self.viewport()
@@ -6526,60 +6634,6 @@ class LineNumPaint(QWidget):
         return QSize(self.q_edit_line_num.lineNumberAreaWidth(), 0)
     def paintEvent(self, event):
         self.q_edit_line_num.lineNumberAreaPaintEvent(event)
-    
-class NewWindow(QWidget):
-    def __init__(self,tab_index):
-        super().__init__()
-        global window_show_text_array,window_show_mark_array
-        self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.tab_index = tab_index
-        self.new_layout = QGridLayout(self)
-
-        self.new_text_editor = window_show_text_array[self.tab_index]
-        self.new_mark_editor = window_show_mark_array[self.tab_index]
-        self.new_mark_editor.setFixedWidth(150)
-
-        self.mousePressEvent = self.mouse_press_event
-        # self.new_text_editor.mousePressEvent = self.mouse_press_event
-        self.new_layout.addWidget(self.new_mark_editor, 0, 0, 1, 1)
-        self.new_layout.addWidget(self.new_text_editor, 0, 1, 1, 1)
-
-
-    def closeEvent(self, event): 
-        global tab_count_array,tab_widget_text,tab_widget_mark,window_show_array,text_editor_array,mark_editor_array
-        new_tab_index = self.tab_index
-        tab_count_array.remove(self.tab_index)
-
-        all_txt = self.new_text_editor.toHtml()
-        marks_txt = self.new_mark_editor.toPlainText()
-
-        open(f'./data/text_saver_{self.tab_index + 1}.html','w+',encoding='utf-8').write(all_txt)
-        open(f'./data/marks_saver_{self.tab_index + 1}.txt', 'w+', encoding='utf-8').write(marks_txt)
-
-        self.ori_text_editor = text_editor_array[self.tab_index]
-        self.ori_mark_editor = mark_editor_array[self.tab_index]
-
-        self.ori_text_editor.setHtml(all_txt)
-        self.ori_mark_editor.setPlainText(marks_txt)
-
-        tab_name = self.windowTitle()
-        # 校正 self.tab_index
-        for _ in tab_count_array:
-            if _ < self.tab_index:
-                new_tab_index -= 1
-        tab_widget_text.insertTab(new_tab_index,self.ori_text_editor, tab_name)
-        tab_widget_text.setCurrentIndex(new_tab_index)
-
-        tab_widget_mark.insertTab(new_tab_index,self.ori_mark_editor, f'列表{new_tab_index+1}')
-        tab_widget_mark.setCurrentIndex(new_tab_index)
-
-        window_show_array[self.tab_index].close() 
-
-    def mouse_press_event(self,event):
-        global global_active_textcomponent,global_active_figmark
-        global_active_textcomponent = self.new_text_editor
-        global_active_figmark = self.new_mark_editor
-        # print('Active_Window Index:',self.tab_index)
 
 
 version = '3.5.15'
