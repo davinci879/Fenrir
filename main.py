@@ -680,7 +680,6 @@ class MainWindow(QMainWindow):
         global_active_textcomponent.setTextCursor(block_cursor)
     def one_key_format(self):
         global global_active_textcomponent
-        # 获取光标当前位置
         block_cursor = global_active_textcomponent.textCursor()
         para_line_number = block_cursor.blockNumber()
         total_paragraphs = global_active_textcomponent.document().blockCount()
@@ -688,12 +687,10 @@ class MainWindow(QMainWindow):
             para_line_number = total_paragraphs
         else:
             para_line_number += 7
-
-        # if event.button() == 1:
         self.fn_reset_allformat()
-        # line_height = int(self.combo_lineheight.currentText())
         format_array = open('./data/format_array.txt','r',encoding='utf-8').read().split()
-        # 序号加粗
+
+        # 生成关键词列表
         for i in range(1,30):
             format_array.append(f'步骤S{i}')
             format_array.append(f'步骤K{i}')
@@ -706,34 +703,34 @@ class MainWindow(QMainWindow):
             format_array.append(f'对于区别技术特征{i}')
             format_array.append(f'基于区别技术特征{i}，其实际所要解决的技术问题是')
             format_array.append(f'证据{i}')
-            format_array.append(f'{i}：')
-            format_array.append(rf'{i}\.')
             format_array.append(f'D{i}')
-            format_array.append(f'\u2029{i}\\.')
-            format_array.append(f'\u2029{i}、')
-        # 段号加粗
+            format_array.append(f'{i}：')
+            # 【新增】匹配中文句号序号 1． 2．
+            format_array.append(f'{i}．')
+            format_array.append(f'\u2029{i}．')
+
         for i in range(1,999):
             format_array.append(f'\u2029[%04d]' % i)
+
         font_format = QTextCharFormat()
         font_format.setFontWeight(QFont.Bold)
-
         cursor = global_active_textcomponent.textCursor()
-        for _ in format_array:
-            matches = re.finditer(_, global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
-            # 循环查找文档
-            match_num = 0
+        doc_text = global_active_textcomponent.document().toPlainText().replace('\n','\u2029')
+
+        for pat_str in format_array:
+            # 判断：如果是序号正则，不escape；普通文本关键词，escape防止正则元字符干扰
+            # 简易方案：全部字面匹配，如果你需要正则再单独拆分列表
+            pattern = re.compile(re.escape(pat_str))
+            matches = pattern.finditer(doc_text)
             for match in matches:
-                match_num += 1
-                index = match.start()
-                cursor.setPosition(index)
-                bracket_count = len(re.findall(r'\\',_))
-                if index - len(_) < 0:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(_))
-                else:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(_) - bracket_count)
+                s = match.start()
+                e = match.end()
+                cursor.setPosition(s)
+                cursor.setPosition(e, QTextCursor.KeepAnchor)
                 cursor.mergeCharFormat(font_format)
+
         self.on_lineheight_changed()
-        # 重新定位
+        # 光标回位
         block_cursor.movePosition(QTextCursor.Start)
         for _ in range(para_line_number):
             block_cursor.movePosition(QTextCursor.NextBlock)
