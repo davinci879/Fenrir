@@ -4,14 +4,14 @@ from PyQt5.QtCore import *
 from txteditor_adjustimg import Design_Adjust
 from txteditor_figeditor import Figeditor
 import qtawesome as qta
-from openai import OpenAI
+# from openai import OpenAI
 import sys
 import webbrowser
 import pdfplumber
 import base64
 from main_general import *
 import docx
-from volcenginesdkarkruntime import Ark
+# from volcenginesdkarkruntime import Ark
 import qdarkstyle
 import re
 import requests
@@ -47,15 +47,15 @@ class MainWindow(QMainWindow):
         self.window_api = ''
         self.window_decorate = ''
         self.window_continue = ''
-        self.window_aihelp = ''
-        self.window_aitrans = ''
+        # self.window_aihelp = ''
+        # self.window_aitrans = ''
         self.window_search = ''
         self.toolbar_bottom = ''
         self.window_table = ''
         self.window_location = ''
         self.brush_flag = False
-        self.aihelp_search_history = {}
-        self.aitrans_search_history = {}
+        # self.aihelp_search_history = {}
+        # self.aitrans_search_history = {}
         self.key_1, self.key_2, self.key_3, self.key_4, self.key_5 = '', '', '', '' ,''
         self.out_keywords = ''
         self.ori_keywords = ''
@@ -111,12 +111,12 @@ class MainWindow(QMainWindow):
             if self.window_symbol:self.window_symbol.close()
             if self.window_rep:self.window_rep.close()
             if self.toolbar_bottom:self.toolbar_bottom.close()
-            if self.window_aihelp:self.window_aihelp.close()
+            # if self.window_aihelp:self.window_aihelp.close()
             if self.window_search:self.window_search.close()
             if self.window_continue:self.window_continue.close()
             if self.window_decorate:self.window_decorate.close()
             if self.window_table:self.window_table.close()
-            if self.window_aitrans:self.window_aitrans.close()
+            # if self.window_aitrans:self.window_aitrans.close()
             self.close()
     def add_showimg(self):
         self.window_showimg = QWidget()
@@ -417,14 +417,14 @@ class MainWindow(QMainWindow):
         self.bt_showsymbol.triggered.connect(self.fn_show_symbol)
         self.bt_showsymbol.setShortcut('F3')
         
-        self.tool_aiapi = QAction(QIcon(qta.icon('mdi.transit-connection-variant')),"AI接口(F4)")
-        self.tool_aiapi.triggered.connect(self.fn_aiapi)
-        self.tool_aiapi.setShortcut('F4')
+        # self.tool_aiapi = QAction(QIcon(qta.icon('mdi.transit-connection-variant')),"AI接口(F4)")
+        # self.tool_aiapi.triggered.connect(self.fn_aiapi)
+        # self.tool_aiapi.setShortcut('F4')
 
         self.tools_toolbar_addition.addAction(self.tool_showhelp) # 使用帮助F1
         self.tools_toolbar_addition.addAction(self.tool_showbook) # 文本校验F2
         self.tools_toolbar_addition.addAction(self.bt_showsymbol) # 特殊符号F3
-        self.tools_toolbar_addition.addAction(self.tool_aiapi) # AI_API
+        # self.tools_toolbar_addition.addAction(self.tool_aiapi) # AI_API
 
         # 顶部工具栏
         self.file_menu = self.menuBar()
@@ -1095,189 +1095,189 @@ class MainWindow(QMainWindow):
                 cursor.insertText(chr(event.key()))
         except Exception as e:
             print('Error 401',e)  
-    def fn_search_tools(self):
-        global user,model_api
-        if self.window_search:self.window_search.hide() 
-        in_txt = self.search_box.toPlainText().strip(' ')
-        if not in_txt:
-            return
-        self.status.showMessage('概念查询中，请稍后...')
-        self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-        # self.setCursor(Qt.WaitCursor)
-        if model_api == 'Doubao':
-            self.aitrans_thread = Worker_ai_doubao('用300~500字阐述以下内容：' + in_txt,'')
-        else:
-            self.aitrans_thread = Worker_ai_deepseek('用300~500字阐述以下内容：' + in_txt,'')
-        self.aitrans_thread.progress.connect(self.fn_aisearch)
-        self.aitrans_thread.start()
+    # def fn_search_tools(self):
+    #     global user,model_api
+    #     if self.window_search:self.window_search.hide() 
+    #     in_txt = self.search_box.toPlainText().strip(' ')
+    #     if not in_txt:
+    #         return
+    #     self.status.showMessage('概念查询中，请稍后...')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #     # self.setCursor(Qt.WaitCursor)
+    #     if model_api == 'Doubao':
+    #         self.aitrans_thread = Worker_ai_doubao('用300~500字阐述以下内容：' + in_txt,'')
+    #     else:
+    #         self.aitrans_thread = Worker_ai_deepseek('用300~500字阐述以下内容：' + in_txt,'')
+    #     self.aitrans_thread.progress.connect(self.fn_aisearch)
+    #     self.aitrans_thread.start()
     
-    def fn_aisearch(self,in_txt): # AI搜索
-        self.status.showMessage('查询完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-        self.window_search = QWidget()
-        self.layout_windowsearch = QVBoxLayout(self.window_search)
-        self.window_search.setWindowTitle("工具搜索")
-        self.window_search.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
-        self.window_search.setFixedWidth(402)
-        self.window_search.setMinimumHeight(25)
-        self.window_search.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-        self.text_lb = QTextBrowser()
-        self.text_lb.setFontPointSize(11)
-        self.text_lb.setPlainText(in_txt)
-        self.text_lb.setFixedWidth(380)
-        self.text_lb.setMinimumHeight(500)
-        self.text_lb.keyReleaseEvent = self.fn_search_keyreleaseevent
-        self.layout_windowsearch.addWidget(self.text_lb)
-        self.fn_animation(self.window_search,0.0,1.0)
-        self.animation.start()
-        self.window_search.show()
+    # def fn_aisearch(self,in_txt): # AI搜索
+    #     self.status.showMessage('查询完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    #     self.window_search = QWidget()
+    #     self.layout_windowsearch = QVBoxLayout(self.window_search)
+    #     self.window_search.setWindowTitle("工具搜索")
+    #     self.window_search.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+    #     self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
+    #     self.window_search.setFixedWidth(402)
+    #     self.window_search.setMinimumHeight(25)
+    #     self.window_search.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
+    #     self.text_lb = QTextBrowser()
+    #     self.text_lb.setFontPointSize(11)
+    #     self.text_lb.setPlainText(in_txt)
+    #     self.text_lb.setFixedWidth(380)
+    #     self.text_lb.setMinimumHeight(500)
+    #     self.text_lb.keyReleaseEvent = self.fn_search_keyreleaseevent
+    #     self.layout_windowsearch.addWidget(self.text_lb)
+    #     self.fn_animation(self.window_search,0.0,1.0)
+    #     self.animation.start()
+    #     self.window_search.show()
 
-        self.window_search.focusOutEvent = self.fn_search_focusout
+    #     self.window_search.focusOutEvent = self.fn_search_focusout
     
-    def fn_search_focusout(self,event):
-        try:
-            self.window_search.hide()
-        except:
-            pass
+    # def fn_search_focusout(self,event):
+    #     try:
+    #         self.window_search.hide()
+    #     except:
+    #         pass
     def fn_undo(self):
         global global_active_textcomponent
         global_active_textcomponent.undo()
     def fn_redu(self):
         global global_active_textcomponent
         global_active_textcomponent.redo()
-    def get_aicontinue(self):
-        global expand_length
-        global global_active_textcomponent
-        self.status.showMessage('文本续写中，请稍后...')
-        self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-        # self.setCursor(Qt.WaitCursor)
-        try:
-            cursor = global_active_textcomponent.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
-            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-            cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段内容
-            base_txt = cursor.selectedText()
-        except:
-            pass
-        self.window_continue = QWidget()
-        self.layout_windowcontinue = QGridLayout(self.window_continue)
-        self.window_continue.setWindowTitle("AI续写")
-        self.window_continue.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_continue.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        self.window_continue.setFixedSize(400,400)
-        self.window_continue.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
+    # def get_aicontinue(self):
+    #     global expand_length
+    #     global global_active_textcomponent
+    #     self.status.showMessage('文本续写中，请稍后...')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #     # self.setCursor(Qt.WaitCursor)
+    #     try:
+    #         cursor = global_active_textcomponent.textCursor()
+    #         cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
+    #         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+    #         cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段内容
+    #         base_txt = cursor.selectedText()
+    #     except:
+    #         pass
+    #     self.window_continue = QWidget()
+    #     self.layout_windowcontinue = QGridLayout(self.window_continue)
+    #     self.window_continue.setWindowTitle("AI续写")
+    #     self.window_continue.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+    #     self.window_continue.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+    #     self.window_continue.setFixedSize(400,400)
+    #     self.window_continue.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
 
-        self.text_continue = QTextEdit()
-        self.text_continue.setFontPointSize(11)
-        self.text_continue.setMinimumHeight(100)
-        self.text_continue.setMinimumWidth(380)
-        self.text_continue.setPlaceholderText('文本续写中，请稍后...')
+    #     self.text_continue = QTextEdit()
+    #     self.text_continue.setFontPointSize(11)
+    #     self.text_continue.setMinimumHeight(100)
+    #     self.text_continue.setMinimumWidth(380)
+    #     self.text_continue.setPlaceholderText('文本续写中，请稍后...')
 
-        self.bt_continue = QPushButton('确定')
-        self.bt_continue.setFixedHeight(30)
-        self.bt_continue.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        self.bt_continue.clicked.connect(self.insert_aicontinue)
+    #     self.bt_continue = QPushButton('确定')
+    #     self.bt_continue.setFixedHeight(30)
+    #     self.bt_continue.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
+    #     self.bt_continue.clicked.connect(self.insert_aicontinue)
 
-        self.bt_close_con = QPushButton('关闭')
-        self.bt_close_con.setFixedHeight(30)
-        self.bt_close_con.clicked.connect(lambda:[self.window_continue.close()])
+    #     self.bt_close_con = QPushButton('关闭')
+    #     self.bt_close_con.setFixedHeight(30)
+    #     self.bt_close_con.clicked.connect(lambda:[self.window_continue.close()])
         
-        self.layout_windowcontinue.addWidget(self.text_continue,0,0,1,2)
-        self.layout_windowcontinue.addWidget(self.bt_continue,1,0,1,1)
-        self.layout_windowcontinue.addWidget(self.bt_close_con,1,1,1,1)
+    #     self.layout_windowcontinue.addWidget(self.text_continue,0,0,1,2)
+    #     self.layout_windowcontinue.addWidget(self.bt_continue,1,0,1,1)
+    #     self.layout_windowcontinue.addWidget(self.bt_close_con,1,1,1,1)
 
-        self.fn_animation(self.window_continue,0.0,1.0)
-        self.animation.start()
-        self.window_continue.show()
-        global model_api
-        if base_txt:
-            if model_api == 'Doubao':
-                self.aicontinue_thread = Worker_ai_doubao(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
-            else:
-                self.aicontinue_thread = Worker_ai_deepseek(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
+    #     self.fn_animation(self.window_continue,0.0,1.0)
+    #     self.animation.start()
+    #     self.window_continue.show()
+    #     global model_api
+    #     if base_txt:
+    #         if model_api == 'Doubao':
+    #             self.aicontinue_thread = Worker_ai_doubao(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
+    #         else:
+    #             self.aicontinue_thread = Worker_ai_deepseek(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
 
-            self.aicontinue_thread.progress.connect(self.fn_aicontinue)
-            self.aicontinue_thread.start()
-        else:
-            self.status.showMessage('发生未知错误')
-            self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #         self.aicontinue_thread.progress.connect(self.fn_aicontinue)
+    #         self.aicontinue_thread.start()
+    #     else:
+    #         self.status.showMessage('发生未知错误')
+    #         self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
 
-    def fn_aicontinue(self,in_txt):
-        # self.text_continue.setPlainText(in_txt) 
-        self.status.showMessage('续写完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-    def insert_aicontinue(self):
-        global global_active_textcomponent
-        in_txt = self.text_continue.toPlainText()
-        cursor = global_active_textcomponent.textCursor()
-        cursor.insertText(in_txt)
-        self.window_continue.close()
-    def get_aidecorate(self):
-        global global_active_textcomponent
-        select_txt = global_active_textcomponent.textCursor().selectedText()
-        if not select_txt:
-            return
-        self.status.showMessage('文本润色中，请稍后...')
-        self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-        # self.setCursor(Qt.WaitCursor)
-        cursor = global_active_textcomponent.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
-        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-        cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段的内容
-        base_txt = cursor.selectedText()
+    # def fn_aicontinue(self,in_txt):
+    #     # self.text_continue.setPlainText(in_txt) 
+    #     self.status.showMessage('续写完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    # def insert_aicontinue(self):
+    #     global global_active_textcomponent
+    #     in_txt = self.text_continue.toPlainText()
+    #     cursor = global_active_textcomponent.textCursor()
+    #     cursor.insertText(in_txt)
+    #     self.window_continue.close()
+    # def get_aidecorate(self):
+    #     global global_active_textcomponent
+    #     select_txt = global_active_textcomponent.textCursor().selectedText()
+    #     if not select_txt:
+    #         return
+    #     self.status.showMessage('文本润色中，请稍后...')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #     # self.setCursor(Qt.WaitCursor)
+    #     cursor = global_active_textcomponent.textCursor()
+    #     cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
+    #     cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+    #     cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段的内容
+    #     base_txt = cursor.selectedText()
         
-        self.window_decorate = QWidget()
-        self.layout_windowdecorate = QGridLayout(self.window_decorate)
-        self.window_decorate.setWindowTitle("AI润色")
-        self.window_decorate.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        self.window_decorate.setFixedSize(400,400)
-        self.window_decorate.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
+    #     self.window_decorate = QWidget()
+    #     self.layout_windowdecorate = QGridLayout(self.window_decorate)
+    #     self.window_decorate.setWindowTitle("AI润色")
+    #     self.window_decorate.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+    #     self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+    #     self.window_decorate.setFixedSize(400,400)
+    #     self.window_decorate.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
 
-        self.text_windowdecorate = QTextEdit()
-        self.text_windowdecorate.setFontPointSize(11)
-        self.text_windowdecorate.setMinimumHeight(100)
-        self.text_windowdecorate.setMinimumWidth(380)
-        self.text_windowdecorate.setPlaceholderText('文本润色中，请稍后...')
+    #     self.text_windowdecorate = QTextEdit()
+    #     self.text_windowdecorate.setFontPointSize(11)
+    #     self.text_windowdecorate.setMinimumHeight(100)
+    #     self.text_windowdecorate.setMinimumWidth(380)
+    #     self.text_windowdecorate.setPlaceholderText('文本润色中，请稍后...')
 
-        self.bt_decorate = QPushButton('确定')
-        self.bt_decorate.setFixedHeight(30)
-        self.bt_decorate.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        self.bt_decorate.clicked.connect(self.insert_aidecorate)
+    #     self.bt_decorate = QPushButton('确定')
+    #     self.bt_decorate.setFixedHeight(30)
+    #     self.bt_decorate.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
+    #     self.bt_decorate.clicked.connect(self.insert_aidecorate)
 
-        self.bt_decorate_close = QPushButton('关闭')
-        self.bt_decorate_close.setFixedHeight(30)
-        self.bt_decorate_close.clicked.connect(lambda:[self.window_decorate.close()])
+    #     self.bt_decorate_close = QPushButton('关闭')
+    #     self.bt_decorate_close.setFixedHeight(30)
+    #     self.bt_decorate_close.clicked.connect(lambda:[self.window_decorate.close()])
 
-        self.layout_windowdecorate.addWidget(self.text_windowdecorate,0,0,1,2)
-        self.layout_windowdecorate.addWidget(self.bt_decorate,1,0,1,1)
-        self.layout_windowdecorate.addWidget(self.bt_decorate_close,1,1,1,1)
+    #     self.layout_windowdecorate.addWidget(self.text_windowdecorate,0,0,1,2)
+    #     self.layout_windowdecorate.addWidget(self.bt_decorate,1,0,1,1)
+    #     self.layout_windowdecorate.addWidget(self.bt_decorate_close,1,1,1,1)
 
-        self.fn_animation(self.window_decorate,0.0,1.0)
-        self.animation.start()
-        self.window_decorate.show()
-        global model_api
-        if model_api == 'Doubao':
-            self.aidecorate_thread = Worker_ai_doubao(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
-        else:
-            self.aidecorate_thread = Worker_ai_deepseek(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
+    #     self.fn_animation(self.window_decorate,0.0,1.0)
+    #     self.animation.start()
+    #     self.window_decorate.show()
+    #     global model_api
+    #     if model_api == 'Doubao':
+    #         self.aidecorate_thread = Worker_ai_doubao(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
+    #     else:
+    #         self.aidecorate_thread = Worker_ai_deepseek(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
 
-        self.aidecorate_thread.progress.connect(self.fn_aidecorate)
-        self.aidecorate_thread.start()
-    def fn_aidecorate(self,in_txt):
-        # self.text_windowdecorate.setPlainText(in_txt)
-        self.status.showMessage('润色完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-    def insert_aidecorate(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
-        in_txt = self.text_windowdecorate.toPlainText()
-        cursor.insertText('\n' + in_txt)
-        self.window_decorate.close()
+    #     self.aidecorate_thread.progress.connect(self.fn_aidecorate)
+    #     self.aidecorate_thread.start()
+    # def fn_aidecorate(self,in_txt):
+    #     # self.text_windowdecorate.setPlainText(in_txt)
+    #     self.status.showMessage('润色完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    # def insert_aidecorate(self):
+    #     global global_active_textcomponent
+    #     cursor = global_active_textcomponent.textCursor()
+    #     in_txt = self.text_windowdecorate.toPlainText()
+    #     cursor.insertText('\n' + in_txt)
+    #     self.window_decorate.close()
     def fn_texttab_changed(self):
         global tab_count_array,tab_widget_text,tab_widget_mark,text_editor_array,mark_editor_array
         global global_active_textcomponent,global_active_figmark
@@ -1384,12 +1384,12 @@ class MainWindow(QMainWindow):
         if self.window_symbol:
             self.window_symbol.move(self.pos().x(), self.pos().y() + 63)
             self.window_symbol.setFixedHeight(self.height() - 90)
-        if self.window_aihelp:
-            self.window_aihelp.setFixedSize(400, global_active_textcomponent.height()*0.67)
-            self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        if self.window_aitrans: # 靠右上
-            self.window_aitrans.setFixedSize(400, global_active_textcomponent.height()*0.67)
-            self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+        # if self.window_aihelp:
+        #     self.window_aihelp.setFixedSize(400, global_active_textcomponent.height()*0.67)
+        #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+        # if self.window_aitrans: # 靠右上
+        #     self.window_aitrans.setFixedSize(400, global_active_textcomponent.height()*0.67)
+        #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
         if self.window_search: 
             self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
     def window_pressrelease(self,event):
@@ -1633,14 +1633,14 @@ class MainWindow(QMainWindow):
                 self.window_notebook.move(self.pos().x(), self.pos().y()+63)
             if self.window_symbol:
                 self.window_symbol.move(self.pos().x(),self.pos().y()+63)
-            if self.window_aihelp:
-                self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-            if self.window_aitrans:
-                self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+            # if self.window_aihelp:
+            #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+            # if self.window_aitrans:
+            #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
             if self.window_rep:
                 self.window_rep.move(self.pos().x() + self.width() - 270,self.pos().y() + 100)
-            if self.window_decorate:
-                self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+            # if self.window_decorate:
+            #     self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
             if self.window_continue:
                 self.window_continue.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
             if self.window_search: 
@@ -1921,11 +1921,11 @@ class MainWindow(QMainWindow):
         self.action_03 = QAction(QIcon(qta.icon('fa.paste')),'粘贴')
         self.action_04 = QAction(QIcon(qta.icon('ph.flame-thin')),'全部替换')
 
-        self.action_08 = QAction(QIcon(qta.icon('ei.idea')),'AI填充')
-        self.action_09 = QAction(QIcon(qta.icon('msc.debug-continue-small')),'AI续写')
-        self.action_05 = QAction(QIcon(qta.icon('ph.brain')),'AI润色')
-        self.action_06 = QAction(QIcon(qta.icon('mdi.file-search-outline')),'概念查询')
-        self.action_07 = QAction(QIcon(qta.icon('mdi6.translate-variant')),'文本翻译')
+        # self.action_08 = QAction(QIcon(qta.icon('ei.idea')),'AI填充')
+        # self.action_09 = QAction(QIcon(qta.icon('msc.debug-continue-small')),'AI续写')
+        # self.action_05 = QAction(QIcon(qta.icon('ph.brain')),'AI润色')
+        # self.action_06 = QAction(QIcon(qta.icon('mdi.file-search-outline')),'概念查询')
+        # self.action_07 = QAction(QIcon(qta.icon('mdi6.translate-variant')),'文本翻译')
         
         self.action_11 = QAction(QIcon(qta.icon('mdi6.zodiac-aquarius')),'<01> A => A1')
         self.action_12 = QAction(QIcon(qta.icon('mdi6.zodiac-aries')),'<02> A => A(1)')
@@ -1950,18 +1950,18 @@ class MainWindow(QMainWindow):
         self.action_23 = QAction(QIcon(qta.icon('ph.polygon-thin')),'<03> 权利要求书模板')
         self.action_24 = QAction(QIcon(qta.icon('ph.recycle')),'<04> 复审请求模板')
         self.action_25 = QAction(QIcon(qta.icon('mdi6.hammer')),'<05> 无效请求模板')
-        self.action_26 = QAction(QIcon(qta.icon('mdi6.hammer')),'<06> AI撰写说明书模板')
+        # self.action_26 = QAction(QIcon(qta.icon('mdi6.hammer')),'<06> AI撰写说明书模板')
 
         # 添加快捷键
         self.action_01.setShortcut('Ctrl+X')
         self.action_02.setShortcut('Ctrl+C')
         self.action_03.setShortcut('Ctrl+V')
         self.action_04.setShortcut('Ctrl+F')
-        self.action_05.setShortcut('Alt+E')
-        self.action_06.setShortcut('Alt+R')
-        self.action_07.setShortcut('Alt+T')
-        self.action_08.setShortcut('Alt+Q')
-        self.action_09.setShortcut('Alt+W')
+        # self.action_05.setShortcut('Alt+E')
+        # self.action_06.setShortcut('Alt+R')
+        # self.action_07.setShortcut('Alt+T')
+        # self.action_08.setShortcut('Alt+Q')
+        # self.action_09.setShortcut('Alt+W')
 
         self.action_11.setShortcut('Ctrl+1')
         self.action_12.setShortcut('Ctrl+2')
@@ -1985,7 +1985,7 @@ class MainWindow(QMainWindow):
         self.action_23.setShortcut('Alt+3')
         self.action_24.setShortcut('Alt+4')
         self.action_25.setShortcut('Alt+5')
-        self.action_26.setShortcut('Alt+6')
+        # self.action_26.setShortcut('Alt+6')
 
         self.action_00.triggered.connect(self.fn_searchpatent)
         self.action_01.triggered.connect(self.fn_cut)
@@ -1993,11 +1993,11 @@ class MainWindow(QMainWindow):
         self.action_03.triggered.connect(self.fn_paste)
         self.action_04.triggered.connect(self.show_repwindow)
         # AI
-        self.action_05.triggered.connect(self.get_aidecorate)
-        self.action_06.triggered.connect(self.get_aihelp)
-        self.action_07.triggered.connect(self.get_aitrans)
-        self.action_08.triggered.connect(self.get_aisupplement)
-        self.action_09.triggered.connect(self.get_aicontinue)
+        # self.action_05.triggered.connect(self.get_aidecorate)
+        # self.action_06.triggered.connect(self.get_aihelp)
+        # self.action_07.triggered.connect(self.get_aitrans)
+        # self.action_08.triggered.connect(self.get_aisupplement)
+        # self.action_09.triggered.connect(self.get_aicontinue)
         # 批量文本
         self.action_11.triggered.connect(lambda:[self.complete_marknum(0)])
         self.action_12.triggered.connect(lambda:[self.complete_marknum(1)])
@@ -2022,7 +2022,7 @@ class MainWindow(QMainWindow):
         self.action_23.triggered.connect(self.generate_claim_model)
         self.action_24.triggered.connect(self.generate_re_model)
         self.action_25.triggered.connect(self.generate_invalid_model)
-        self.action_26.triggered.connect(self.generate_ai_model)
+        # self.action_26.triggered.connect(self.generate_ai_model)
     def fn_copy(self):
         global global_active_textcomponent
         cursor = global_active_textcomponent.textCursor()
@@ -2385,7 +2385,7 @@ class MainWindow(QMainWindow):
         self.tab_name_text.keyPressEvent = self.tab_name_keypressEvent
     def tab_name_keypressEvent(self,event):
         global tab_widget_text
-        cursor = self.tab_name_text.textCursor()
+        cursor = self.tab_name_text.cursorPosition()
         clipboard = QApplication.clipboard()
         try:
             if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C:
@@ -2451,7 +2451,7 @@ class MainWindow(QMainWindow):
         global tab_widget_text
         tab_index = tab_widget_text.currentIndex()
         self.tab_name_widget.hide()
-        tab_txt = self.tab_name_text.toPlainText()
+        tab_txt = self.tab_name_text.text()
         if tab_txt:
             pass
         elif not tab_txt:
@@ -2556,184 +2556,184 @@ class MainWindow(QMainWindow):
                 self.status.showMessage(f"> 共匹配到{match_num}个结果 共{len_all}个字（含标点） 共{len_all_without_dots}个字（不含标点）")
         except Exception as e:
             print('Error Code 208',e)
-    def fn_aitrans_keyrelease(self,event):
-        if event.key() == 16777216:
-            self.window_aitrans.hide()
-    def ai_trans_changed(self):
-        txt = self.combo_aitrans.currentText()
-        self.text_aitrans_history.setPlainText(self.aitrans_search_history[txt])
-    def fn_aitrans(self,in_txt):
-        # self.text_aitrans.setPlainText(in_txt)
-        self.aitrans_search_history[self.trans_txt] = in_txt
-        self.status.showMessage('翻译完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-    def get_aitrans(self):
-        global global_active_textcomponent,global_active_figmark
-        self.trans_txt = global_active_textcomponent.textCursor().selectedText()
-        if not self.trans_txt:
-            return
-        self.aitrans_search_history[self.trans_txt] = ''
+    # def fn_aitrans_keyrelease(self,event):
+    #     if event.key() == 16777216:
+    #         self.window_aitrans.hide()
+    # def ai_trans_changed(self):
+    #     txt = self.combo_aitrans.currentText()
+    #     self.text_aitrans_history.setPlainText(self.aitrans_search_history[txt])
+    # def fn_aitrans(self,in_txt):
+    #     # self.text_aitrans.setPlainText(in_txt)
+    #     self.aitrans_search_history[self.trans_txt] = in_txt
+    #     self.status.showMessage('翻译完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    # def get_aitrans(self):
+    #     global global_active_textcomponent,global_active_figmark
+    #     self.trans_txt = global_active_textcomponent.textCursor().selectedText()
+    #     if not self.trans_txt:
+    #         return
+    #     self.aitrans_search_history[self.trans_txt] = ''
 
-        self.window_aitrans = QWidget()
-        self.layout_aitrans = QGridLayout(self.window_aitrans)
-        self.window_aitrans.setWindowTitle('AI翻译')
-        self.window_aitrans.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        self.window_aitrans.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
-        self.window_aitrans.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
+    #     self.window_aitrans = QWidget()
+    #     self.layout_aitrans = QGridLayout(self.window_aitrans)
+    #     self.window_aitrans.setWindowTitle('AI翻译')
+    #     self.window_aitrans.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+    #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+    #     self.window_aitrans.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
+    #     self.window_aitrans.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
         
-        self.text_aitrans = QTextEdit()
-        self.text_aitrans.setMinimumWidth(100)
-        self.text_aitrans.setMinimumHeight(60)
-        self.text_aitrans.setFontPointSize(11)
-        self.text_aitrans.setPlaceholderText('翻译中,请稍后...')
-        self.text_aitrans.setToolTip('按ESC键关闭')
-        self.text_aitrans.keyReleaseEvent = self.fn_aitrans_keyrelease
+    #     self.text_aitrans = QTextEdit()
+    #     self.text_aitrans.setMinimumWidth(100)
+    #     self.text_aitrans.setMinimumHeight(60)
+    #     self.text_aitrans.setFontPointSize(11)
+    #     self.text_aitrans.setPlaceholderText('翻译中,请稍后...')
+    #     self.text_aitrans.setToolTip('按ESC键关闭')
+    #     self.text_aitrans.keyReleaseEvent = self.fn_aitrans_keyrelease
 
-        self.text_aitrans_history = QTextEdit()
-        self.text_aitrans_history.setMinimumWidth(100)
-        self.text_aitrans_history.setMinimumHeight(60)
-        self.text_aitrans_history.setFontPointSize(11)
-        self.text_aitrans_history.setToolTip('按ESC键关闭')
-        self.text_aitrans_history.keyReleaseEvent = self.fn_aitrans_keyrelease
+    #     self.text_aitrans_history = QTextEdit()
+    #     self.text_aitrans_history.setMinimumWidth(100)
+    #     self.text_aitrans_history.setMinimumHeight(60)
+    #     self.text_aitrans_history.setFontPointSize(11)
+    #     self.text_aitrans_history.setToolTip('按ESC键关闭')
+    #     self.text_aitrans_history.keyReleaseEvent = self.fn_aitrans_keyrelease
         
-        self.widget_transhistory = QWidget()
-        self.transhistory_layout = QGridLayout(self.widget_transhistory)
-        self.combo_aitrans = QComboBox()
-        self.combo_aitrans.addItems(self.aitrans_search_history)
-        self.combo_aitrans.currentIndexChanged.connect(self.ai_trans_changed)
-        self.transhistory_layout.addWidget(self.combo_aitrans,0,0,1,1)
-        self.transhistory_layout.addWidget(self.text_aitrans_history,1,0,1,1)
+    #     self.widget_transhistory = QWidget()
+    #     self.transhistory_layout = QGridLayout(self.widget_transhistory)
+    #     self.combo_aitrans = QComboBox()
+    #     self.combo_aitrans.addItems(self.aitrans_search_history)
+    #     self.combo_aitrans.currentIndexChanged.connect(self.ai_trans_changed)
+    #     self.transhistory_layout.addWidget(self.combo_aitrans,0,0,1,1)
+    #     self.transhistory_layout.addWidget(self.text_aitrans_history,1,0,1,1)
 
-        self.tab_widget_aitrans = QTabWidget()
-        self.tab_widget_aitrans.addTab(self.text_aitrans,'翻译结果')
-        self.tab_widget_aitrans.addTab(self.widget_transhistory,'翻译历史')
+    #     self.tab_widget_aitrans = QTabWidget()
+    #     self.tab_widget_aitrans.addTab(self.text_aitrans,'翻译结果')
+    #     self.tab_widget_aitrans.addTab(self.widget_transhistory,'翻译历史')
         
-        self.layout_aitrans.addWidget(self.tab_widget_aitrans,0,0,0,0)
-        self.fn_animation(self.window_aitrans,0.0,1.0)
-        self.animation.start()
-        self.window_aitrans.show()
+    #     self.layout_aitrans.addWidget(self.tab_widget_aitrans,0,0,0,0)
+    #     self.fn_animation(self.window_aitrans,0.0,1.0)
+    #     self.animation.start()
+    #     self.window_aitrans.show()
 
-        global model_api
-        if model_api == 'Doubao':
-            self.aitrans_thread = Worker_ai_doubao('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
-        else:
-            self.aitrans_thread = Worker_ai_deepseek('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
-        self.aitrans_thread.progress.connect(self.fn_aitrans)
-        self.aitrans_thread.start()
-    def fn_aisupplement(self,in_txt):
-        global global_active_textcomponent,global_active_figmark
-        self.status.showMessage('填充完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-        self.default_format()
-        all_html = global_active_textcomponent.toHtml()
-        self.supplement_txt = self.supplement_txt.replace('<','&lt;').replace('>','&gt;')
-        all_html = all_html.replace(self.supplement_txt,in_txt)
-        global_active_textcomponent.setHtml(all_html)
-        self.one_key_format()
-        self.get_same_markindex(in_txt,global_active_textcomponent,self.highlight_color)
+    #     global model_api
+    #     if model_api == 'Doubao':
+    #         self.aitrans_thread = Worker_ai_doubao('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
+    #     else:
+    #         self.aitrans_thread = Worker_ai_deepseek('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
+    #     self.aitrans_thread.progress.connect(self.fn_aitrans)
+    #     self.aitrans_thread.start()
+    # def fn_aisupplement(self,in_txt):
+    #     global global_active_textcomponent,global_active_figmark
+    #     self.status.showMessage('填充完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    #     self.default_format()
+    #     all_html = global_active_textcomponent.toHtml()
+    #     self.supplement_txt = self.supplement_txt.replace('<','&lt;').replace('>','&gt;')
+    #     all_html = all_html.replace(self.supplement_txt,in_txt)
+    #     global_active_textcomponent.setHtml(all_html)
+    #     self.one_key_format()
+    #     self.get_same_markindex(in_txt,global_active_textcomponent,self.highlight_color)
 
-    def get_aisupplement(self):
-        global global_active_textcomponent,global_active_figmark
-        self.supplement_txt = global_active_textcomponent.textCursor().selectedText().strip('\u2029\n ，。；、：')
-        if not self.supplement_txt:
-            self.status.showMessage('未识别到待填充文本，请重试')
-        elif self.supplement_txt[0] == '<' and self.supplement_txt[-1] == '>':
-            self.status.showMessage('文本补充中，请稍后...')
-            self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-            # self.setCursor(Qt.WaitCursor)
+    # def get_aisupplement(self):
+    #     global global_active_textcomponent,global_active_figmark
+    #     self.supplement_txt = global_active_textcomponent.textCursor().selectedText().strip('\u2029\n ，。；、：')
+    #     if not self.supplement_txt:
+    #         self.status.showMessage('未识别到待填充文本，请重试')
+    #     elif self.supplement_txt[0] == '<' and self.supplement_txt[-1] == '>':
+    #         self.status.showMessage('文本补充中，请稍后...')
+    #         self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #         # self.setCursor(Qt.WaitCursor)
             
-            cursor = global_active_textcomponent.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,2)
-            cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-            cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,5)
-            all_txt = cursor.selectedText()
+    #         cursor = global_active_textcomponent.textCursor()
+    #         cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,2)
+    #         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+    #         cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,5)
+    #         all_txt = cursor.selectedText()
 
-            global model_api
-            if model_api == 'Doubao':
-                self.supplement_thread = Worker_ai_doubao(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
-            else:
-                self.supplement_thread = Worker_ai_deepseek(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
+    #         global model_api
+    #         if model_api == 'Doubao':
+    #             self.supplement_thread = Worker_ai_doubao(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
+    #         else:
+    #             self.supplement_thread = Worker_ai_deepseek(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
 
-            self.supplement_thread.progress.connect(self.fn_aisupplement)
-            self.supplement_thread.start()
-        else:
-            self.status.showMessage('未识别到待填充文本，请重试')
-    def fn_aihelp_keyrelease(self,event):
-        if event.key() == 16777216:
-            self.window_aihelp.hide()
-    def ai_help_changed(self):
-        txt = self.combo_aihelp.currentText()
-        self.text_aihelp_history.setPlainText(self.aihelp_search_history[txt])
-    def fn_aihelp(self,in_txt):
-        self.status.showMessage('查询完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-        # self.text_aihelp.setPlainText(in_txt)
-        self.aihelp_search_history[self.help_txt] = in_txt
-    def get_aihelp(self):
-        global global_active_textcomponent,global_active_figmark
-        self.status.showMessage('内容查询中,请稍后...')
-        self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-        # self.setCursor(Qt.WaitCursor)
+    #         self.supplement_thread.progress.connect(self.fn_aisupplement)
+    #         self.supplement_thread.start()
+    #     else:
+    #         self.status.showMessage('未识别到待填充文本，请重试')
+    # def fn_aihelp_keyrelease(self,event):
+    #     if event.key() == 16777216:
+    #         self.window_aihelp.hide()
+    # def ai_help_changed(self):
+    #     txt = self.combo_aihelp.currentText()
+    #     self.text_aihelp_history.setPlainText(self.aihelp_search_history[txt])
+    # def fn_aihelp(self,in_txt):
+    #     self.status.showMessage('查询完成')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+    #     self.setCursor(Qt.ArrowCursor)
+    #     # self.text_aihelp.setPlainText(in_txt)
+    #     self.aihelp_search_history[self.help_txt] = in_txt
+    # def get_aihelp(self):
+    #     global global_active_textcomponent,global_active_figmark
+    #     self.status.showMessage('内容查询中,请稍后...')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #     # self.setCursor(Qt.WaitCursor)
 
-        self.help_txt = global_active_textcomponent.textCursor().selectedText()
-        if not self.help_txt:
-            return
-        self.aihelp_search_history[self.help_txt] = ''
+    #     self.help_txt = global_active_textcomponent.textCursor().selectedText()
+    #     if not self.help_txt:
+    #         return
+    #     self.aihelp_search_history[self.help_txt] = ''
 
-        self.window_aihelp = QWidget()
-        self.layout_aihelp = QGridLayout(self.window_aihelp)
-        self.window_aihelp.setWindowTitle(self.help_txt + '的含义')
-        self.window_aihelp.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        self.window_aihelp.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
-        self.window_aihelp.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
+    #     self.window_aihelp = QWidget()
+    #     self.layout_aihelp = QGridLayout(self.window_aihelp)
+    #     self.window_aihelp.setWindowTitle(self.help_txt + '的含义')
+    #     self.window_aihelp.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
+    #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
+    #     self.window_aihelp.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
+    #     self.window_aihelp.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
         
-        self.text_aihelp = QTextEdit()
-        self.text_aihelp.setMinimumWidth(100)
-        self.text_aihelp.setMinimumHeight(60)
-        self.text_aihelp.setFontPointSize(11)
-        self.text_aihelp.setPlaceholderText('内容查询中,请稍后...')
-        self.text_aihelp.setToolTip('按ESC键关闭')
-        self.text_aihelp.keyReleaseEvent = self.fn_aihelp_keyrelease
+    #     self.text_aihelp = QTextEdit()
+    #     self.text_aihelp.setMinimumWidth(100)
+    #     self.text_aihelp.setMinimumHeight(60)
+    #     self.text_aihelp.setFontPointSize(11)
+    #     self.text_aihelp.setPlaceholderText('内容查询中,请稍后...')
+    #     self.text_aihelp.setToolTip('按ESC键关闭')
+    #     self.text_aihelp.keyReleaseEvent = self.fn_aihelp_keyrelease
 
-        self.text_aihelp_history = QTextEdit()
-        self.text_aihelp_history.setMinimumWidth(100)
-        self.text_aihelp_history.setMinimumHeight(60)
-        self.text_aihelp_history.setFontPointSize(11)
-        self.text_aihelp_history.setToolTip('按ESC键关闭')
-        self.text_aihelp_history.keyReleaseEvent = self.fn_aihelp_keyrelease
+    #     self.text_aihelp_history = QTextEdit()
+    #     self.text_aihelp_history.setMinimumWidth(100)
+    #     self.text_aihelp_history.setMinimumHeight(60)
+    #     self.text_aihelp_history.setFontPointSize(11)
+    #     self.text_aihelp_history.setToolTip('按ESC键关闭')
+    #     self.text_aihelp_history.keyReleaseEvent = self.fn_aihelp_keyrelease
         
-        self.widget_history = QWidget()
-        self.history_layout = QGridLayout(self.widget_history)
-        self.combo_aihelp = QComboBox()
-        self.combo_aihelp.addItems(self.aihelp_search_history)
-        self.combo_aihelp.currentIndexChanged.connect(self.ai_help_changed)
-        self.history_layout.addWidget(self.combo_aihelp,0,0,1,1)
-        self.history_layout.addWidget(self.text_aihelp_history,1,0,1,1)
+    #     self.widget_history = QWidget()
+    #     self.history_layout = QGridLayout(self.widget_history)
+    #     self.combo_aihelp = QComboBox()
+    #     self.combo_aihelp.addItems(self.aihelp_search_history)
+    #     self.combo_aihelp.currentIndexChanged.connect(self.ai_help_changed)
+    #     self.history_layout.addWidget(self.combo_aihelp,0,0,1,1)
+    #     self.history_layout.addWidget(self.text_aihelp_history,1,0,1,1)
 
-        self.tab_widget_aihelp = QTabWidget()
-        self.tab_widget_aihelp.addTab(self.text_aihelp,'查询结果')
-        self.tab_widget_aihelp.addTab(self.widget_history,'查询历史')
+    #     self.tab_widget_aihelp = QTabWidget()
+    #     self.tab_widget_aihelp.addTab(self.text_aihelp,'查询结果')
+    #     self.tab_widget_aihelp.addTab(self.widget_history,'查询历史')
         
-        self.layout_aihelp.addWidget(self.tab_widget_aihelp,0,0,0,0)
-        self.fn_animation(self.window_aihelp,0.0,1.0)
-        self.animation.start()
-        self.window_aihelp.show()
+    #     self.layout_aihelp.addWidget(self.tab_widget_aihelp,0,0,0,0)
+    #     self.fn_animation(self.window_aihelp,0.0,1.0)
+    #     self.animation.start()
+    #     self.window_aihelp.show()
 
-        global model_api
+    #     global model_api
 
-        if model_api == 'Doubao':
-            self.aihelp_thread = Worker_ai_doubao(self.help_txt + '是什么意思？',self.text_aihelp)
-        else:
-            self.aihelp_thread = Worker_ai_deepseek(self.help_txt + '是什么意思？',self.text_aihelp)
+    #     if model_api == 'Doubao':
+    #         self.aihelp_thread = Worker_ai_doubao(self.help_txt + '是什么意思？',self.text_aihelp)
+    #     else:
+    #         self.aihelp_thread = Worker_ai_deepseek(self.help_txt + '是什么意思？',self.text_aihelp)
 
 
-        self.aihelp_thread.progress.connect(self.fn_aihelp)
-        self.aihelp_thread.start()
+    #     self.aihelp_thread.progress.connect(self.fn_aihelp)
+    #     self.aihelp_thread.start()
     def fn_mouse_keyrelease_text(self,event):
         global write_type,global_active_textcomponent,global_active_figmark
         if self.brush_flag == True:
@@ -3182,12 +3182,12 @@ class MainWindow(QMainWindow):
         self.context_menu.addAction(self.action_02)
         self.context_menu.addAction(self.action_03)
         self.context_menu.addAction(self.action_04)
-        self.menu_0 = self.context_menu.addMenu(QIcon(qta.icon('fa5b.uncharted')),"辅助撰写(A)")
-        self.menu_0.addAction(self.action_08)
-        self.menu_0.addAction(self.action_09)
-        self.menu_0.addAction(self.action_05)
-        self.menu_0.addAction(self.action_06)
-        self.menu_0.addAction(self.action_07)
+        # self.menu_0 = self.context_menu.addMenu(QIcon(qta.icon('fa5b.uncharted')),"辅助撰写(A)")
+        # self.menu_0.addAction(self.action_08)
+        # self.menu_0.addAction(self.action_09)
+        # self.menu_0.addAction(self.action_05)
+        # self.menu_0.addAction(self.action_06)
+        # self.menu_0.addAction(self.action_07)
         self.menu_1 = self.context_menu.addMenu(QIcon(qta.icon('ph.planet-thin')),"批量文本(E)")
         self.menu_1.addAction(self.action_11)
         self.menu_1.addAction(self.action_12)
@@ -3213,7 +3213,7 @@ class MainWindow(QMainWindow):
         self.menu_2.addAction(self.action_23)
         self.menu_2.addAction(self.action_24)
         self.menu_2.addAction(self.action_25)
-        self.menu_2.addAction(self.action_26)
+        # self.menu_2.addAction(self.action_26)
     def add_tab_editor(self,editor):
         editor.setAutoFormatting(QTextEdit.AutoAll)
         editor.selectionChanged.connect(lambda:[self.update_format(editor)])
@@ -3622,13 +3622,13 @@ class MainWindow(QMainWindow):
         all_txt = global_active_textcomponent.toHtml() + open('./data/model_invalid.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
         global_active_textcomponent.clear()
         global_active_textcomponent.setHtml(all_txt)
-    def generate_ai_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = global_active_textcomponent.toHtml() + open('./data/model_ai.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
+    # def generate_ai_model(self):
+    #     global tab_widget_text,global_active_textcomponent,global_active_figmark
+    #     tab_index = tab_widget_text.currentIndex()
+    #     title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+    #     all_txt = global_active_textcomponent.toHtml() + open('./data/model_ai.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
+    #     global_active_textcomponent.clear()
+    #     global_active_textcomponent.setHtml(all_txt)
     def image_marks(self, inputtxt, fig_dic):
         self.word_array, self.ori_array = [], []
         for key in fig_dic:  # 判断附图标记
@@ -3899,12 +3899,12 @@ class MainWindow(QMainWindow):
                 (Qt.AltModifier, Qt.Key_3): self.generate_claim_model,
                 (Qt.AltModifier, Qt.Key_4): self.generate_re_model,
                 (Qt.AltModifier, Qt.Key_5): self.generate_invalid_model,
-                (Qt.AltModifier, Qt.Key_6): self.generate_ai_model,
-                (Qt.AltModifier, Qt.Key_Q): self.get_aisupplement,
-                (Qt.AltModifier, Qt.Key_W): self.get_aicontinue,
-                (Qt.AltModifier, Qt.Key_E): self.get_aidecorate,
                 (Qt.AltModifier, Qt.Key_R): self.get_aihelp,
-                (Qt.AltModifier, Qt.Key_T): self.get_aitrans,
+                # (Qt.AltModifier, Qt.Key_Q): self.get_aisupplement,
+                # (Qt.AltModifier, Qt.Key_6): self.generate_ai_model,
+                # (Qt.AltModifier, Qt.Key_W): self.get_aicontinue,
+                # (Qt.AltModifier, Qt.Key_E): self.get_aidecorate,
+                # (Qt.AltModifier, Qt.Key_T): self.get_aitrans,
             }
 
             # 处理按键组合
@@ -3919,9 +3919,9 @@ class MainWindow(QMainWindow):
                 global_active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_Escape:
                 self.reset_textcomponentformat()
-                for window in [self.window_aitrans, self.window_aihelp, self.window_continue, self.window_search,
+                for window in [self.window_continue, self.window_search,
                             self.window_decorate, self.window_show, self.window_symbol, self.window_rep,
-                            self.window_table, self.window_api]:
+                            self.window_table, self.window_api]: # self.window_aitrans, self.window_aihelp, 
                     if window:
                         window.close()
             elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
@@ -4058,18 +4058,18 @@ class MainWindow(QMainWindow):
                 self.generate_re_model()
             elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_5:
                 self.generate_invalid_model()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_6:
-                self.generate_ai_model()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_Q:
-                self.get_aisupplement()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_W:
-                self.get_aicontinue()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_E:
-                self.get_aidecorate()
+            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_6:
+            #     self.generate_ai_model()
+            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_Q:
+            #     self.get_aisupplement()
+            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_W:
+            #     self.get_aicontinue()
+            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_E:
+            #     self.get_aidecorate()
             elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_R:
                 self.get_aihelp()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_T:
-                self.get_aitrans()
+            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_T:
+            #     self.get_aitrans()
             elif event.key() == Qt.Key_PageDown:
                 cursor.movePosition(QTextCursor.Down, n=20)
                 global_active_textcomponent.setTextCursor(cursor)
@@ -4078,8 +4078,8 @@ class MainWindow(QMainWindow):
                 global_active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_Escape:
                 self.reset_textcomponentformat()
-                if self.window_aitrans:self.window_aitrans.close()
-                if self.window_aihelp:self.window_aihelp.close()
+                # if self.window_aitrans:self.window_aitrans.close()
+                # if self.window_aihelp:self.window_aihelp.close()
                 if self.window_continue:self.window_continue.close()
                 if self.window_search:self.window_search.close()
                 if self.window_decorate:self.window_decorate.close()
@@ -4722,69 +4722,7 @@ class LoginWindow(QWidget):
         self.main_login_layout.addWidget(self.bt_login,7,0,1,2)
         
         self.show()
-    def send_state_login(self, state ,user):
-        global version
-        if not user or user == 'admin':
-            return
-        try:
-            log_time = time.ctime(time.time())
-            data = {"user": user,
-                    "state": state,
-                    "log_time": log_time,
-                    "version": version,
-                    "ip": self.ip,
-                    "mac": self.mac,
-                    "sysinfo": self.sysinfo_json,
-                    }
-            requests.post('http://www.fenrir.fun/api/sendstate', json=data)
-        except Exception as e:
-            print(e)
-    def window_pressrelease(self,event):
-        self.dragging = False
-    def start_drag(self, event):
-        self.dragging = True
-        self.old_pos = event.globalPos()
-    def mouseMoveEvent(self, event):
-        if self.dragging:
-            delta = QPoint(event.globalPos() - self.old_pos)
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self.old_pos = event.globalPos()
-            self.move(QCursor().pos().x() - 150,QCursor().pos().y() - 150)
-        
-    def change_pic(self,event):
-        self.old_pos = self.pos()
-        self.dragging = True
-        index = int(random.randint(1,6))
-        self.movie = QMovie("./ui/%02d.gif" % index)
-        self.label_logo.setMovie(self.movie)
-        self.movie.start()
     
-    def get_sysinfo(self):
-        self.sysinfo_json = {'主机名':'','OS名称':'','OS版本':'','域':'','登录服务器':'','系统制造商':''}
-        info = os.popen('systeminfo').read().replace('. ','')
-        while '  ' in info:
-            info = info.replace('  ',' ')
-        sysinfo = info.split('\n')
-        for index,item in enumerate(sysinfo):
-            if '主机名' in item:
-                self.sysinfo_json['主机名'] = item.split(':')[1].strip(' ')
-            elif 'OS' in item and '名称' in item and 'bios' not in item.lower():
-                self.sysinfo_json['OS名称'] = item.split(':')[1].strip(' ')
-            elif 'OS 版本' in item:
-                self.sysinfo_json['OS版本'] = item.split(':')[1].strip(' ')
-            elif '域' in item:
-                self.sysinfo_json['域'] = item.split(':')[1].strip(' ')
-            elif '登录服务器' in item:
-                self.sysinfo_json['登录服务器'] = item.split(':')[1].strip(' ')
-            elif '系统制造商' in item:
-                self.sysinfo_json['系统制造商'] = item.split(':')[1].strip(' ')
-    def get_wanip(self):
-        self.ip = requests.get('http://ipinfo.io/ip').text
-    def get_mac(self):
-        info = os.popen('ipconfig /all').read()
-        mac_all = re.findall(r'物理地址.*:(.*)\n',info)
-        if mac_all:
-            self.mac = mac_all[0].strip(' ')
     def fn_login(self):
         user = self.text_user.text()
         password = self.text_password.text()
@@ -4881,11 +4819,11 @@ class WindowBook(QWidget):
         bt_check.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
         bt_check.clicked.connect(self.submit_check_main)
 
-        bt_aicheck = QPushButton('AI校验')
-        bt_aicheck.setFixedSize(90,30)
-        bt_aicheck.setCheckable(True)
-        bt_aicheck.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        bt_aicheck.clicked.connect(self.submit_aicheck)
+        # bt_aicheck = QPushButton('AI校验')
+        # bt_aicheck.setFixedSize(90,30)
+        # bt_aicheck.setCheckable(True)
+        # bt_aicheck.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
+        # bt_aicheck.clicked.connect(self.submit_aicheck)
 
         bt_close = QPushButton('关闭')
         bt_close.setFixedSize(90,30)
@@ -4900,7 +4838,7 @@ class WindowBook(QWidget):
 
         main_layout.addWidget(self.check_claimtree,0,8,1,2)
         main_layout.addWidget(bt_check,2,8,1,2)
-        main_layout.addWidget(bt_aicheck,3,8,1,2)
+        # main_layout.addWidget(bt_aicheck,3,8,1,2)
         main_layout.addWidget(bt_close,6,8,1,2)
         
         self.tab_widget_book.addTab(main_widget, '文本校验')
@@ -4983,26 +4921,26 @@ class WindowBook(QWidget):
                 cursor.mergeCharFormat(format)  # 改变文本的背景颜色
         except:
             pass
-    def submit_aicheck(self):
-        self.status.showMessage('文本校验中，请稍后...')
-        self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-        # self.setCursor(Qt.WaitCursor)
+    # def submit_aicheck(self):
+    #     self.status.showMessage('文本校验中，请稍后...')
+    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
+    #     # self.setCursor(Qt.WaitCursor)
 
-        all_txt = global_active_textcomponent.toPlainText()
-        global model_api
-        if model_api == 'Doubao':
-            if '尊敬的审查员' in all_txt:
-                self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
-            else:
-                self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
-        else:
-            if '尊敬的审查员' in all_txt:
-                self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
-            else:
-                self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
+    #     all_txt = global_active_textcomponent.toPlainText()
+    #     global model_api
+    #     if model_api == 'Doubao':
+    #         if '尊敬的审查员' in all_txt:
+    #             self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
+    #         else:
+    #             self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
+    #     else:
+    #         if '尊敬的审查员' in all_txt:
+    #             self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
+    #         else:
+    #             self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
 
-        self.aicheck_thread.progress.connect(self.fn_aicheck)
-        self.aicheck_thread.start()
+    #     self.aicheck_thread.progress.connect(self.fn_aicheck)
+    #     self.aicheck_thread.start()
     def fn_aicheck(self,in_txt):
         # self.text_checkresult.insertPlainText(in_txt)
         self.status.showMessage('校验完成')
@@ -5661,119 +5599,119 @@ class WindowBook(QWidget):
         if self.check_claimtree.checkState() == 2: # 选中  0未选中
             self.extract_claim_tree()
 
-class Worker_ai_deepseek(QThread):
-    progress = pyqtSignal(str)
-    def __init__(self,in_txt,in_widget):
-        super().__init__()
-        self.result = ''
-        self.in_txt = in_txt
-        if not user:
-            deepseek_array = open('./data/deepseek_token.txt','r').read().split('\n')
-            ak = deepseek_array[0]
-            self.client = OpenAI(api_key="", base_url="https://api.deepseek.com")
-        else:
-            doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-            ak = doubao_array[0]
-            self.client = OpenAI(api_key=ak, base_url="https://api.deepseek.com")
-        self.text_out = in_widget
-    def run(self):
-        self.result = self.deepseek_ai(self.in_txt)
-        self.progress.emit(self.result)
-    def out_txt_by_time(self):
-        txt_array = self.reply.split('，')
-        for index,word in enumerate(txt_array):
-            if index == len(txt_array) -1:
-                self.text_out.insertPlainText(word)
-            else:
-                self.text_out.insertPlainText(word + '，')
-            time.sleep(random.uniform(0.05,0.2))
-    def deepseek_ai(self,in_txt):
-        global messages,deep_model
-        try:
-            if not in_txt:
-                self.reply = ""
-                return
-            if user and not open('./data/deepseek_token.txt','r').read():
-                return '请先在AI接口(F4)中输入deepseek的API Key'
-            else:
-                # if not messages:
-                messages=[
-                    {"role": "system", "content":"经验丰富的具有所有领域相关知识的专利代理人"},
-                    {"role": "user", "content": in_txt},
-                    ]
-                # else:
-                #     messages.append({"role": "user","content": in_txt})
-                response = self.client.chat.completions.create(
-                model = 'deepseek-chat', # deep_model
-                messages = messages,
-                stream=False
-                )
-                self.reply = response.choices[0].message.content
-                # if deep_model != 'deepseek-chat':
-                # messages = []
-                # else:
-                # if len(messages) >= 10:
-                #     messages = [{"role": "user","content": in_txt},{"role": "system","content": self.reply},]
-                # else:
-                #     messages.append(response.choices[0].message)
+# class Worker_ai_deepseek(QThread):
+#     progress = pyqtSignal(str)
+#     def __init__(self,in_txt,in_widget):
+#         super().__init__()
+#         self.result = ''
+#         self.in_txt = in_txt
+#         if not user:
+#             deepseek_array = open('./data/deepseek_token.txt','r').read().split('\n')
+#             ak = deepseek_array[0]
+#             self.client = OpenAI(api_key="", base_url="https://api.deepseek.com")
+#         else:
+#             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
+#             ak = doubao_array[0]
+#             self.client = OpenAI(api_key=ak, base_url="https://api.deepseek.com")
+#         self.text_out = in_widget
+#     def run(self):
+#         self.result = self.deepseek_ai(self.in_txt)
+#         self.progress.emit(self.result)
+#     def out_txt_by_time(self):
+#         txt_array = self.reply.split('，')
+#         for index,word in enumerate(txt_array):
+#             if index == len(txt_array) -1:
+#                 self.text_out.insertPlainText(word)
+#             else:
+#                 self.text_out.insertPlainText(word + '，')
+#             time.sleep(random.uniform(0.05,0.2))
+#     def deepseek_ai(self,in_txt):
+#         global messages,deep_model
+#         try:
+#             if not in_txt:
+#                 self.reply = ""
+#                 return
+#             if user and not open('./data/deepseek_token.txt','r').read():
+#                 return '请先在AI接口(F4)中输入deepseek的API Key'
+#             else:
+#                 # if not messages:
+#                 messages=[
+#                     {"role": "system", "content":"经验丰富的具有所有领域相关知识的专利代理人"},
+#                     {"role": "user", "content": in_txt},
+#                     ]
+#                 # else:
+#                 #     messages.append({"role": "user","content": in_txt})
+#                 response = self.client.chat.completions.create(
+#                 model = 'deepseek-chat', # deep_model
+#                 messages = messages,
+#                 stream=False
+#                 )
+#                 self.reply = response.choices[0].message.content
+#                 # if deep_model != 'deepseek-chat':
+#                 # messages = []
+#                 # else:
+#                 # if len(messages) >= 10:
+#                 #     messages = [{"role": "user","content": in_txt},{"role": "system","content": self.reply},]
+#                 # else:
+#                 #     messages.append(response.choices[0].message)
                     
-                if self.text_out:
-                    self.out_txt_by_time()
-            return self.reply
-        except Exception as e:
-            return f"错误代码101：API调用失败"
-class Worker_ai_doubao(QThread):
-    progress = pyqtSignal(str)
-    def __init__(self,in_txt,in_widget):
-        super().__init__()
-        self.result = ''
-        self.in_txt = in_txt
-        if not user:
-            self.client = Ark(ak="", sk="")
-            self.model = ''
-        else:
-            doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-            ak = doubao_array[0]
-            sk = doubao_array[1]
-            self.model = doubao_array[2]
-            self.client = Ark(ak=ak, sk=sk)
+#                 if self.text_out:
+#                     self.out_txt_by_time()
+#             return self.reply
+#         except Exception as e:
+#             return f"错误代码101：API调用失败"
+# class Worker_ai_doubao(QThread):
+#     progress = pyqtSignal(str)
+#     def __init__(self,in_txt,in_widget):
+#         super().__init__()
+#         self.result = ''
+#         self.in_txt = in_txt
+#         if not user:
+#             self.client = Ark(ak="", sk="")
+#             self.model = ''
+#         else:
+#             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
+#             ak = doubao_array[0]
+#             sk = doubao_array[1]
+#             self.model = doubao_array[2]
+#             self.client = Ark(ak=ak, sk=sk)
 
-        self.text_out = in_widget
-    def run(self):
-        self.result = self.doubao_ai(self.in_txt)
-        self.progress.emit(self.result)
-    def out_txt_by_time(self):
-        txt_array = self.reply.split('，')
-        for index,word in enumerate(txt_array):
-            if index == len(txt_array) -1:
-                self.text_out.insertPlainText(word)
-            else:
-                self.text_out.insertPlainText(word + '，')
-            time.sleep(random.uniform(0.05,0.2))
-    def doubao_ai(self,in_txt):
-        global messages
-        try:
-            if not in_txt:
-                self.reply = ""
-                return
-            messages =[{"role": "user","content": in_txt}]
+#         self.text_out = in_widget
+#     def run(self):
+#         self.result = self.doubao_ai(self.in_txt)
+#         self.progress.emit(self.result)
+#     def out_txt_by_time(self):
+#         txt_array = self.reply.split('，')
+#         for index,word in enumerate(txt_array):
+#             if index == len(txt_array) -1:
+#                 self.text_out.insertPlainText(word)
+#             else:
+#                 self.text_out.insertPlainText(word + '，')
+#             time.sleep(random.uniform(0.05,0.2))
+#     def doubao_ai(self,in_txt):
+#         global messages
+#         try:
+#             if not in_txt:
+#                 self.reply = ""
+#                 return
+#             messages =[{"role": "user","content": in_txt}]
                 
-            if user and len(open('./data/doubao_token.txt','r').read().split('\n')) != 3:
-                return '请先在AI接口(F4)中输入doubao的ak & sk & model'
-            else:
-                completion = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages)
-                self.reply = completion.choices[0].message.content.strip('\n\r')
-                # messages.append({"role": "assistant","content": self.reply})
-                # if len(messages) >= 5:
-                #     messages = [{"role": "user","content": in_txt},{"role": "assistant","content": self.reply},]
-                # messages = []
-                if self.text_out:
-                    self.out_txt_by_time()
-            return self.reply
-        except Exception as e:
-            return f"错误代码102：API调用失败"
+#             if user and len(open('./data/doubao_token.txt','r').read().split('\n')) != 3:
+#                 return '请先在AI接口(F4)中输入doubao的ak & sk & model'
+#             else:
+#                 completion = self.client.chat.completions.create(
+#                     model=self.model,
+#                     messages=messages)
+#                 self.reply = completion.choices[0].message.content.strip('\n\r')
+#                 # messages.append({"role": "assistant","content": self.reply})
+#                 # if len(messages) >= 5:
+#                 #     messages = [{"role": "user","content": in_txt},{"role": "assistant","content": self.reply},]
+#                 # messages = []
+#                 if self.text_out:
+#                     self.out_txt_by_time()
+#             return self.reply
+#         except Exception as e:
+#             return f"错误代码102：API调用失败"
 
 class Worker_Ocr(QThread):
     progress = pyqtSignal(str)
