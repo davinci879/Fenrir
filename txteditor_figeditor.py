@@ -1,733 +1,580 @@
-
-import numpy as np
+# -*- coding: utf-8 -*-
+"""
+Fenrir 附图编辑器 - Figeditor
+功能：在专利附图上手动/自动标注附图标记，支持OCR识别、转线条图、锐化。
+"""
+import os
+import sys
 import base64
-import json
+import numpy as np
+import cv2
+import requests
+import qtawesome as qta
+import qdarkstyle
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
-import sys
-import qtawesome as qta
-import requests
-import qdarkstyle
-import cv2
-from matplotlib import pyplot as plt
-import os,subprocess,time
-class Worker_Submit(QThread):
-    progress = pyqtSignal(list)
-    def __init__(self,in_dir):
+
+
+# ============ 百度OCR线程 ============
+OCR_TOKEN_URL = 'https://aip.baidubce.com/oauth/2.0/token'
+OCR_API_URL = 'https://aip.baidubce.com/rest/2.0/ocr/v1/general'
+_BAIDU_AK = ''
+_BAIDU_SK = ''
+
+
+class Worker_OCR(QThread):
+    """百度通用文字识别"""
+    done = pyqtSignal(list)
+
+    def __init__(self, img_path):
         super().__init__()
-        self.in_dir = in_dir
-        self.figmark_json = []
+        self.img_path = img_path
+
     def run(self):
         try:
-            self.get_figmark_pos()
+            token = self._get_token()
+            with open(self.img_path, 'rb') as f:
+                img = base64.b64encode(f.read())
+            r = requests.post(
+                OCR_API_URL + '?access_token=' + token,
+                data={'image': img},
+                headers={'content-type': 'application/x-www-form-urlencoded'},
+                timeout=15)
+            self.done.emit(r.json().get('words_result', []))
         except Exception as e:
-            print(e)
-        self.progress.emit(self.figmark_json)
-    def get_access_token(self):
-        url = "https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=4dS07QkGwFnXCH15GA3Ia5dx&client_secret=uaXtCWB99PzlffMIOhgdhLgqWNG0OqXT"
-        payload = json.dumps("")
-        headers = {'Content-Type': 'application/json','Accept': 'application/json'}
-        response = requests.request("POST", url, headers=headers, data=payload)
-        return response.json().get("access_token")
-    def get_figmark_pos(self):
-        global user
-        # if user == 'admin':
-        #     request_url = 'https://aip.baidubce.com/rest/2.0/ocr/v1/accurate' # 高精度
-        # else:
-        request_url = "https://aip.baidubce.com/rest/2.0/ocr/v1/general" # 普通
-        # 二进制方式打开图片文件
-        img = base64.b64encode(open(self.in_dir, 'rb').read())
+            print('OCR error:', e)
+            self.done.emit([])
 
-        params = {"image":img}
-        access_token = self.get_access_token()
-        request_url = request_url + "?access_token=" + access_token
-        headers = {'content-type': 'application/x-www-form-urlencoded'}
-        response = requests.post(request_url, data=params, headers=headers)
-        if response:
-            self.figmark_json = response.json()['words_result']
-        else:
-            self.figmark_json = []
-            print('No response')
+    @staticmethod
+    def _get_token():
+        r = requests.post(OCR_TOKEN_URL, params={
+            'grant_type': 'client_credentials',
+            'client_id': _BAIDU_AK,
+            'client_secret': _BAIDU_SK}, timeout=10)
+        return r.json().get('access_token', '')
 
-class Figeditor(QWidget):
-    def __init__(self,user_login,active_figmark):
+
+# ============ 贝塞尔曲线标注 ============
+class CurveItem(QGraphicsItem):
+    def __init__(self, x1, y1, x2, y2, x3, y3, color, width):
         super().__init__()
-        self.in_dir = ''
-        self.pixmap = ''
-        global user
-        user = user_login
+        self.pts = (x1, y1, x2, y2, x3, y3)
+        self.color = QColor(color)
+        self.width = width
+
+    def boundingRect(self):
+        x1, y1, x2, y2, x3, y3 = self.pts
+        # 扩大范围避免曲线被裁剪
+        pad = 20
+        return QRectF(min(x1, x2, x3) - pad, min(y1, y2, y3) - pad,
+                      max(x1, x2, x3) - min(x1, x2, x3) + pad * 2,
+                      max(y1, y2, y3) - min(y1, y2, y3) + pad * 2)
+
+    def paint(self, painter, option=None, widget=None):
+        painter.setPen(QPen(self.color, self.width, Qt.SolidLine))
+        painter.setRenderHint(QPainter.Antialiasing)
+        x1, y1, x2, y2, x3, y3 = self.pts
+        # 两段贝塞尔 S 形，M 点按 3:2 比例（初始端:末端 = 3:2）
+        # M = P0 + (P3-P0)*0.6
+        mx = x1 + (x3 - x1) * 0.6
+        my = y1 + (y3 - y1) * 0.6
+        # 第二段第一个控制点 = 2M-C2，保证相切
+        c3x, c3y = 2 * mx - x2, 2 * my - y2
+        path = QPainterPath()
+        path.moveTo(x1, y1)
+        path.cubicTo(x1, y1, x2, y2, mx, my)
+        path.cubicTo(c3x, c3y, x3, y3, x3, y3)
+        painter.drawPath(path)
+
+
+# ============ 主窗口 ============
+class Figeditor(QWidget):
+    def __init__(self, active_figmark=None):
+        super().__init__()
         self.active_figmark = active_figmark
-        self.mark = '1'
-        self.draw_yes = '0'
+        self.in_dir = ''
+        self.pixmap = None
         self.line_color = 'black'
-        self.mark = '1'
-        self.pos_item_array = []
-        self.pos_item_array_temp = []
-        self.figmark_json ={}
-        self.reco_mark_flag = False
-        self.x0,self.y0 = 0,0
-        self.main_ui()
-    def main_ui(self):
-        self.setWindowTitle("Figeditor 推荐尺寸 DPI 300 10cm * 10cm 以下  或  1200px * 1200px 以下")
+        self.draw_yes = False
+        self.x0 = self.y0 = 0
+        # 标注列表：每项是 dict
+        # {text_item, line1, line2, curve, x0,y0,x1,y1,x2,y2,x3,y3, xt,yt, mark}
+        self.marks = []
+        self.preview_items = []   # 鼠标移动时的临时项
+        self.figmark_json = []
+        self.reco_flag = False
+        self._build_ui()
+
+    def _build_ui(self):
+        self.setWindowTitle('Figeditor  推荐 1200px*1200px 以下')
         self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.main_layout = QGridLayout()
-        self.setLayout(self.main_layout)
-        self.setLayout(self.main_layout)
-
-        self.scene = QGraphicsScene()
-        self.scene.setBackgroundBrush(QBrush(QColor(Qt.white)))
-        self.scene.mouseMoveEvent = self.fn_mouse_motion
-        self.scene.mousePressEvent = self.fn_mouse_press
-        self.scene.dropEvent = self.dropEvent
-        self.scene.dragMoveEvent = self.dragMoveEvent
-        self.scene.dragEnterEvent = self.dragEnterEvent
-
-        self.canvas_fig = QGraphicsView(self.scene)
-        self.canvas_fig.setFixedSize(600,600)
+        self.setFixedSize(900, 620)
         self.move(400, 200)
-        self.setFixedSize(880, 615)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(6)
 
+        # 画布
+        self.scene = QGraphicsScene()
+        self.scene.setBackgroundBrush(QBrush(Qt.white))
+        self.scene.mouseMoveEvent = self._mouse_move
+        self.scene.mousePressEvent = self._mouse_press
+        self.scene.dragEnterEvent = lambda e: e.accept() if e.mimeData().hasUrls() else e.ignore()
+        self.scene.dropEvent = self._on_drop
+        self.canvas = QGraphicsView(self.scene)
+        self.canvas.setFixedSize(600, 600)
+        self.canvas.setMouseTracking(True)
+        root.addWidget(self.canvas)
+
+        # 右侧控制面板
+        panel = QVBoxLayout()
+        panel.setSpacing(6)
+
+        # 模式行
+        row1 = QHBoxLayout()
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(['线条标注', '曲线标注', '文字标注', '阅览模式'])
+        self.combo_mode.setFixedHeight(28)
+        row1.addWidget(self.combo_mode)
         self.bt_color = QPushButton('█')
-        self.bt_color.setToolTip('选择线条颜色')
-        # self.bt_color.setSizePolicy(QSizePolicy.Maximum,QSizePolicy.Fixed)
-        self.bt_color.setStyleSheet('QPushButton {background-color: #19232d ;color:black} QPushButton:hover {background-color: #b3b3b3 ;color:black}')
-        self.bt_color.setFixedSize(10,20)
-        self.bt_color.clicked.connect(self.color_change)
+        self.bt_color.setToolTip('线条颜色')
+        self.bt_color.setFixedSize(28, 28)
+        self.bt_color.clicked.connect(self._pick_color)
+        row1.addWidget(self.bt_color)
+        panel.addLayout(row1)
 
-        self.combo_linetype = QComboBox()
-        self.combo_linetype.addItems(['线条标注','文字标注','阅览模式']) # ,'曲线标注'
-        self.combo_linetype.setFixedSize(70,30)
+        # 操作类型行
+        self.combo_op = QComboBox()
+        self.combo_op.addItems(['单独标注', '识别标注', '擦除标记', '一键标注', '转线条图', '图像锐化'])
+        self.combo_op.setFixedHeight(28)
+        self.combo_op.currentIndexChanged.connect(self._on_op_changed)
+        panel.addWidget(self.combo_op)
 
-        self.label_content = QLabel('标记文本')
-        self.label_content.setFixedSize(70,30)
+        # 标记文本行
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel('标记'))
+        self.text_mark = QLineEdit('1')
+        self.text_mark.setFixedHeight(28)
+        row2.addWidget(self.text_mark)
+        panel.addLayout(row2)
 
-        self.text_mark = QLineEdit()
-        self.text_mark.setMinimumWidth(120)
-        self.text_mark.setMaximumHeight(30)
-        self.text_mark.setPlaceholderText('附图标记编号/名称')
-        self.text_mark.insert('1')
+        # 滑块
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel('字号'))
+        self.slider_font = QSlider(Qt.Horizontal)
+        self.slider_font.setRange(10, 100)
+        self.slider_font.setValue(40)
+        row3.addWidget(self.slider_font)
+        panel.addLayout(row3)
 
-        self.bt_load = QPushButton('加 载')
-        self.bt_load.setFixedSize(70,30)
-        self.bt_load.clicked.connect(self.fn_load_pic)
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel('线宽'))
+        self.slider_width = QSlider(Qt.Horizontal)
+        self.slider_width.setRange(1, 10)
+        self.slider_width.setValue(2)
+        row4.addWidget(self.slider_width)
+        panel.addLayout(row4)
 
-        self.bt_save = QPushButton('保 存')
-        self.bt_save.setFixedSize(70,30)
-        self.bt_save.clicked.connect(self.fn_figsave)
-
-        self.bt_clear = QPushButton('清空画布')
-        self.bt_clear.setFixedSize(70,30)
-        self.bt_clear.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        self.bt_clear.clicked.connect(self.clear_all)
-
-        self.bt_mspaint = QPushButton('画图板')
-        self.bt_mspaint.setToolTip('打开系统画图板')
-        self.bt_mspaint.setFixedSize(70,30)
-        self.bt_mspaint.clicked.connect(self.fn_mspaint)
-
-        self.combo_submittype = QComboBox()
-        self.combo_submittype.addItems(['单独标注','识别标注','擦除标记','一键标注','转线条图','图像锐化'])#['无损放大'])
-        self.combo_submittype.setFixedSize(70,30)
-        self.combo_submittype.currentIndexChanged.connect(self.on_combobox_changed)
-
+        # 按钮网格
+        btn_grid = QGridLayout()
+        btn_grid.setSpacing(4)
+        self.bt_load = QPushButton('加载')
+        self.bt_load.setFixedHeight(28)
+        self.bt_load.clicked.connect(self._load_pic)
+        self.bt_save = QPushButton('保存')
+        self.bt_save.setFixedHeight(28)
+        self.bt_save.clicked.connect(self._save_pic)
         self.bt_load_mark = QPushButton('加载标记')
-        self.bt_load_mark.setToolTip('载入正在使用的标记')
-        self.bt_load_mark.setFixedSize(70,30)
-        self.bt_load_mark.clicked.connect(self.fn_load_mark)
-
-        self.bt_submit = QPushButton('提  交')
-        self.bt_submit.setFixedSize(150,30)
-        self.bt_submit.setStyleSheet('QPushButton {background-color: #e55f00 ; color:grey} QPushButton:hover {background-color: #f69958}')
+        self.bt_load_mark.setFixedHeight(28)
+        self.bt_load_mark.clicked.connect(self._load_marks_from_panel)
+        self.bt_mspaint = QPushButton('画图板')
+        self.bt_mspaint.setFixedHeight(28)
+        self.bt_mspaint.clicked.connect(self._open_mspaint)
+        self.bt_clear = QPushButton('清空')
+        self.bt_clear.setFixedHeight(28)
+        self.bt_clear.setStyleSheet('QPushButton{background:#e55f00;color:white}')
+        self.bt_clear.clicked.connect(self.clear_all)
+        self.bt_submit = QPushButton('提交')
+        self.bt_submit.setFixedHeight(30)
+        self.bt_submit.setStyleSheet('QPushButton{background:#e55f00;color:white}')
         self.bt_submit.setEnabled(False)
-        self.bt_submit.clicked.connect(self.fn_submit)
+        self.bt_submit.clicked.connect(self._submit)
+        btn_grid.addWidget(self.bt_load, 0, 0)
+        btn_grid.addWidget(self.bt_save, 0, 1)
+        btn_grid.addWidget(self.bt_load_mark, 1, 0)
+        btn_grid.addWidget(self.bt_mspaint, 1, 1)
+        btn_grid.addWidget(self.bt_clear, 2, 0)
+        btn_grid.addWidget(self.bt_submit, 2, 1, 1, 1)
+        panel.addLayout(btn_grid)
 
-        self.label_fontsize = QLabel('标记尺寸')
-        self.label_fontsize.setFixedSize(70,30)
-
-        self.slider_fontsize = QSlider(Qt.Horizontal)
-        self.slider_fontsize.setRange(10, 100)
-        self.slider_fontsize.setValue(40)
-        self.slider_fontsize.setTickPosition(QSlider.TicksBelow)  # 设置滑块的刻度位置
-        self.slider_fontsize.setMinimumWidth(100)
-        self.slider_fontsize.valueChanged.connect(self.change_value_1)
-        self.slider_fontsize.mouseReleaseEvent = self.slider_pressrelease_1
-
-        self.label_linewidth = QLabel('线  宽')
-        self.label_linewidth.setFixedSize(70,30)
-
-        self.slider_linewidth = QSlider(Qt.Horizontal)
-        self.slider_linewidth.setRange(1, 10)
-        self.slider_linewidth.setValue(2)
-        self.slider_linewidth.setTickPosition(QSlider.TicksBelow)  # 设置滑块的刻度位置
-        self.slider_linewidth.setMinimumWidth(100)
-        self.slider_linewidth.valueChanged.connect(self.change_value_2)
-        self.slider_linewidth.mouseReleaseEvent = self.slider_pressrelease_2
-
+        # 标记列表
         self.text_allmarks = QTextEdit()
         self.text_allmarks.setPlaceholderText('附图标记列表')
-        self.text_allmarks.setMinimumWidth(60)
-        self.text_allmarks.setMinimumHeight(160)
         self.text_allmarks.setVisible(False)
+        panel.addWidget(self.text_allmarks, 1)
 
-        self.table_allmarks = QTableWidget()
-        self.table_allmarks.setMinimumHeight(100)
-        self.table_allmarks.setToolTip('双击修改/删除对应的标记')
-        self.table_allmarks.setRowCount(99)             # 给列表设置行数
-        self.table_allmarks.setColumnCount(2)          # 给表格设置列数
-        self.table_allmarks.setHorizontalHeaderLabels(["符号","名称"])   # 设置行标题
-        self.table_allmarks.setVerticalHeaderLabels(('%02d' % _) for _ in range(1,99))
-        self.table_allmarks.setColumnWidth(0,75)     # 设置第1列列宽
-        self.table_allmarks.setColumnWidth(1,75)
-        # self.table_allmarks.horizontalHeader().hide()  # 隐藏水平表头
-        # self.table_allmarks.verticalHeader().hide()    # 隐藏垂直表头
-        self.table_allmarks.cellChanged.connect(self.on_cell_changed)
-        self.main_layout.addWidget(self.canvas_fig,0,0,11,1) # y,x,height,width
+        self.table = QTableWidget(99, 2)
+        self.table.setHorizontalHeaderLabels(['符号', '名称'])
+        self.table.setColumnWidth(0, 60)
+        self.table.setColumnWidth(1, 60)
+        self.table.cellChanged.connect(self._on_cell_changed)
+        panel.addWidget(self.table, 1)
 
-        self.lb_0 = QLabel('')
+        root.addLayout(panel, 1)
 
-        self.main_layout.addWidget(self.bt_color,0,9,1,1)
-        self.main_layout.addWidget(self.combo_linetype,0,10,1,1)
-        self.main_layout.addWidget(self.bt_load,0,11,1,1)
-        self.main_layout.addWidget(self.bt_save,0,12,1,1)
-
-        self.main_layout.addWidget(self.label_content,1,10,1,1)
-        self.main_layout.addWidget(self.text_mark,1,11,1,2)
-
-        self.main_layout.addWidget(self.label_fontsize,2,10,1,1)
-        self.main_layout.addWidget(self.slider_fontsize,2,11,1,2)
-
-        self.main_layout.addWidget(self.label_linewidth,3,10,1,1)
-        self.main_layout.addWidget(self.slider_linewidth,3,11,1,2)
-
-        self.main_layout.addWidget(self.bt_load_mark,4,10,1,1)
-        self.main_layout.addWidget(self.bt_clear,4,11,1,1)
-        self.main_layout.addWidget(self.bt_mspaint,4,12,1,1)
-
-        self.main_layout.addWidget(self.combo_submittype,5,10,1,1)
-        self.main_layout.addWidget(self.bt_submit,5,11,1,2)
-
-        self.main_layout.addWidget(self.text_allmarks,6,10,6,3)
-        self.main_layout.addWidget(self.table_allmarks,6,10,6,3)
-    
-    def on_cell_changed(self, row, column):
-        current_cell = self.table_allmarks.item(row, column)
-       
-        if current_cell:
-            current_txt = current_cell.text()
-            if column == 0: # 数字行
-                if not current_txt:
-                    try:
-                        self.scene.removeItem(self.pos_item_array[row][0])
-                    except:
-                        pass
-                    try:
-                        self.scene.removeItem(self.pos_item_array[row][1])
-                    except:
-                        pass
-                    try:
-                        self.scene.removeItem(self.pos_item_array[row][2])
-                    except:
-                        pass
-                    try:
-                        self.pos_item_array[row] = ['','','','','','','','','','','','','']
-                        # self.pos_item_array.remove(self.pos_item_array[row])
-                    except:
-                        pass
-                elif current_txt and self.text_mark.text() != current_txt and not self.reco_mark_flag:
-                    try:
-                        self.scene.removeItem(self.pos_item_array[row][0])
-                        txt = self.scene.addText(current_txt,QFont(self.font().family(), self.slider_fontsize.value()/2))
-                        txt.setDefaultTextColor(QColor(self.line_color))
-                        txt.setPos(float(self.pos_item_array[row][-2]),float(self.pos_item_array[row][-1]))
-                        self.pos_item_array[row][0] = txt
-                    except:
-                        pass
-                    
-            elif column == 1: # 文本行
-                num = self.table_allmarks.item(row, 0).text()
-                name = self.table_allmarks.item(row, 1).text()
-                try:
-                    self.scene.removeItem(self.pos_item_array[row][0])
-                    txt = self.scene.addText(f'{num}{name}',QFont(self.font().family(), self.slider_fontsize.value()/2))
-                    txt.setDefaultTextColor(QColor(self.line_color))
-                    txt.setPos(float(self.pos_item_array[row][-2]),float(self.pos_item_array[row][-1]))
-                    self.pos_item_array[row][0] = txt
-                except:
-                    pass
-
-    def change_value_1(self):
-        self.label_fontsize.setText(str(self.slider_fontsize.value()))
-    def slider_pressrelease_1(self,event):
-        self.label_fontsize.setText('标记尺寸')
-    def change_value_2(self):
-        self.label_linewidth.setText(str(self.slider_linewidth.value()))
-    def slider_pressrelease_2(self,event):
-        self.label_linewidth.setText('线 宽')
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()  # 接受包含URLs的拖拽事件
-        else:
-            event.ignore()
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-    def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            urls = [url.toLocalFile() for url in event.mimeData().urls()]
-            # 处理拖放的本地文件路径
-            self.in_dir = urls[0]
+    # ---------- 事件 ----------
+    def _on_drop(self, event):
+        urls = event.mimeData().urls()
+        if urls:
+            self.in_dir = urls[0].toLocalFile()
             self.reload_pic(self.in_dir)
             self.bt_submit.setEnabled(True)
-            self.bt_submit.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-            event.accept()
-        else:
-            event.ignore()
+        event.accept()
 
-    def on_combobox_changed(self):
-        if self.combo_submittype.currentText() == '一键标注':
+    def _on_op_changed(self):
+        if self.combo_op.currentText() == '一键标注':
             self.text_allmarks.setVisible(True)
-            self.table_allmarks.setVisible(False)
+            self.table.setVisible(False)
             if not self.text_allmarks.toPlainText():
                 self.text_allmarks.setPlainText('1 组件1\n2 组件2')
         else:
             self.text_allmarks.setVisible(False)
-            self.table_allmarks.setVisible(True)
-    def fn_load_mark(self):
+            self.table.setVisible(True)
+
+    def _pick_color(self):
+        c = QColorDialog.getColor()
+        if c.isValid():
+            self.line_color = c.name()
+            self.bt_color.setStyleSheet(f'QPushButton{{color:{self.line_color}}}')
+
+    def _load_pic(self):
+        path, _ = QFileDialog.getOpenFileName(self, '打开', '', '图片 (*.jpg *.jpeg *.png *.bmp)')
+        if path:
+            self.in_dir = path
+            self.reload_pic(path)
+            self.bt_submit.setEnabled(True)
+
+    def _load_marks_from_panel(self):
         if self.active_figmark:
             self.text_allmarks.setHtml(self.active_figmark.toHtml())
-    def fn_submit(self):
-        if self.in_dir:
-            self.submit_type = self.combo_submittype.currentText()
-            self.figsubmit_thread = Worker_Submit(self.in_dir)
-            self.figsubmit_thread.progress.connect(self.image_handle)
-            self.figsubmit_thread.start()
-        else:
-            return
-    def fn_mspaint(self):
-        image_path = './temp/paint.jpg'
+
+    def _open_mspaint(self):
         try:
-            image = QImage(self.scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
-            painter = QPainter(image)
-            self.scene.render(painter)
-            painter.end()
-            image.save(image_path)       
+            os.makedirs('./temp', exist_ok=True)
+            path = './temp/paint.jpg'
+            img = QImage(self.scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
+            p = QPainter(img)
+            self.scene.render(p)
+            p.end()
+            img.save(path)
         except Exception as e:
-            print('Error Code Fig 102',e)
-        time.sleep(1)
-        os.system(f'cd temp & mspaint paint.jpg')
-        
-    def image_handle(self,figmark_json):
-        if self.submit_type == '单独标注':
+            print('export error:', e)
+        QDesktopServices.openUrl(QUrl('mspaint:' + os.path.abspath(path).replace('\\', '/')))
+
+    def _save_pic(self):
+        path, _ = QFileDialog.getSaveFileName(self, '保存', '未命名.jpg', 'JPG(*.jpg);;PNG(*.png);;BMP(*.bmp)')
+        if not path:
             return
-        else:
-            self.figmark_json = figmark_json
-            if self.submit_type == '识别标注':
-                self.reco_and_mark()
-            elif self.submit_type == '擦除标记':
-                self.remove_figmark()
-            elif self.submit_type == '一键标注':
-                self.add_marks()
-            elif self.submit_type == '转线条图':
-                self.img_to_line()
-            elif self.submit_type == '图像锐化':
-                self.img_to_sharp()
-    def reco_and_mark(self):
-        self.pos_item_array = []
-        self.reco_mark_flag = True
-        for index,item in enumerate(self.figmark_json):
-            mark = item['words']
-            mark_pos = item['location']
-            xt = mark_pos['left'] - len(mark)*3
-            yt = mark_pos['top']
-            # 覆盖原位置
-            rect = QGraphicsRectItem(xt, yt, mark_pos['width'] + len(mark)*9, mark_pos['height'] + 5)
-            rect.setBrush(QBrush(Qt.white)) # 白色填充
-            rect.setPen(QPen(Qt.white)) #  白色边框
-            self.scene.addItem(rect)
-            # 增加新文本
-            txt = self.scene.addText(mark,QFont(self.font().family(), self.slider_fontsize.value()/2))
-            txt.setPos(xt,yt)
-            txt.setDefaultTextColor(QColor(self.line_color))
-            if xt >= len(mark)*3:
-                txt.setPos(xt, yt)
-            else:
-                txt.setPos(xt, yt)
-            self.pos_item_array.append([txt,'','','','','','','','','','',xt,yt])
-            self.table_allmarks.setItem(index, 0, QTableWidgetItem(mark))
-        self.reco_mark_flag = False
-    def img_to_sharp(self):
-        # 读取图像
-        img = cv2.imread(self.in_dir)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        Laplace_kernel = np.array([[-1,-1,-1],[-1, 9,-1],[-1,-1,-1]])  # 定义拉普拉斯算子
-        # 应用锐化卷积核
-        sharpened_img = cv2.filter2D(img, -1, Laplace_kernel)
-        plt.subplot(1,1,1),plt.imshow(sharpened_img,'gray')
-        plt.xticks([]),plt.yticks([])
-        if '.png' in self.in_dir:
-            path = self.in_dir.replace('.png','_temp.png')
-        elif '.jpg' in self.in_dir:
-            path = self.in_dir.replace('.jpg','_temp.jpg')
-        elif '.bmp' in self.in_dir:
-            path = self.in_dir.replace('.bmp','_temp.bmp')
-        plt.savefig(path)
-        self.reload_pic(path)
+        img = QImage(self.scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
+        p = QPainter(img)
+        self.scene.render(p)
+        p.end()
+        img.save(path)
+        # 可选裁边
+        if QMessageBox.question(self, '裁边', '是否裁掉边缘空白？') == QMessageBox.Yes:
+            self._crop_border(path)
 
-    def img_to_line(self):
-        img=cv2.imdecode(np.fromfile(self.in_dir,dtype=np.uint8),-1)
-        #将img转化成灰度图
-        GrayImage=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
-        # 中值滤波
-        GrayImage= cv2.medianBlur(GrayImage,5)
-        #二值图
-        ret,th1 = cv2.threshold(GrayImage,127,200,cv2.THRESH_BINARY)
-        # 轮廓线，3为Block size, 5为param1值
-        th2 = cv2.adaptiveThreshold(GrayImage,200,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,3,5)
+    def clear_all(self):
+        self.table.clearContents()
+        self.scene.clear()
+        self.scene.setBackgroundBrush(QBrush(Qt.white))
+        self.canvas.setFixedSize(600, 600)
+        self.setFixedSize(880, 615)
+        self.marks.clear()
+        self.preview_items.clear()
+        self.bt_submit.setEnabled(False)
 
-        plt.subplot(1,1,1),plt.imshow(th2,'gray')
-        plt.xticks([]),plt.yticks([])
-        if '.png' in self.in_dir.lower():
-            path = self.in_dir.lower().replace('.png','_temp.png')
-        elif '.jpg' in self.in_dir.lower() or '.jpeg' in self.in_dir.lower():
-            path = self.in_dir.lower().replace('.jpg','_temp.jpg').replace('.jpeg','_temp.jpg')
-        elif '.bmp' in self.in_dir.lower():
-            path = self.in_dir.lower().replace('.bmp','_temp.bmp')
-        plt.savefig(path)
-        self.reload_pic(path)
-
-    def reload_pic(self,in_dir):
+    def reload_pic(self, path):
         self.clear_all()
         self.text_mark.setText('1')
-        self.pos_item_array = []
-        self.pos_item_array_temp = []
-        self.table_allmarks.clearContents()
-        self.pixmap = QPixmap(in_dir)
-        self.scene.addItem(QGraphicsPixmapItem(self.pixmap))
-        self.canvas_fig.setFixedSize(self.pixmap.width() + 15, self.pixmap.height() + 15)
+        self.pixmap = QPixmap(path)
+        self.scene.addPixmap(self.pixmap)
+        self.canvas.setFixedSize(self.pixmap.width() + 15, self.pixmap.height() + 15)
         self.setFixedSize(self.pixmap.width() + 300, self.pixmap.height() + 50)
-        
-    def fn_load_pic(self): # 载入图片
-        # self.in_dir = '000.png'
-        self.in_dir, _ = QFileDialog.getOpenFileName(self, "Open file", "", "All files (*.*);;JPG documents(*.jpg);;BMP documents(*.bmp);; PNG documents(*.png)")
-        if self.in_dir:
-            self.reload_pic(self.in_dir)
-            self.bt_submit.setEnabled(True)
-            self.bt_submit.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        else:
-            return
 
+    # ---------- 坐标计算 ----------
+    def _cursor_pos(self):
+        """全局光标坐标 → scene 坐标"""
+        gp = QCursor.pos()
+        vp = self.canvas.mapFromGlobal(gp)
+        return vp.x(), vp.y()
 
-    def clear_all(self): # 清空画布
-        self.table_allmarks.clearContents()
-        self.scene.clear()
-        self.scene.setBackgroundBrush(QBrush(QColor(Qt.white)))
-        self.canvas_fig.setFixedSize(600,600)
-        self.setFixedSize(880, 615)
-        self.bt_submit.setStyleSheet('QPushButton {background-color: #e55f00 ; color:grey} QPushButton:hover {background-color: #f69958}')
-        self.bt_submit.setEnabled(False)
-    def color_change(self): # 选择画笔颜色
-        self.line_color = QColorDialog().getColor().name()
-        if not self.line_color:
-            self.line_color = 'black'
-        self.bt_color.setStyleSheet("QPushButton {background-color:#19232d;color:"+ self.line_color + '} QPushButton:hover {background-color: #b3b3b3 ;color:'+ self.line_color+'}')
-    def preview_edge(self,path): # 获取最大、最小点的坐标,并裁切
-        # 图像读取
-        img = self.imread_chinese(path)
-        # 二值化
-        ret, binary = cv2.threshold(img, 200, 255, cv2.THRESH_TRUNC)  # 这里指定threshold为阈值
-        # Canny边缘检测
-        canny = cv2.Canny(binary, 0, 100)  # 阈值0,100  较小的阈值将间断的边缘连接起来，较大的阈值检测图像中明显的边缘
-        # 获取边缘最大、最小坐标
-        ans, highest_h, highest_w, lowest_h, lowest_w = [], 0, 0, 100000, 100000
-        highest_Coordinate, lowest_Coordinate = [0, 0], [0, 0]
-        for h in range(0, canny.shape[0]):
-            for w in range(0, canny.shape[1]):
-                if canny[h, w] != 0:
-                    ans = ans + [[h, w]]
-                    if highest_h < h:
-                        highest_h = h
-                    if highest_w < w:
-                        highest_w = w
-                    highest_Coordinate = [highest_h, highest_w]
-                    if lowest_h > h:
-                        lowest_h = h
-                    if lowest_w > w:
-                        lowest_w = w
-                    lowest_Coordinate = [lowest_h, lowest_w]
-        crop = img[lowest_h:highest_h,lowest_w:highest_w]
-        cv2.imencode('.jpg',crop)[1].tofile(path)
-    def imread_chinese(self,path):
-        with open(path, 'rb') as f:
-            img = np.asarray(bytearray(f.read()), dtype="uint8")
-            return cv2.imdecode(img, 1)
-    def fn_figsave(self): #保存图片
-        try:
-            reply = QMessageBox.question(self, '裁切边缘空白', '是否裁切边缘空白？',
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            image = QImage(self.scene.sceneRect().size().toSize(), QImage.Format_ARGB32)
-            painter = QPainter(image)
-            self.scene.render(painter)
-            painter.end()
-            path, _ = QFileDialog.getSaveFileName(self, "Save file", "未命名.jpg", "JPG documents(*.jpg);;BMP documents(*.bmp);; PNG documents(*.png);;All files (*.*)")
-            if not path:
-                return
-            painter.end()
-            image.save(path)
-            
-            if reply == QMessageBox.Yes:
-                self.preview_edge(path)
-        except Exception as e:
-            print('Error Code Fig 101',e)
-    def got_linepoint(self): #自动识别方位
-        self.x1 = self.x0
-        self.y1 = self.y0
-        self.x2 = QCursor.pos().x() - self.pos().x() - 23
-        self.y2 = QCursor.pos().y() - self.pos().y() - 50
-        # 获取self.x2
-        if self.x2 >= self.pixmap.width() - 25:
-            self.x2 = self.pixmap.width() - 25
-        elif self.x2 <= 20:
-            self.x2 = 20
-        else:
-            pass
-        # 获取self.y2
-        if self.y2 >= self.pixmap.height() - 10:
-            self.y2 = self.pixmap.height() - 10
-        elif self.y2 <= 27:
-            self.y2 = 27
-        else:
-            pass
-
-        if self.x2 <= self.x1 and self.y2 < self.y1: #左上
-            self.x3 = self.x2 - self.slider_fontsize.value() #横线长度
-            self.xt = self.x2 - self.slider_fontsize.value()/2 #标注位置
-        elif self.x2 <= self.x1 and self.y2 >= self.y1: #左下
-            self.x3 = self.x2 - self.slider_fontsize.value()
-            self.xt = self.x2 - self.slider_fontsize.value()/2
-        elif self.x2 > self.x1 and self.y2 >= self.y1: #右下
-            self.x3 = self.x2 + self.slider_fontsize.value()
-            self.xt = self.x2 + self.slider_fontsize.value()/2
-        elif self.x2 > self.x1 and self.y2 < self.y1: #右上
-            self.x3 = self.x2 + self.slider_fontsize.value()
-            self.xt = self.x2 + self.slider_fontsize.value()/2
-        self.y3 = self.y2
-        self.xt = self.xt - self.slider_fontsize.value()/3 - len(self.mark)
-        self.yt = self.y2 - self.slider_fontsize.value()*0.7 - 13#标号与横线间距
-        if self.combo_linetype.currentText() == '文字标注':
-            if self.x2 <= self.x1:
-                self.xt = self.xt - self.slider_fontsize.value()/3 - len(self.mark) + 15
+    def _calc_anchor(self):
+        """根据当前光标位置算标注落点 xt, yt 和辅助线终点 x2,y2,x3,y3"""
+        x2, y2 = self._cursor_pos()
+        pw = self.pixmap.width() if self.pixmap else 600
+        ph = self.pixmap.height() if self.pixmap else 600
+        x2 = max(20, min(x2, pw - 25))
+        y2 = max(27, min(y2, ph - 10))
+        fs = self.slider_font.value()
+        mark = self.text_mark.text()
+        mode = self.combo_mode.currentText()
+        # 弧线末端方向
+        dx = 1 if x2 > self.x0 else -1
+        x3 = x2 + dx * fs
+        y3 = y2
+        if mode == '曲线标注':
+            # 数字位于弧线外端，根据方向避免与曲线干涉
+            mark_w = len(mark) * fs / 4
+            if dx > 0:
+                xt = x3 + fs / 4
+                yt = y3 - fs * 0.3
             else:
-                self.xt = self.xt - self.slider_fontsize.value()/3 - len(self.mark) - 5
-            self.yt = self.y2 - self.slider_fontsize.value()*0.7 - 3
-    def fn_mouse_press(self,event): 
-        if not self.pixmap:
-            return
-        try:
-            if event.button() == Qt.RightButton:
-                return
-            elif event.button() == Qt.LeftButton:
-                if self.combo_submittype.currentText() not in ['单独标注','识别标注']:
-                    return
-                if self.combo_linetype.currentText() not in ['文字标注','线条标注','曲线标注']:
-                    return
-                self.mark = self.text_mark.text()
-                if self.draw_yes == '0':
-                    self.draw_yes = '1'
-                    self.x0 = QCursor.pos().x() - self.pos().x() - 23
-                    self.y0 = QCursor.pos().y() - self.pos().y() - 50
-                    
-                    self.got_linepoint()
-                    temp_txt = self.scene.addText(self.mark,QFont(self.font().family(), self.slider_fontsize.value()/2))
-                    temp_txt.setDefaultTextColor(QColor(self.line_color))
-                    temp_txt.setPos(self.xt,self.yt)
-                    if self.combo_linetype.currentText() == '文字标注':
-                        self.pos_item_array_temp.append([temp_txt,'',''])
-                    elif self.combo_linetype.currentText() == '线条标注':
-                        pen = QPen(QColor(self.line_color),self.slider_linewidth.value())
-                        temp_line_1 = self.scene.addLine(self.x1,self.y1,self.x2,self.y2, pen) # 起点的x y坐标,终点的x y
-                        temp_line_2 = self.scene.addLine(self.x2,self.y2,self.x3,self.y3, pen)
-                        self.pos_item_array_temp.append([temp_txt,temp_line_1,temp_line_2])
-
-                elif self.draw_yes == '1':
-                    self.draw_yes = '0'
-                    self.got_linepoint()
-                    txt = self.scene.addText(self.mark,QFont(self.font().family(), self.slider_fontsize.value()/2))
-                    txt.setDefaultTextColor(QColor(self.line_color))
-                    self.pos_item_array.append(['','','','','','','','','','','','',''])
-                    if self.combo_linetype.currentText() == '文字标注':
-                        txt.setPos(self.xt,self.yt)
-                        for index,_ in enumerate(self.pos_item_array):
-                            if self.pos_item_array[index] == ['','','','','','','','','','','','','']:
-                                self.pos_item_array[index] = [txt,'','','','','','','','','','',self.xt,self.yt]
-                                break
-                    elif self.combo_linetype.currentText() == '线条标注':
-                        txt.setPos(self.xt,self.yt)
-                        pen = QPen(QColor(self.line_color),self.slider_linewidth.value())
-                        line_1 = self.scene.addLine(self.x1,self.y1,self.x2,self.y2, pen) # 起点的x y坐标,终点的x y
-                        line_2 = self.scene.addLine(self.x2,self.y2,self.x3,self.y3, pen)
-                        for index,_ in enumerate(self.pos_item_array):
-                            if self.pos_item_array[index] == ['','','','','','','','','','','','','']:
-                                self.pos_item_array[index] = [txt,line_1,line_2,self.x0,self.y0,self.x1,self.y1,self.x2,self.y2,self.x3,self.y3,self.xt,self.yt]
-                                break
-                    elif self.combo_linetype.currentText() == '曲线标注':
-                        txt.setPos(self.xt,self.yt)
-                        curve_line = CurveItem(self.x1,self.y1,self.x2,self.y2,self.x3,self.y3,self.line_color,self.slider_linewidth)
-                        self.scene.addItem(curve_line)
-                        for index,_ in enumerate(self.pos_item_array):
-                            if self.pos_item_array[index] == ['','','','','','','','','','','','','']:
-                                self.pos_item_array[index] = [txt,curve_line,'',self.x0,self.y0,self.x1,self.y1,self.x2,self.y2,self.x3,self.y3,self.xt,self.yt]
-                                break
-                    # 添加列表
-                    for index in range(0,100):
-                        table_item_tmp = self.table_allmarks.item(index,0)
-                        if table_item_tmp:
-                            if not table_item_tmp.text():
-                                # self.table_allmarks.setItem(index, 0, QTableWidgetItem(line_type))
-                                self.table_allmarks.setItem(index, 0, QTableWidgetItem(self.mark))
-                                break
-                        elif not table_item_tmp:
-                            # self.table_allmarks.setItem(index, 0, QTableWidgetItem(line_type))
-                            self.table_allmarks.setItem(index, 0, QTableWidgetItem(self.mark))
-                            break
-                    # 递增mark
-                    self.old_mark = self.text_mark.text()
-                    if self.old_mark[-1] not in '1234567890':
-                        if self.old_mark[-1] != 'z' and self.old_mark[-1] != 'Z':
-                            self.add_mark = self.old_mark[0:-1] + chr(ord(self.old_mark[-1])+1)
-                        else:
-                            self.add_mark = self.old_mark
-                    else:
-                        self.add_mark = int(self.old_mark) + 1
-                    self.text_mark.setText(str(self.add_mark))
-
-        except Exception as e:
-            print('Error Code 301',e)
-        self.fn_remove_lineitem_motion() # 避免最后元素无法移除
-    def fn_remove_lineitem_motion(self):
-        try:
-            self.scene.removeItem(self.pos_item_array_temp[-1][0])
-        except:
-            pass
-        try:
-            self.scene.removeItem(self.pos_item_array_temp[-1][1])
-        except:
-            pass
-        try:
-            self.scene.removeItem(self.pos_item_array_temp[-1][2])
-        except:
-            pass
-        try:
-            self.pos_item_array_temp.pop()
-        except:
-            pass 
-    def fn_mouse_motion(self,event): # 鼠标移动
-        if self.draw_yes == '1':
-            try:
-                self.fn_remove_lineitem_motion() # 移除上一个item
-            except:
-                pass
-            if self.combo_linetype.currentText() in ['线条标注','曲线标注','文字标注']:
-                self.got_linepoint()
-                temp_txt = self.scene.addText(self.mark,QFont(self.font().family(), self.slider_fontsize.value()/2))
-                temp_txt.setDefaultTextColor(QColor(self.line_color))
-                temp_txt.setPos(self.xt,self.yt)
-                if self.combo_linetype.currentText() == '文字标注':
-                    self.pos_item_array_temp.append([temp_txt,'',''])
-                elif self.combo_linetype.currentText() == '线条标注':
-                    pen = QPen(QColor(self.line_color),self.slider_linewidth.value())
-                    temp_line_1 = self.scene.addLine(self.x1,self.y1,self.x2,self.y2, pen) # 起点的x y坐标,终点的x y
-                    temp_line_2 = self.scene.addLine(self.x2,self.y2,self.x3,self.y3, pen)
-                    self.pos_item_array_temp.append([temp_txt,temp_line_1,temp_line_2])
-                elif self.combo_linetype.currentText() == '曲线标注':
-                    temp_curve_line = CurveItem(self.x1,self.y1,self.x2,self.y2,self.x3,self.y3,self.line_color,self.slider_linewidth)
-                    self.scene.addItem(temp_curve_line)
-                    self.pos_item_array_temp.append([temp_txt,temp_curve_line,''])
+                xt = x3 - fs / 4 - mark_w
+                yt = y3 - fs * 0.3
+        elif mode == '文字标注':
+            xt = x2 - fs / 3 - len(mark) + (15 if x2 <= self.x0 else -5)
+            yt = y2 - fs * 0.7 - 3
         else:
+            xt = (x2 - fs / 2) - fs / 3 - len(mark) if x2 <= self.x0 else (x2 + fs / 2) - fs / 3 - len(mark)
+            yt = y2 - fs * 0.7 - 13
+        return x2, y2, x3, y3, xt, yt
+
+    def _font(self):
+        return QFont(self.font().family(), max(8, int(self.slider_font.value() / 2)))
+
+    # ---------- 鼠标交互 ----------
+    def _mouse_press(self, event):
+        if not self.pixmap or event.button() == Qt.RightButton:
             return
-    def remove_figmark(self):
-        # self.get_figmark_pos()
-        for _ in self.figmark_json:
-            mark_pos = _['location']
-            rect = QGraphicsRectItem(mark_pos['left'], mark_pos['top'], mark_pos['width'], mark_pos['height'])
-            rect.setBrush(QBrush(Qt.white))
-            rect.setPen(QPen(Qt.white))
-            self.scene.addItem(rect)
-    def add_marks(self):
-        # self.get_figmark_pos()
-        all_marks = self.text_allmarks.toPlainText().replace('\n','\u2029').split('\u2029')
-        for _ in self.figmark_json:
-            mark_in_fig = _['words']
-            mark_pos = _['location']
-            for mark in all_marks:
-                if mark.split()[0] == mark_in_fig:
-                    rect = QGraphicsRectItem(mark_pos['left'] - len(mark)*3, mark_pos['top'], mark_pos['width'] + len(mark)*9, mark_pos['height'] + 5)
-                    rect.setBrush(QBrush(Qt.white)) # 白色填充
-                    rect.setPen(QPen(Qt.white)) #  红色边框
-                    self.scene.addItem(rect)
-                    txt = self.scene.addText(mark.replace(' ',''),QFont(self.font().family(), self.slider_fontsize.value()/2))
-                    txt.setDefaultTextColor(QColor(self.line_color))
-                    if mark_pos['left'] >= len(mark)*3:
-                        txt.setPos(mark_pos['left'] - len(mark)*3, mark_pos['top'])
-                    else:
-                        txt.setPos(mark_pos['left'], mark_pos['top'])
+        if self.combo_op.currentText() not in ('单独标注', '识别标注'):
+            return
+        if self.combo_mode.currentText() not in ('线条标注', '曲线标注', '文字标注'):
+            return
+        if not self.draw_yes:
+            # 第一次点击：起点
+            self.draw_yes = True
+            self.x0, self.y0 = self._cursor_pos()
+        else:
+            # 第二次点击：落点，固化
+            self.draw_yes = False
+            x2, y2, x3, y3, xt, yt = self._calc_anchor()
+            mark = self.text_mark.text()
+            items = {}
+            txt = self.scene.addText(mark, self._font())
+            txt.setDefaultTextColor(QColor(self.line_color))
+            txt.setPos(xt, yt)
+            items['text'] = txt
+            mode = self.combo_mode.currentText()
+            if mode == '线条标注':
+                pen = QPen(QColor(self.line_color), self.slider_width.value())
+                l1 = self.scene.addLine(self.x0, self.y0, x2, y2, pen)
+                l2 = self.scene.addLine(x2, y2, x3, y3, pen)
+                items.update(line1=l1, line2=l2)
+            elif mode == '曲线标注':
+                # 美国专利风格：起点→控制点→落点 的贝塞尔曲线
+                curve = CurveItem(self.x0, self.y0, x2, y2, x3, y3,
+                                  self.line_color, self.slider_width.value())
+                self.scene.addItem(curve)
+                items['curve'] = curve
+            items.update(x0=self.x0, y0=self.y0, x2=x2, y2=y2,
+                         x3=x3, y3=y3, xt=xt, yt=yt, mark=mark)
+            self.marks.append(items)
+            # 写表格
+            for r in range(99):
+                if not self.table.item(r, 0) or not self.table.item(r, 0).text():
+                    self.table.setItem(r, 0, QTableWidgetItem(mark))
                     break
-class CurveItem(QGraphicsItem):
-    def __init__(self,x1,y1,x2,y2,x3,y3,line_color,slider_linewidth):
-        super().__init__()
-        self.x1 = x1
-        self.x2 = x2
-        self.x3 = x3
-        self.y1 = y1
-        self.y2 = y2
-        self.y3 = y3
-        self.line_color = line_color
-        self.linewidth = slider_linewidth.value()
-    def paint(self, painter, option, widget=None):
-        painter.setPen(QPen(QColor(self.line_color),self.linewidth, Qt.SolidLine)) 
-        path = QPainterPath()  # 创建QPainterPath对象
- 
-        # 使用曲线方法绘制样条曲线
-        path.moveTo(self.x1,self.y1)  # 起点
-        path.cubicTo(self.x1,self.y1, self.x2,self.y2, self.x3,self.y3)  # 控制点1, 控制点2, 终点
+            # 标号自增
+            self._inc_mark()
+            self._clear_preview()
 
- 
-        painter.drawPath(path)  # 绘制路径
- 
-        # 返回绘制区域，这里我们绘制整个视图
-        return QRectF(0, 0, 200, 200)
-    
+    def _mouse_move(self, event):
+        if not self.draw_yes:
+            return
+        self._clear_preview()
+        x2, y2, x3, y3, xt, yt = self._calc_anchor()
+        mark = self.text_mark.text()
+        txt = self.scene.addText(mark, self._font())
+        txt.setDefaultTextColor(QColor(self.line_color))
+        txt.setPos(xt, yt)
+        self.preview_items.append(txt)
+        mode = self.combo_mode.currentText()
+        if mode == '线条标注':
+            pen = QPen(QColor(self.line_color), self.slider_width.value())
+            l1 = self.scene.addLine(self.x0, self.y0, x2, y2, pen)
+            l2 = self.scene.addLine(x2, y2, x3, y3, pen)
+            self.preview_items += [l1, l2]
+        elif mode == '曲线标注':
+            curve = CurveItem(self.x0, self.y0, x2, y2, x3, y3,
+                              self.line_color, self.slider_width.value())
+            self.scene.addItem(curve)
+            self.preview_items.append(curve)
 
-class BezierCurveWidget(QWidget):
-    def __init__(self,x1,y1,x2,y2,x3,y3,line_color,slider_linewidth):
-        super().__init__()
-        self.x1 = x1
-        self.x2 = x2
-        self.x3 = x3
-        self.y1 = y1
-        self.y2 = y2
-        self.y3 = y3
-        self.line_color = line_color
-        self.linewidth = slider_linewidth.value()
-        self.setFixedSize(400, 300)
-    
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(self.line_color),self.linewidth)
-        painter.setPen(pen)
+    def _clear_preview(self):
+        for it in self.preview_items:
+            self.scene.removeItem(it)
+        self.preview_items.clear()
 
-        path = QPainterPath()
-        path.moveTo(self.x1,self.y1)  # 起始点
-        path.cubicTo(self.x2 - 10,self.y2 - 10, self.x2 + 10,self.y2 + 10, self.x3,self.y3)  # 控制点1, 控制点2, 终点
- 
-        painter.drawPath(path)
+    def _inc_mark(self):
+        old = self.text_mark.text()
+        if not old:
+            return
+        last = old[-1]
+        if last.isdigit():
+            self.text_mark.setText(str(int(old) + 1))
+        elif last.isalpha() and last not in ('z', 'Z'):
+            self.text_mark.setText(old[:-1] + chr(ord(last) + 1))
+
+    # ---------- 表格编辑 ----------
+    def _on_cell_changed(self, row, col):
+        if self.reco_flag:
+            return
+        cell = self.table.item(row, col)
+        if not cell or row >= len(self.marks):
+            return
+        m = self.marks[row]
+        if col == 0:
+            new_text = cell.text()
+            if not new_text:
+                for k in ('text', 'line1', 'line2', 'curve'):
+                    if k in m:
+                        self.scene.removeItem(m[k])
+                return
+            # 更新文本
+            if 'text' in m:
+                self.scene.removeItem(m['text'])
+            t = self.scene.addText(new_text, self._font())
+            t.setDefaultTextColor(QColor(self.line_color))
+            t.setPos(m['xt'], m['yt'])
+            m['text'] = t
+            m['mark'] = new_text
+        elif col == 1:
+            num = self.table.item(row, 0).text() if self.table.item(row, 0) else ''
+            name = cell.text()
+            if 'text' in m:
+                self.scene.removeItem(m['text'])
+            t = self.scene.addText(num + name, self._font())
+            t.setDefaultTextColor(QColor(self.line_color))
+            t.setPos(m['xt'], m['yt'])
+            m['text'] = t
+
+    # ---------- 提交（OCR + 后处理） ----------
+    def _submit(self):
+        if not self.in_dir:
+            return
+        self.op = self.combo_op.currentText()
+        if self.op == '单独标注':
+            return
+        self.ocr = Worker_OCR(self.in_dir)
+        self.ocr.done.connect(self._on_ocr_done)
+        self.ocr.start()
+
+    def _on_ocr_done(self, words):
+        self.figmark_json = words
+        if self.op == '识别标注':
+            self._reco_and_mark()
+        elif self.op == '擦除标记':
+            self._erase()
+        elif self.op == '一键标注':
+            self._add_auto()
+        elif self.op == '转线条图':
+            self._to_line()
+        elif self.op == '图像锐化':
+            self._to_sharp()
+
+    def _reco_and_mark(self):
+        """OCR识别后，白色矩形盖住原文字，重新写上"""
+        self.reco_flag = True
+        self.marks.clear()
+        for i, item in enumerate(self.figmark_json):
+            mark = item['words']
+            loc = item['location']
+            xt = loc['left'] - len(mark) * 3
+            yt = loc['top']
+            w = loc['width'] + len(mark) * 9
+            h = loc['height'] + 5
+            rect = self.scene.addRect(xt, yt, w, h, QPen(Qt.white), QBrush(Qt.white))
+            t = self.scene.addText(mark, self._font())
+            t.setDefaultTextColor(QColor(self.line_color))
+            t.setPos(xt, yt)
+            self.marks.append({'text': t, 'xt': xt, 'yt': yt, 'mark': mark, 'rect': rect})
+            self.table.setItem(i, 0, QTableWidgetItem(mark))
+        self.reco_flag = False
+
+    def _erase(self):
+        """白色矩形盖住所有识别到的文字"""
+        for item in self.figmark_json:
+            loc = item['location']
+            self.scene.addRect(loc['left'], loc['top'], loc['width'], loc['height'],
+                               QPen(Qt.white), QBrush(Qt.white))
+
+    def _add_auto(self):
+        """根据标记列表，把OCR识别到的文字替换成"编号+名称\""""
+        wanted = {}
+        for line in self.text_allmarks.toPlainText().split('\n'):
+            parts = line.split()
+            if len(parts) >= 2:
+                wanted[parts[0]] = ''.join(parts)
+        for item in self.figmark_json:
+            word = item['words']
+            if word not in wanted:
+                continue
+            loc = item['location']
+            label = wanted[word]
+            x = loc['left'] - len(label) * 3
+            y = loc['top']
+            self.scene.addRect(x, y, loc['width'] + len(label) * 9, loc['height'] + 5,
+                               QPen(Qt.white), QBrush(Qt.white))
+            t = self.scene.addText(label, self._font())
+            t.setDefaultTextColor(QColor(self.line_color))
+            t.setPos(x, y)
+
+    # ---------- 图像后处理 ----------
+    def _read_cn(self, path):
+        with open(path, 'rb') as f:
+            return cv2.imdecode(np.frombuffer(f.read(), np.uint8), -1)
+
+    def _write_cn(self, path, img):
+        ext = os.path.splitext(path)[1] or '.jpg'
+        cv2.imencode(ext, img)[1].tofile(path)
+
+    def _to_sharp(self):
+        img = self._read_cn(self.in_dir)
+        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+        out = cv2.filter2D(img, -1, kernel)
+        path = self.in_dir.rsplit('.', 1)[0] + '_temp.jpg'
+        self._write_cn(path, out)
+        self.reload_pic(path)
+
+    def _to_line(self):
+        img = self._read_cn(self.in_dir)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray = cv2.medianBlur(gray, 5)
+        out = cv2.adaptiveThreshold(gray, 200, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                    cv2.THRESH_BINARY, 3, 5)
+        path = self.in_dir.rsplit('.', 1)[0] + '_temp.jpg'
+        self._write_cn(path, out)
+        self.reload_pic(path)
+
+    def _crop_border(self, path):
+        """裁掉图片白边（numpy 向量化找 bbox）"""
+        img = self._read_cn(path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_TRUNC)
+        canny = cv2.Canny(binary, 0, 100)
+        ys, xs = np.where(canny > 0)
+        if len(ys) == 0:
+            return
+        y1, y2, x1, x2 = ys.min(), ys.max(), xs.min(), xs.max()
+        crop = img[max(0, y1 - 2):y2 + 2, max(0, x1 - 2):x2 + 2]
+        self._write_cn(path, crop)
+
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
-    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api='pyqt5'))#, palette=qdarkstyle.light.palette.LightPalette))
-    window = Figeditor('admin','')
-    window.show()
+    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api='pyqt5'))
+    win = Figeditor()
+    win.show()
     app.exec_()

@@ -1,61 +1,75 @@
+"""
+Fenrir 专利写作助手
+管理多 tab 文本编辑器、附图标记补全、结构导航、查找替换、OCR、附图标记校验等核心功能。
+"""
+# 抑制 libpng iCCP 警告（C 层 fprintf 直接写 fd 2，Python 包装拦不住）
+# 在 import 阶段临时关闭 fd 2，启动后恢复
+import os as _os, sys as _sys
+_fd2 = _sys.stderr.fileno() if hasattr(_sys.stderr, 'fileno') else 2
+_devnull = _os.open(_os.devnull, _os.O_WRONLY)
+_saved_fd2 = _os.dup(_fd2)
+_os.dup2(_devnull, _fd2)  # 临时屏蔽
+class _RestoreStderr:
+    def __init__(self):
+        self._restored = False
+    def restore(self):
+        if not self._restored:
+            _os.dup2(_saved_fd2, _fd2)
+            _os.close(_devnull)
+            _os.close(_saved_fd2)
+            self._restored = True
+_stderr_restore = _RestoreStderr()
+class _StderrFilter:
+    def __init__(self, orig):
+        self._orig = orig
+    def write(self, s):
+        if 'libpng' not in s and 'iCCP' not in s and 'cHRM' not in s:
+            self._orig.write(s)
+    def flush(self):
+        self._orig.flush()
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+_sys.stderr = _StderrFilter(_sys.stderr)
+
+from txteditor_adjustimg import Design_Adjust
+from txteditor_figeditor import Figeditor
+from resource import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
-from txteditor_adjustimg import Design_Adjust
-from txteditor_figeditor import Figeditor
 import qtawesome as qta
-# from openai import OpenAI
 import sys
 import webbrowser
-import pdfplumber
-import base64
-from main_general import *
-import docx
-# from volcenginesdkarkruntime import Ark
-import qdarkstyle
 import re
-import requests
-import json
 import os
-import operator
 import random
-import time
 import win32api,win32gui
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        global global_active_textcomponent,global_active_figmark
         super().__init__()
         self.FONT_SIZES = [4,5,6,7, 8, 9, 10, 11, 12, 13, 14, 18, 24,30,36,42,48,54,60,66,72,78,84,90,96]
         self.LINE_HEIGHT = ['0.0','0.2','0.5','1.0','1.5','2.0','2.5','3.0','3.5','4.0']
         self.HTML_EXTENSIONS = ['.htm', '.html']
-        self.rename_history_array = ['发明 => 实用新型','实用新型 => 发明','^p^p => ^p',', => ，','( => （',') => ）']
+        self.rename_history_array = ['发明 => 实用新型','实用新型 => 发明','所述的 => ','所述 => ','^p^p => ^p',', => ，','( => （',') => ）']
         self.path = None
         self.start_drag_pos = (0,0)
         self.tab_drag_flag = False
         self.window_notebook = ''
         self.fig_dic = {}
-        self.user_login = ''
-        global window_adjust,window_figeditor,window_login
-        self.window_adjust = window_adjust
-        self.window_figeditor = window_figeditor
-        self.window_login = window_login
+        self.window_adjust = ''
+        self.window_figeditor = ''
         self.window_show = ''
         self.window_rep = ''
         self.window_symbol = ''
         self.window_help = ''
         self.window_api = ''
-        self.window_decorate = ''
-        self.window_continue = ''
-        # self.window_aihelp = ''
-        # self.window_aitrans = ''
         self.window_search = ''
         self.toolbar_bottom = ''
         self.window_table = ''
         self.window_location = ''
         self.brush_flag = False
-        # self.aihelp_search_history = {}
-        # self.aitrans_search_history = {}
         self.key_1, self.key_2, self.key_3, self.key_4, self.key_5 = '', '', '', '' ,''
         self.out_keywords = ''
         self.ori_keywords = ''
@@ -78,11 +92,25 @@ class MainWindow(QMainWindow):
         self.background_color = '#19232d'
         self.font_color = '#aa0000'
         self.type_cursor = ''
-        self.tab_drag = False
         self.usual_words_array = [] # open('./data/words_data.txt','r',encoding='utf-8').read().split('\n')
         self.url_ai = open('./data/url_token.txt','r').read()
         self.load_txt_1 = open(f'./data/split_txt_1.txt','r',encoding='utf-8').read()
         self.load_txt_2 = open(f'./data/split_txt_2.txt','r',encoding='utf-8').read()
+        # 原模块级全局状态下沉为实例属性
+        self.text_editor_array = []
+        self.mark_editor_array = []
+        self.active_textcomponent = ''
+        self.active_figmark = ''
+        self.tab_widget_text = None
+        self.tab_widget_mark = None
+        self.tab_count_array = []
+        self.window_show_text_array = []
+        self.window_show_mark_array = []
+        self.toggle_flag = 0
+        self.rep_model = 0
+        self.model_type = '联想'
+        self.write_type = '撰写'
+        self.write_auto = '关闭'
         self.main_ui()
     def wheelEvent(self,event):
         if event.modifiers() == Qt.ControlModifier and event.angleDelta().y() > 0:
@@ -93,7 +121,6 @@ class MainWindow(QMainWindow):
         self.toolbar_bottom.setStyleSheet("background-color: grey")
         
     def fn_closeEvent(self,event):
-        global user
         message_box = QMessageBox()#.question(self, '关闭程序', '即将关闭程序 <是/否>？',QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         message_box.setWindowTitle('关闭程序')
         message_box.setText('关闭程序 <是/否>？')
@@ -111,45 +138,12 @@ class MainWindow(QMainWindow):
             if self.window_symbol:self.window_symbol.close()
             if self.window_rep:self.window_rep.close()
             if self.toolbar_bottom:self.toolbar_bottom.close()
-            # if self.window_aihelp:self.window_aihelp.close()
             if self.window_search:self.window_search.close()
-            if self.window_continue:self.window_continue.close()
-            if self.window_decorate:self.window_decorate.close()
             if self.window_table:self.window_table.close()
-            # if self.window_aitrans:self.window_aitrans.close()
             self.close()
-    def add_showimg(self):
-        self.window_showimg = QWidget()
-        self.window_showimg.setMouseTracking(True)
-        self.layout_windowshowimg = QGridLayout(self.window_showimg)
-        self.window_showimg.setWindowTitle("说明书附图")
-        self.window_showimg.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.window_showimg.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-
-        self.tab_showimg = QTabWidget()
-        self.lb_showimg_array = [FileDropLabel('请拖入图片') for i in range(20)]
-        for tab_index,lb_showimg in enumerate(self.lb_showimg_array):
-            self.tab_showimg.addTab(lb_showimg,f'图{tab_index + 1}')
-            lb_showimg.setMinimumHeight(50)
-            # lb_showimg.setMaximumHeight(400)
-            lb_showimg.setMinimumWidth(50)
-            
-        self.bt_showimg = QPushButton('一键标注')
-        self.bt_showimg.setFixedHeight(30)
-        self.bt_showimg.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        self.bt_showimg.clicked.connect(self.fn_txt2img)
-
-        self.bt_close_con = QPushButton('转线条图')
-        self.bt_close_con.setFixedHeight(30)
-        
-        self.layout_windowshowimg.addWidget(self.tab_showimg,0,0,1,2)
-        # self.layout_windowshowimg.addWidget(self.bt_showimg,1,0,1,1)
-        # self.layout_windowshowimg.addWidget(self.bt_close_con,1,1,1,1)
-
     def main_ui(self):
-        global global_active_textcomponent,global_active_figmark
         self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.setWindowTitle(f'FENRIR ver{version}')
+        self.setWindowTitle(f'FENRIR ver {version}')
         self.setGeometry(300, 200, 1300, 750)
         self.setMouseTracking(True)
         self.setWindowFlags(Qt.FramelessWindowHint) # 隐藏标题栏 
@@ -164,11 +158,10 @@ class MainWindow(QMainWindow):
         self.add_texteditors()
         # 附图标记联想输入
         self.add_markeditors()
-        self.add_showimg()
         # 设置底部工具栏
         self.fn_bottom_bar()
         self.layoutwidget.addWidget(self.toolbar_bottom,1,0,1,1)
-        
+
         self.dock_mark = QDockWidget('附图标记补全')
         # self.dock_mark.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures) # 不可浮动
         self.dock_mark.setWidget(self.main_widget_mark)
@@ -176,20 +169,40 @@ class MainWindow(QMainWindow):
         self.dock_mark.setMaximumWidth(1000)
         self.dock_mark.setMouseTracking(True)
 
-        self.dock_showimg = QDockWidget('说明书附图')
-        self.dock_showimg.setWidget(self.window_showimg)
-        self.dock_showimg.setMinimumWidth(50)
-        self.dock_showimg.setMouseTracking(True)
-
         self.dock_keywords = QDockWidget('关键词补全')
         self.dock_keywords.setWidget(self.main_widget_keywords)
         self.dock_keywords.setMinimumWidth(50)
         self.dock_keywords.setHidden(True) # 设置dock为隐藏状态
         self.dock_keywords.setMouseTracking(True)
-         
+
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_mark)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_showimg)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_keywords)
+        # 申请文件结构导航
+        self.dock_outline = QDockWidget('结构导航')
+        outline_widget = QWidget()
+        outline_layout = QVBoxLayout(outline_widget)
+        outline_layout.setContentsMargins(2,2,2,2)
+        self.tree_outline = QTreeWidget()
+        self.tree_outline.setHeaderHidden(True)
+        self.tree_outline.setStyleSheet("QTreeWidget{background:#19232d;color:#eee;border:none;font-size:12px} QTreeWidget::item{padding:3px} QTreeWidget::item:selected{background:#4a76d6}")
+        sec_items = ['技术领域','背景技术','发明内容','附图说明','具体实施方式']
+        root_spec = QTreeWidgetItem(self.tree_outline, ['说明书'])
+        for s in sec_items:
+            QTreeWidgetItem(root_spec, [s])
+        self.root_claims = QTreeWidgetItem(self.tree_outline, ['权利要求书'])
+        QTreeWidgetItem(self.tree_outline, ['摘要'])
+        self.tree_outline.expandAll()
+        bt_refresh_claims = QPushButton('刷新')
+        bt_refresh_claims.setFixedHeight(28)
+        bt_refresh_claims.clicked.connect(self.fn_refresh_claims)
+        outline_layout.addWidget(self.tree_outline)
+        outline_layout.addWidget(bt_refresh_claims)
+        self.dock_outline.setWidget(outline_widget)
+        self.dock_outline.setMinimumWidth(50)
+        self.dock_outline.setMaximumWidth(1000)
+        self.dock_outline.setMouseTracking(True)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_outline)
+        self.tree_outline.itemDoubleClicked.connect(self.fn_outline_jump)
         # 状态栏
         self.status = QStatusBar()
         self.status.setMouseTracking(True)
@@ -416,15 +429,10 @@ class MainWindow(QMainWindow):
         self.bt_showsymbol = QAction(QIcon(qta.icon('fa.slack')),'特殊字符(F3)')
         self.bt_showsymbol.triggered.connect(self.fn_show_symbol)
         self.bt_showsymbol.setShortcut('F3')
-        
-        # self.tool_aiapi = QAction(QIcon(qta.icon('mdi.transit-connection-variant')),"AI接口(F4)")
-        # self.tool_aiapi.triggered.connect(self.fn_aiapi)
-        # self.tool_aiapi.setShortcut('F4')
 
         self.tools_toolbar_addition.addAction(self.tool_showhelp) # 使用帮助F1
         self.tools_toolbar_addition.addAction(self.tool_showbook) # 文本校验F2
         self.tools_toolbar_addition.addAction(self.bt_showsymbol) # 特殊符号F3
-        # self.tools_toolbar_addition.addAction(self.tool_aiapi) # AI_API
 
         # 顶部工具栏
         self.file_menu = self.menuBar()
@@ -460,8 +468,7 @@ class MainWindow(QMainWindow):
         about_action = QAction(QIcon(qta.icon('ei.heart')),"软件更新(A)", self.file_menu)
         sub_menu3.addAction(about_action)
         # 绑定editor功能
-        global text_editor_array
-        for editor in text_editor_array:
+        for editor in self.text_editor_array:
             self.combo_fonts.currentFontChanged.connect(editor.setCurrentFont)
             self.combo_fontsize.currentIndexChanged.connect(editor.setFontPointSize)
             self.add_action(editor)
@@ -473,9 +480,134 @@ class MainWindow(QMainWindow):
         format_group.addAction(self.toobar_alignj)
         self._format_actions = [self.combo_fonts,self.combo_fontsize,self.bt_bold,self.bt_italic,self.bt_underline]
         # 将ContextMenuPolicy设置为Qt.CustomContextMenu # 否则无法使用customContextMenuRequested信号
-        self.window_notebook = WindowBook(global_active_figmark,global_active_textcomponent,self.status,self.dock_mark)
+        self.window_notebook = WindowBook(self.active_figmark,self.active_textcomponent,self.status,self.dock_mark)
         self.resizeEvent = self.window_change_event
         # self.fn_show_window()
+    def fn_outline_jump(self, item, column):
+        """双击结构导航树节点，跳转到当前编辑器中对应章节标题位置。
+        节点文本（如"技术领域"）映射为搜索关键词，在文档中查找并定位光标。"""
+        if not self.active_textcomponent:
+            return
+        title = item.text(0)
+        keymap = {
+            '技术领域':'技术领域','背景技术':'背景技术','发明内容':'发明内容',
+            '附图说明':'附图说明','具体实施方式':'具体实施方式',
+            '权利要求书':'权利要求','摘要':'摘要'
+        }
+        target = keymap.get(title, title)
+        doc = self.active_textcomponent.document()
+        cursor = doc.find(target, QTextCursor(doc))
+        if not cursor.isNull():
+            self.active_textcomponent.setTextCursor(cursor)
+            self.active_textcomponent.ensureCursorVisible()
+    def fn_refresh_claims(self):
+        """解析当前文档中的权利要求，构建层级树显示在结构导航中。
+        规则：不含"根据权利要求X所述"的为独立权利要求；
+        含引用的为从属权利要求，挂到其引用的最小编号权利要求节点下。
+        迭代处理多级引用（如权7引权2、权2引权1）。"""
+        import re
+        # 清空权利要求书节点的子项
+        self.root_claims.takeChildren()
+        if not self.active_textcomponent:
+            return
+        text = self.active_textcomponent.toPlainText()
+        # 定位"权利要求书"章节：必须独立成行，避免匹配正文中"根据权利要求1"
+        m_section = re.search(r'\n\s*(权利要求书|权\s*利\s*要\s*求)\s*\n', text)
+        if m_section:
+            text = text[m_section.end():]
+            # 遇到下一个大章节标题则截断
+            m_next = re.search(r'\n\s*(摘要|说明书|技术领域|背景技术|发明内容|附图说明|具体实施方式|实施例)\s*\n', text)
+            if m_next:
+                text = text[:m_next.start()]
+        # 匹配 "N. " 开头的行
+        all_items = []
+        for m in re.finditer(r'(?:^|\n)\s*(\d+)\s*[\.、．]\s*(.+)', text):
+            num = int(m.group(1))
+            body = m.group(2).strip()
+            if num > 100:
+                continue
+            all_items.append((num, body))
+        # 找不到"权利要求书"标题时，看编号1的内容判断是否为权利要求书
+        if not m_section and all_items:
+            first_body = all_items[0][1]
+            # 编号1像权利要求：以"一种"开头，或含"其特征在于"，或含"根据权利要求"
+            looks_like_claim = (
+                first_body.startswith(('一种', '本发明', '本实用新型', '本申请', '根据'))
+                or '其特征在于' in first_body
+                or '根据权利要求' in first_body
+            )
+            if not looks_like_claim:
+                all_items = []
+        claims = {num: body for num, body in all_items}
+        if not claims:
+            QTreeWidgetItem(self.root_claims, ['（未识别到权利要求）'])
+            self.tree_outline.expandItem(self.root_claims)
+            return
+        # 分析引用关系
+        children_map = {}  # parent_num -> [child_num]
+        independents = []
+        for num, body in claims.items():
+            cites = [int(x) for x in re.findall(r'根据权利要求\s*([\d、或至]+)\s*所述', body)]
+            parsed = []
+            for c in cites:
+                for p in re.split(r'[或和]|至', str(c)):
+                    try: parsed.append(int(p))
+                    except: pass
+            if not parsed:
+                independents.append(num)
+            else:
+                parent = min(parsed)
+                children_map.setdefault(parent, []).append(num)
+        # 提取主题名称（"一种XXX"中的XXX）和特征部分（"其特征在于/其特征是"之后）
+        def theme_of(body):
+            m = re.match(r'(?:一种|本发明|本实用新型|本申请|根据[^，,。]*)?[，,]?\s*(.+)', body)
+            t = m.group(1) if m else body
+            # 截断到其特征在于之前
+            t = re.split(r'其特征(?:在于|是)', t)[0]
+            return t[:15].rstrip('，,。；;')
+        def feature_of(body):
+            m = re.search(r'其特征(?:在于|是)[，,：:]?\s*(.+)', body)
+            s = m.group(1).strip() if m else body
+            return s
+        # 建树：先建独权节点，再递归挂从权
+        item_map = {}
+        for num in sorted(independents):
+            txt = f'{num}. [独]{theme_of(claims[num])}'
+            item = QTreeWidgetItem(self.root_claims, [txt])
+            item.setToolTip(0, feature_of(claims[num]))
+            item_map[num] = item
+        # 迭代挂从权（按编号顺序，保证父节点先建）
+        pending = set()
+        for parent, kids in children_map.items():
+            for kid in kids:
+                if parent not in item_map:
+                    pending.add(kid)
+                    continue
+                feat = feature_of(claims[kid]).rstrip('，,；;：:')
+                txt = f'{kid}. [从]引权{parent}-{feat}'
+                item = QTreeWidgetItem(item_map[parent], [txt])
+                item.setToolTip(0, feature_of(claims[kid]))
+                item_map[kid] = item
+        # 处理挂不上的（引用的父权也是从权还没建）——再跑一轮
+        for _ in range(5):
+            if not pending: break
+            for kid in list(pending):
+                for parent, kids in children_map.items():
+                    if kid in kids and parent in item_map:
+                        feat = feature_of(claims[kid]).rstrip('，,；;：:')
+                        txt = f'{kid}. [从]引权{parent}-{feat}'
+                        item = QTreeWidgetItem(item_map[parent], [txt])
+                        item.setToolTip(0, feature_of(claims[kid]))
+                        item_map[kid] = item
+                        pending.discard(kid)
+                        break
+        # 仍挂不上的（引用了不存在的权），当独权挂根
+        for kid in pending:
+            txt = f'{kid}. [?]{theme_of(claims[kid])}'
+            item = QTreeWidgetItem(self.root_claims, [txt])
+            item.setToolTip(0, feature_of(claims[kid])) 
+            item_map[kid] = item
+        self.tree_outline.expandItem(self.root_claims)
     def status_dbclick(self,event):
         if 18 <= event.y() <= 21:
             try:
@@ -499,48 +631,44 @@ class MainWindow(QMainWindow):
     def fn_txt2img(self):
         return
     def fn_brush(self):
-        global global_active_textcomponent
         if self.brush_flag == True:
             self.bt_brush.setChecked(False)
             self.brush_flag = False
             self.char_format = ''
         if self.brush_flag == False:
             if self.bt_brush.isChecked():
-                cursor = global_active_textcomponent.textCursor()
+                cursor = self.active_textcomponent.textCursor()
                 self.char_format = cursor.charFormat()
             else:
                 if not self.char_format:
                     return
-                cursor = global_active_textcomponent.textCursor()
+                cursor = self.active_textcomponent.textCursor()
                 cursor.mergeCharFormat(self.char_format)
-                global_active_textcomponent.mergeCurrentCharFormat(self.char_format)
+                self.active_textcomponent.mergeCurrentCharFormat(self.char_format)
     def fn_brush_dbclick(self,event):
-        global global_active_textcomponent
         if self.brush_flag == False:
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             self.char_format = cursor.charFormat()
             self.bt_brush.setChecked(True)
             self.brush_flag = True
     def font_toggle(self):
-        global toggle_flag,global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_text = cursor.selectedText()
         if not select_text:
             return
-        if toggle_flag == 0:
+        if self.toggle_flag == 0:
             select_text = select_text.upper()
-            toggle_flag = 1
+            self.toggle_flag = 1
         else:
             select_text = select_text.lower()
-            toggle_flag = 0
+            self.toggle_flag = 0
         cursor.movePosition(QTextCursor.Left, len(select_text))
         if len(select_text) > 1:
             cursor.deleteChar()
         cursor.deleteChar()
         cursor.insertText(select_text)
     def font_lower(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_text = cursor.selectedText()
         if not select_text:
             return
@@ -556,8 +684,7 @@ class MainWindow(QMainWindow):
         cursor.setCharFormat(format_sub)
         cursor.insertText(select_text)
     def font_upper(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_text = cursor.selectedText()
         if not select_text:
             return            
@@ -573,60 +700,61 @@ class MainWindow(QMainWindow):
         cursor.setCharFormat(format_sup)
         cursor.insertText(select_text)
     def fn_fontsize_down(self):
-        global global_active_textcomponent
-        if not global_active_textcomponent.textCursor().selectedText():
+        if not self.active_textcomponent.textCursor().selectedText():
             self.slider_fontsize.setValue(self.slider_fontsize.value() - 1)
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
-            ori_html = global_active_textcomponent.toHtml()
+            ori_html = self.active_textcomponent.toHtml()
             find_txt = re.findall(rf'font-size:\d+pt',ori_html) + re.findall(rf'font-size:\d+pt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
-            global_active_textcomponent.setHtml(ori_html)
+            self.active_textcomponent.setHtml(ori_html)
             if font_size < 12:
                 self.label_fontsize.setText(f'{100 - change_num}%')
             else:
                 self.label_fontsize.setText(f'{100 + change_num}%')
     def fn_fontsize_up(self):
-        global global_active_textcomponent
-        if not global_active_textcomponent.textCursor().selectedText():
+        if not self.active_textcomponent.textCursor().selectedText():
             self.slider_fontsize.setValue(self.slider_fontsize.value() + 1)
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
-            ori_html = global_active_textcomponent.toHtml()
+            ori_html = self.active_textcomponent.toHtml()
             find_txt = re.findall(rf'font-size:\d\dpt',ori_html) + re.findall(rf'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
-            global_active_textcomponent.setHtml(ori_html)
+            self.active_textcomponent.setHtml(ori_html)
             if font_size < 12:
                 self.label_fontsize.setText(f'{100 - change_num}%')
             else:
                 self.label_fontsize.setText(f'{100 + change_num}%')
     def slider_fontsize_changed(self):
-        global global_active_textcomponent
-        if not global_active_textcomponent.textCursor().selectedText():
+        if not self.active_textcomponent.textCursor().selectedText():
             font_size = self.slider_fontsize.value()
             change_num = int(abs(font_size - 12)*25/3)
-            ori_html = global_active_textcomponent.toHtml()
+            ori_html = self.active_textcomponent.toHtml()
             find_txt = re.findall(rf'font-size:\d\dpt',ori_html) + re.findall(rf'font-size:\dpt',ori_html)
             for _ in find_txt:
                 ori_html = ori_html.replace(_,f'font-size:{font_size}pt')
-            global_active_textcomponent.setHtml(ori_html)
+            self.active_textcomponent.setHtml(ori_html)
             if font_size < 12:
                 self.label_fontsize.setText(f'{100 - change_num}%')
             else:
                 self.label_fontsize.setText(f'{100 + change_num}%')
     def on_lineheight_changed(self):
-        global line_height
-        line_height = round(float(self.combo_lineheight.currentText()),1)
-        ori_html = global_active_textcomponent.toHtml()
+        lh = round(float(self.combo_lineheight.currentText()),1)
+        for ed in self.text_editor_array:
+            try:
+                ed.line_height = lh
+            except Exception:
+                pass
+        ori_html = self.active_textcomponent.toHtml()
         find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
         for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-top:{line_height*5}px')
+            ori_html = ori_html.replace(_,f'margin-top:{lh*5}px')
         find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-bottom:{line_height*5}px')
-        global_active_textcomponent.setHtml(ori_html)
+            ori_html = ori_html.replace(_,f'margin-bottom:{lh*5}px')
+        self.active_textcomponent.setHtml(ori_html)
 
     def auto_complete(self,in_array,in_component):
         for index,_ in enumerate(in_array):
@@ -636,17 +764,16 @@ class MainWindow(QMainWindow):
         self.completer.setFilterMode(Qt.MatchContains)
         in_component.setCompleter(self.completer)
     def default_format(self):
-        global global_active_textcomponent,global_active_figmark
         # 获取光标当前位置
-        block_cursor = global_active_textcomponent.textCursor()
+        block_cursor = self.active_textcomponent.textCursor()
         para_line_number = block_cursor.blockNumber()
-        total_paragraphs = global_active_textcomponent.document().blockCount()
+        total_paragraphs = self.active_textcomponent.document().blockCount()
         if para_line_number + 7 > total_paragraphs:
             para_line_number = total_paragraphs
         else:
             para_line_number += 7
 
-        global_active_textcomponent.setFont(QFont("SimSun", 12))
+        self.active_textcomponent.setFont(QFont("SimSun", 12))
         format = QTextCharFormat()
         # format.setForeground(QColor('#dfe1e2'))
         format.setBackground(QColor(Qt.transparent))
@@ -654,35 +781,34 @@ class MainWindow(QMainWindow):
         format.setFontPointSize(12)
         self.slider_fontsize.setValue(12)
         self.label_fontsize.setText('100%')
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.setCharFormat(format)
 
         format.setFontPointSize(9)
-        cursor = global_active_figmark.textCursor()
+        cursor = self.active_figmark.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.setCharFormat(format)
 
-        ori_html = global_active_textcomponent.toHtml()
+        ori_html = self.active_textcomponent.toHtml()
         find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-top:0px')
         find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
         for _ in find_txt:
             ori_html = ori_html.replace(_,f'margin-bottom:0px')
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(ori_html)
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(ori_html)
         self.on_lineheight_changed()
         # 重新定位
         block_cursor.movePosition(QTextCursor.Start)
         for _ in range(para_line_number):
             block_cursor.movePosition(QTextCursor.NextBlock)
-        global_active_textcomponent.setTextCursor(block_cursor)
+        self.active_textcomponent.setTextCursor(block_cursor)
     def one_key_format(self):
-        global global_active_textcomponent
-        block_cursor = global_active_textcomponent.textCursor()
+        block_cursor = self.active_textcomponent.textCursor()
         para_line_number = block_cursor.blockNumber()
-        total_paragraphs = global_active_textcomponent.document().blockCount()
+        total_paragraphs = self.active_textcomponent.document().blockCount()
         if para_line_number + 7 > total_paragraphs:
             para_line_number = total_paragraphs
         else:
@@ -714,8 +840,8 @@ class MainWindow(QMainWindow):
 
         font_format = QTextCharFormat()
         font_format.setFontWeight(QFont.Bold)
-        cursor = global_active_textcomponent.textCursor()
-        doc_text = global_active_textcomponent.document().toPlainText().replace('\n','\u2029')
+        cursor = self.active_textcomponent.textCursor()
+        doc_text = self.active_textcomponent.document().toPlainText().replace('\n','\u2029')
 
         for pat_str in format_array:
             # 判断：如果是序号正则，不escape；普通文本关键词，escape防止正则元字符干扰
@@ -734,38 +860,20 @@ class MainWindow(QMainWindow):
         block_cursor.movePosition(QTextCursor.Start)
         for _ in range(para_line_number):
             block_cursor.movePosition(QTextCursor.NextBlock)
-        global_active_textcomponent.setTextCursor(block_cursor)
+        self.active_textcomponent.setTextCursor(block_cursor)
 
     def fn_formatset(self):
         os.startfile('.\\data\\format_array.txt')
     def fn_loadimgs(self):
-        file_list_dir = QFileDialog.getExistingDirectory(self, "选择文件夹","BMP IMAGES (*.bmp);;JPG IMAGES(*.jpg);;PNG IMAGES(*.png);;All files (*.*)")
-        if file_list_dir:
-            for root, dirs, files in os.walk(file_list_dir):
-                all_files = files
-            lb_index = 0
-            for file in files:
-                file_dir = file_list_dir+'/'+ file
-                if file.split('.')[-1].lower() in ['jpg','jpeg','png','bmp']:
-                    lb_img = self.lb_showimg_array[lb_index]
-                    lb_index += 1
-                    img = QImage(file_dir)
-                    img_w = img.width()
-                    img_h = img.height()
-                    if img_w >= img_h:
-                        img_rate = img_w/700
-                        img_w = 700
-                        img_h = img_h/img_rate
-                    result=img.scaled(int(img_w),int(img_h),Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
-                    lb_img.setPixmap(QPixmap.fromImage(result))
+        # 说明书附图面板已移除，此方法保留为空避免菜单调用报错
+        pass
     def clear_select_format(self):
-        global global_active_textcomponent
         format = QTextCharFormat()
         format.setForeground(QColor('#dfe1e2'))
         format.setBackground(QColor(Qt.transparent))
         # format.setFont('宋体')
         format.setFontPointSize(12)
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.select(QTextCursor.WordUnderCursor)
         cursor.setCharFormat(format)
     def fn_bottom_bar(self):
@@ -837,11 +945,10 @@ class MainWindow(QMainWindow):
         self.toolbar_bottom_layout.addWidget(self.label_fontsize)
 
     def search_next(self):# 查找下一个
-        global global_active_textcomponent
         self.reset_textcomponentformat()
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         keyword = self.text_tool_highlight.text().strip(' ')
-        all_txt = global_active_textcomponent.toPlainText()
+        all_txt = self.active_textcomponent.toPlainText()
         if self.ck_1.checkState() == 0:
             keyword = keyword.lower()
             all_txt = all_txt.lower()
@@ -861,17 +968,16 @@ class MainWindow(QMainWindow):
             format.setFontPointSize(12)
             format.setBackground(QColor("#d44b3e"))
             cursor.mergeCharFormat(format)
-            # self.get_same_markindex(keyword,global_active_textcomponent,'#346792')
+            # self.get_same_markindex(keyword,self.active_textcomponent,'#346792')
             self.status.showMessage(f"共匹配到{len(re.findall(keyword,all_txt))}个结果")
-            global_active_textcomponent.setTextCursor(cursor)
+            self.active_textcomponent.setTextCursor(cursor)
     def search_back(self): # 查找上一个
-        global global_active_textcomponent
         self.reset_textcomponentformat()
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         keyword = self.text_tool_highlight.text().strip(' ')
         if not keyword:
             return
-        all_txt = global_active_textcomponent.toPlainText()
+        all_txt = self.active_textcomponent.toPlainText()
         if self.ck_1.checkState() == 0:
             keyword = keyword.lower()
             all_txt = all_txt.lower()
@@ -891,12 +997,11 @@ class MainWindow(QMainWindow):
             format.setFontPointSize(12)
             format.setBackground(QColor("#d44b3e"))
             cursor.mergeCharFormat(format)
-            # self.get_same_markindex(keyword,global_active_textcomponent,'#346792')
+            # self.get_same_markindex(keyword,self.active_textcomponent,'#346792')
             self.status.showMessage(f"共匹配到{len(re.findall(keyword,all_txt))}个结果")
-            global_active_textcomponent.setTextCursor(cursor)
+            self.active_textcomponent.setTextCursor(cursor)
     # 高亮关键词
     def fn_highlighttxt_change(self,event):
-        global global_active_textcomponent,global_active_figmark
         self.reset_textcomponentformat()
         keyword = self.text_tool_highlight.text()
         if not keyword:
@@ -907,8 +1012,8 @@ class MainWindow(QMainWindow):
 
         for _ in self.highlight_array:
             rnd_color = f'#FF{random.randint(1000, 9999)}'
-            self.get_same_markindex(_,global_active_figmark,rnd_color)
-            self.get_same_markindex(_,global_active_textcomponent,rnd_color)
+            self.get_same_markindex(_,self.active_figmark,rnd_color)
+            self.get_same_markindex(_,self.active_textcomponent,rnd_color)
 
     def fn_menu_bar(self): # 设置与menubar重叠的拖拽控件
         self.dragger_top = QWidget(self)
@@ -924,17 +1029,21 @@ class MainWindow(QMainWindow):
         self.dragger_top.mousePressEvent = self.start_drag
         self.dragger_top.mouseReleaseEvent = self.window_pressrelease
 
-        self.switch_associate = SwitchBtn_1()
-        self.switch_associate.setFixedSize(55,20)
+        self.switch_associate = SwitchBtn('联想', '关闭', False)
+        self.switch_associate.setFixedSize(60,22)
         self.switch_associate.setToolTip('联想输入 开/关\n输入对应的附图标记序号，即可弹出对应的附图标记全称\n按空格后根据选定的补全方式自动补全')
 
-        self.switch_writetype = SwitchBtn_2()
-        self.switch_writetype.setFixedSize(55,20)
+        self.switch_writetype = SwitchBtn('撰写', '阅读', False)
+        self.switch_writetype.setFixedSize(60,22)
         self.switch_writetype.setToolTip('模式切换 撰写/阅读\n拖拽选择相应文本后，高亮显示所有相同内容\n按住CTRL键可连续选择\nESC键 或 鼠标中键，取消所有高亮内容')
 
-        self.switch_autocomplete = SwitchBtn_4()
-        self.switch_autocomplete.setFixedSize(55,20)
+        self.switch_autocomplete = SwitchBtn('补全', '关闭', True)
+        self.switch_autocomplete.setFixedSize(60,22)
         self.switch_autocomplete.setToolTip('自动补全 开启/关闭\n不在弹出对应的附图标记输入框\n无需按空格，即可自动补全光标位置之前的附图标记')
+        # 开关状态通过信号同步到实例属性，替代模块级全局变量
+        self.switch_associate.checkedChanged.connect(lambda checked: setattr(self, 'model_type', '关' if checked else '联想'))
+        self.switch_writetype.checkedChanged.connect(lambda checked: setattr(self, 'write_type', '阅读' if checked else '撰写'))
+        self.switch_autocomplete.checkedChanged.connect(lambda checked: setattr(self, 'write_auto', '关闭' if checked else '补全'))
 
         self.search_fill_1 = QLabel()
         self.search_fill_1.setText('')
@@ -971,59 +1080,83 @@ class MainWindow(QMainWindow):
         self.tool_clearscreen.clicked.connect(self.fn_clearscreen)
 
         self.tool_panel_1 = QPushButton(QIcon('./UI/panel_left.png'),'')
-        self.tool_panel_1.setToolTip('切换至左侧布局')
+        self.tool_panel_1.setToolTip('左侧布局')
         self.tool_panel_1.setStyleSheet('QPushButton:hover {background-color: grey}')
-        self.tool_panel_1.setFixedSize(30,20)
+        self.tool_panel_1.setFixedSize(30,22)
+        self.tool_panel_1.setIconSize(QSize(14,14))
         self.tool_panel_1.clicked.connect(self.fn_distribute_left)
 
         self.tool_panel_2 = QPushButton(QIcon('./UI/panel_top.png'),'')
-        self.tool_panel_2.setToolTip('切换至顶端布局')
+        self.tool_panel_2.setToolTip('顶端布局')
         self.tool_panel_2.setStyleSheet('QPushButton:hover {background-color: grey}')
-        self.tool_panel_2.setFixedSize(30,20)
+        self.tool_panel_2.setFixedSize(30,22)
+        self.tool_panel_2.setIconSize(QSize(14,14))
         self.tool_panel_2.clicked.connect(self.fn_distribute_top)
 
-        self.tool_minimize = QPushButton('—')
+        self.tool_panel_4 = QPushButton(QIcon('./UI/panel_right.png'),'')
+        self.tool_panel_4.setToolTip('右侧布局')
+        self.tool_panel_4.setStyleSheet('QPushButton:hover {background-color: grey}')
+        self.tool_panel_4.setFixedSize(30,22)
+        self.tool_panel_4.setIconSize(QSize(14,14))
+        self.tool_panel_4.clicked.connect(self.fn_distribute_right)
+
+        self.tool_panel_5 = QPushButton(QIcon('./UI/panel_bottom.png'),'')
+        self.tool_panel_5.setToolTip('底部布局')
+        self.tool_panel_5.setStyleSheet('QPushButton:hover {background-color: grey}')
+        self.tool_panel_5.setFixedSize(30,22)
+        self.tool_panel_5.setIconSize(QSize(14,14))
+        self.tool_panel_5.clicked.connect(self.fn_distribute_bottom)
+
+        self.tool_minimize = QPushButton(qta.icon('fa.window-minimize', color='white'),'')
         self.tool_minimize.setToolTip('最小化')
         self.tool_minimize.setStyleSheet('QPushButton:hover {background-color: grey}')
-        self.tool_minimize.setFixedSize(30,20)
+        self.tool_minimize.setFixedSize(40,22)
+        self.tool_minimize.setIconSize(QSize(14,14))
         self.tool_minimize.clicked.connect(lambda:[self.showMinimized()])
 
-        self.tool_maximize = QPushButton(QIcon('./UI/max.png'),'')
+        self.tool_maximize = QPushButton(qta.icon('fa.window-maximize', color='white'),'')
         self.tool_maximize.setToolTip('最大化')
         self.tool_maximize.setStyleSheet('QPushButton:hover {background-color: grey}')
-        self.tool_maximize.setFixedSize(30,20)
+        self.tool_maximize.setFixedSize(40,22)
+        self.tool_maximize.setIconSize(QSize(14,14))
         self.tool_maximize.clicked.connect(lambda:[self.dragger_top_dbclick(self.event)])
 
-        self.tool_close = QPushButton('×')
+        self.tool_close = QPushButton(qta.icon('fa.times', color='white'),'')
         self.tool_close.setToolTip('关闭')
         self.tool_close.setStyleSheet('QPushButton:hover {background-color: grey}')
-        self.tool_close.setFixedSize(30,20)
+        self.tool_close.setFixedSize(40,22)
+        self.tool_close.setIconSize(QSize(14,14))
         self.tool_close.clicked.connect(lambda:[self.fn_closeEvent(self.event)])
 
         self.dragger_top_layout.addWidget(self.switch_associate)
         self.dragger_top_layout.addWidget(self.switch_writetype)
         self.dragger_top_layout.addWidget(self.switch_autocomplete)
-        # self.dragger_top_layout.addWidget(self.label_top)
         self.dragger_top_layout.addWidget(self.search_fill_1)
         self.dragger_top_layout.addWidget(self.search_box)
         self.dragger_top_layout.addWidget(self.search_fill_2)
         self.dragger_top_layout.addWidget(self.tool_clearscreen)
         self.dragger_top_layout.addWidget(self.tool_panel_1)
         self.dragger_top_layout.addWidget(self.tool_panel_2)
+        self.dragger_top_layout.addWidget(self.tool_panel_4)
+        self.dragger_top_layout.addWidget(self.tool_panel_5)
         self.dragger_top_layout.addWidget(self.tool_minimize)
         self.dragger_top_layout.addWidget(self.tool_maximize)
         self.dragger_top_layout.addWidget(self.tool_close)
     
     def fn_distribute_left(self):
+        self.dock_mark.setHidden(False)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_mark)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_showimg)
     def fn_distribute_top(self):
-        self.addDockWidget(Qt.TopDockWidgetArea, self.dock_showimg)
+        self.dock_mark.setHidden(False)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_mark)
+    def fn_distribute_right(self):
+        self.dock_mark.setHidden(False)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_mark)
+    def fn_distribute_bottom(self):
+        self.dock_mark.setHidden(False)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_mark)
 
     def fn_clearscreen(self):
-        global global_active_textcomponent,global_active_figmark
-        global tab_widget_text
         message_box = QMessageBox()
         message_box.setWindowTitle('清空当前文档')
         message_box.setText('即将清空当前文档，是否继续 <是/否>？')
@@ -1033,20 +1166,21 @@ class MainWindow(QMainWindow):
         message_box.button(QMessageBox.No).setText('否')
         reply = message_box.exec()
         if reply == QMessageBox.Yes:
-            global_active_textcomponent.setText('')
-            global_active_figmark.setText('')
-            tab_index = tab_widget_text.currentIndex()
-            tab_widget_text.setTabText(tab_index, f'文档{tab_index+1}')
+            self.active_textcomponent.setText('')
+            self.active_figmark.setText('')
+            tab_index = self.tab_widget_text.currentIndex()
+            self.tab_widget_text.setTabText(tab_index, f'文档{tab_index+1}')
             self.tab_name_array[tab_index] = f'文档{tab_index+1}'
             open(f'./data/tab_name.txt','w+',encoding='utf-8').write('，'.join(self.tab_name_array))
+
     def fn_search_keyreleaseevent(self,event):
-        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter: # 回车
-            self.fn_search_tools()
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            return
         elif event.key() == Qt.Key_Escape:
             if self.window_search:
                 self.window_search.hide()
     def fn_search_keypressEvent(self,event):
-        cursor = self.search_box.textCursor()
+        cursor = self.search_box.cursorPosition()
         clipboard = QApplication.clipboard()
         try:
             if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C:
@@ -1063,12 +1197,6 @@ class MainWindow(QMainWindow):
                 cursor.deleteChar()
             elif event.key() == Qt.Key_Backspace:
                 cursor.deletePreviousChar()
-            elif event.key() == Qt.Key_Home:
-                cursor.setPosition(0)
-                self.search_box.setTextCursor(cursor)
-            elif event.key() == Qt.Key_End:
-                cursor.setPosition(len(self.search_box.toPlainText()))
-                self.search_box.setTextCursor(cursor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Up:
                 self.search_box.moveCursor(QTextCursor.Up, QTextCursor.KeepAnchor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Down:
@@ -1095,205 +1223,30 @@ class MainWindow(QMainWindow):
                 cursor.insertText(chr(event.key()))
         except Exception as e:
             print('Error 401',e)  
-    # def fn_search_tools(self):
-    #     global user,model_api
-    #     if self.window_search:self.window_search.hide() 
-    #     in_txt = self.search_box.toPlainText().strip(' ')
-    #     if not in_txt:
-    #         return
-    #     self.status.showMessage('概念查询中，请稍后...')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #     # self.setCursor(Qt.WaitCursor)
-    #     if model_api == 'Doubao':
-    #         self.aitrans_thread = Worker_ai_doubao('用300~500字阐述以下内容：' + in_txt,'')
-    #     else:
-    #         self.aitrans_thread = Worker_ai_deepseek('用300~500字阐述以下内容：' + in_txt,'')
-    #     self.aitrans_thread.progress.connect(self.fn_aisearch)
-    #     self.aitrans_thread.start()
-    
-    # def fn_aisearch(self,in_txt): # AI搜索
-    #     self.status.showMessage('查询完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    #     self.window_search = QWidget()
-    #     self.layout_windowsearch = QVBoxLayout(self.window_search)
-    #     self.window_search.setWindowTitle("工具搜索")
-    #     self.window_search.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-    #     self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
-    #     self.window_search.setFixedWidth(402)
-    #     self.window_search.setMinimumHeight(25)
-    #     self.window_search.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-    #     self.text_lb = QTextBrowser()
-    #     self.text_lb.setFontPointSize(11)
-    #     self.text_lb.setPlainText(in_txt)
-    #     self.text_lb.setFixedWidth(380)
-    #     self.text_lb.setMinimumHeight(500)
-    #     self.text_lb.keyReleaseEvent = self.fn_search_keyreleaseevent
-    #     self.layout_windowsearch.addWidget(self.text_lb)
-    #     self.fn_animation(self.window_search,0.0,1.0)
-    #     self.animation.start()
-    #     self.window_search.show()
-
-    #     self.window_search.focusOutEvent = self.fn_search_focusout
-    
-    # def fn_search_focusout(self,event):
-    #     try:
-    #         self.window_search.hide()
-    #     except:
-    #         pass
+   
     def fn_undo(self):
-        global global_active_textcomponent
-        global_active_textcomponent.undo()
+        self.active_textcomponent.undo()
     def fn_redu(self):
-        global global_active_textcomponent
-        global_active_textcomponent.redo()
-    # def get_aicontinue(self):
-    #     global expand_length
-    #     global global_active_textcomponent
-    #     self.status.showMessage('文本续写中，请稍后...')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #     # self.setCursor(Qt.WaitCursor)
-    #     try:
-    #         cursor = global_active_textcomponent.textCursor()
-    #         cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
-    #         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-    #         cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段内容
-    #         base_txt = cursor.selectedText()
-    #     except:
-    #         pass
-    #     self.window_continue = QWidget()
-    #     self.layout_windowcontinue = QGridLayout(self.window_continue)
-    #     self.window_continue.setWindowTitle("AI续写")
-    #     self.window_continue.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-    #     self.window_continue.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-    #     self.window_continue.setFixedSize(400,400)
-    #     self.window_continue.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-
-    #     self.text_continue = QTextEdit()
-    #     self.text_continue.setFontPointSize(11)
-    #     self.text_continue.setMinimumHeight(100)
-    #     self.text_continue.setMinimumWidth(380)
-    #     self.text_continue.setPlaceholderText('文本续写中，请稍后...')
-
-    #     self.bt_continue = QPushButton('确定')
-    #     self.bt_continue.setFixedHeight(30)
-    #     self.bt_continue.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-    #     self.bt_continue.clicked.connect(self.insert_aicontinue)
-
-    #     self.bt_close_con = QPushButton('关闭')
-    #     self.bt_close_con.setFixedHeight(30)
-    #     self.bt_close_con.clicked.connect(lambda:[self.window_continue.close()])
-        
-    #     self.layout_windowcontinue.addWidget(self.text_continue,0,0,1,2)
-    #     self.layout_windowcontinue.addWidget(self.bt_continue,1,0,1,1)
-    #     self.layout_windowcontinue.addWidget(self.bt_close_con,1,1,1,1)
-
-    #     self.fn_animation(self.window_continue,0.0,1.0)
-    #     self.animation.start()
-    #     self.window_continue.show()
-    #     global model_api
-    #     if base_txt:
-    #         if model_api == 'Doubao':
-    #             self.aicontinue_thread = Worker_ai_doubao(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
-    #         else:
-    #             self.aicontinue_thread = Worker_ai_deepseek(f'根据{base_txt}内容续写{expand_length}个字',self.text_continue)
-
-    #         self.aicontinue_thread.progress.connect(self.fn_aicontinue)
-    #         self.aicontinue_thread.start()
-    #     else:
-    #         self.status.showMessage('发生未知错误')
-    #         self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-
-    # def fn_aicontinue(self,in_txt):
-    #     # self.text_continue.setPlainText(in_txt) 
-    #     self.status.showMessage('续写完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    # def insert_aicontinue(self):
-    #     global global_active_textcomponent
-    #     in_txt = self.text_continue.toPlainText()
-    #     cursor = global_active_textcomponent.textCursor()
-    #     cursor.insertText(in_txt)
-    #     self.window_continue.close()
-    # def get_aidecorate(self):
-    #     global global_active_textcomponent
-    #     select_txt = global_active_textcomponent.textCursor().selectedText()
-    #     if not select_txt:
-    #         return
-    #     self.status.showMessage('文本润色中，请稍后...')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #     # self.setCursor(Qt.WaitCursor)
-    #     cursor = global_active_textcomponent.textCursor()
-    #     cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,3)
-    #     cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-    #     cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,4) # 包括前文三段的内容
-    #     base_txt = cursor.selectedText()
-        
-    #     self.window_decorate = QWidget()
-    #     self.layout_windowdecorate = QGridLayout(self.window_decorate)
-    #     self.window_decorate.setWindowTitle("AI润色")
-    #     self.window_decorate.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-    #     self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-    #     self.window_decorate.setFixedSize(400,400)
-    #     self.window_decorate.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-
-    #     self.text_windowdecorate = QTextEdit()
-    #     self.text_windowdecorate.setFontPointSize(11)
-    #     self.text_windowdecorate.setMinimumHeight(100)
-    #     self.text_windowdecorate.setMinimumWidth(380)
-    #     self.text_windowdecorate.setPlaceholderText('文本润色中，请稍后...')
-
-    #     self.bt_decorate = QPushButton('确定')
-    #     self.bt_decorate.setFixedHeight(30)
-    #     self.bt_decorate.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-    #     self.bt_decorate.clicked.connect(self.insert_aidecorate)
-
-    #     self.bt_decorate_close = QPushButton('关闭')
-    #     self.bt_decorate_close.setFixedHeight(30)
-    #     self.bt_decorate_close.clicked.connect(lambda:[self.window_decorate.close()])
-
-    #     self.layout_windowdecorate.addWidget(self.text_windowdecorate,0,0,1,2)
-    #     self.layout_windowdecorate.addWidget(self.bt_decorate,1,0,1,1)
-    #     self.layout_windowdecorate.addWidget(self.bt_decorate_close,1,1,1,1)
-
-    #     self.fn_animation(self.window_decorate,0.0,1.0)
-    #     self.animation.start()
-    #     self.window_decorate.show()
-    #     global model_api
-    #     if model_api == 'Doubao':
-    #         self.aidecorate_thread = Worker_ai_doubao(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
-    #     else:
-    #         self.aidecorate_thread = Worker_ai_deepseek(f'{base_txt}\n请对上述内容进行润色改写，尽可能丰富内容细节：{select_txt}',self.text_windowdecorate)
-
-    #     self.aidecorate_thread.progress.connect(self.fn_aidecorate)
-    #     self.aidecorate_thread.start()
-    # def fn_aidecorate(self,in_txt):
-    #     # self.text_windowdecorate.setPlainText(in_txt)
-    #     self.status.showMessage('润色完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    # def insert_aidecorate(self):
-    #     global global_active_textcomponent
-    #     cursor = global_active_textcomponent.textCursor()
-    #     in_txt = self.text_windowdecorate.toPlainText()
-    #     cursor.insertText('\n' + in_txt)
-    #     self.window_decorate.close()
+        self.active_textcomponent.redo()
+    
     def fn_texttab_changed(self):
-        global tab_count_array,tab_widget_text,tab_widget_mark,text_editor_array,mark_editor_array
-        global global_active_textcomponent,global_active_figmark
         try:
             self.window_notebook.hide()
             self.dock_mark.setMinimumWidth(50)
             self.dock_mark.setMaximumWidth(1000)
         except:
             pass
-        tab_index = tab_widget_text.currentIndex()
-        tab_widget_mark.setCurrentIndex(tab_index)
-        for _ in tab_count_array:
+        tab_index = self.tab_widget_text.currentIndex()
+        self.tab_widget_mark.setCurrentIndex(tab_index)
+        for _ in self.tab_count_array:
             if _ <= tab_index:
                 tab_index += 1
-        global_active_textcomponent = text_editor_array[tab_index]
-        global_active_figmark = mark_editor_array[tab_index]
+        self.active_textcomponent = self.text_editor_array[tab_index]
+        self.active_figmark = self.mark_editor_array[tab_index]
+        try:
+            self.fn_refresh_claims()
+        except Exception:
+            pass
         
         self.start_drag_pos = (0,0)
         self.tab_drag_flag = False
@@ -1303,20 +1256,18 @@ class MainWindow(QMainWindow):
             self.fn_animation(self.window_symbol,0.0,1.0)
             self.animation.start()
             self.window_symbol.show()
-        in_array = re.split('\n|\u2029',self.text_genword.toPlainText()) + re.split('\n|\u2029',global_active_figmark.toPlainText())
+        in_array = re.split('\n|\u2029',self.text_genword.toPlainText()) + re.split('\n|\u2029',self.active_figmark.toPlainText())
         self.auto_complete(in_array,self.text_tool_highlight)
 
     def fn_marktab_changed(self):
-        global tab_widget_mark,mark_editor_array
-        global global_active_textcomponent,global_active_figmark
         try:
             self.window_notebook.hide()
             self.dock_mark.setMinimumWidth(50)
             self.dock_mark.setMaximumWidth(1000)
         except:
             pass
-        tab_index = tab_widget_mark.currentIndex()
-        global_active_figmark = mark_editor_array[tab_index]
+        tab_index = self.tab_widget_mark.currentIndex()
+        self.active_figmark = self.mark_editor_array[tab_index]
     def dragger_top_dbclick(self,event):
         try:
             y = event.y()
@@ -1326,7 +1277,7 @@ class MainWindow(QMainWindow):
             self.window_state = 'normal'
             self.setGeometry(self.window_pos.x(), self.window_pos.y(), self.window_width, self.window_height)
             self.dragger_top.setFixedSize(self.width() - 130, 40)
-            self.tool_maximize.setIcon(QIcon('./UI/max.png'))
+            self.tool_maximize.setIcon(qta.icon('fa.window-maximize', color='white'))
             self.tool_maximize.setToolTip('最大化')
             
         elif self.window_state == 'normal':
@@ -1351,7 +1302,7 @@ class MainWindow(QMainWindow):
                     self.resize(self.width(),third_screen.geometry().height() - 40)
             else:
                 self.window_state = 'max'
-                self.tool_maximize.setIcon(QIcon('./UI/normal.png'))
+                self.tool_maximize.setIcon(qta.icon('fa.window-restore', color='white'))
                 self.tool_maximize.setToolTip('向下还原')
                 self.window_width = self.width()  # 用于最小化时还原
                 self.window_height = self.height()
@@ -1376,7 +1327,6 @@ class MainWindow(QMainWindow):
                 elif third_screen:
                     self.setGeometry(third_screen.geometry())
     def window_change_event(self,event): 
-        global global_active_textcomponent
         self.dragger_top.setFixedSize(self.width() - 130, 40)
         if self.window_notebook:
             self.window_notebook.setFixedHeight(self.height() - 90)
@@ -1384,12 +1334,6 @@ class MainWindow(QMainWindow):
         if self.window_symbol:
             self.window_symbol.move(self.pos().x(), self.pos().y() + 63)
             self.window_symbol.setFixedHeight(self.height() - 90)
-        # if self.window_aihelp:
-        #     self.window_aihelp.setFixedSize(400, global_active_textcomponent.height()*0.67)
-        #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-        # if self.window_aitrans: # 靠右上
-        #     self.window_aitrans.setFixedSize(400, global_active_textcomponent.height()*0.67)
-        #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
         if self.window_search: 
             self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
     def window_pressrelease(self,event):
@@ -1446,11 +1390,10 @@ class MainWindow(QMainWindow):
         if self.window_show:self.window_show.close()
         if self.window_table:self.window_table.close() 
     def fn_show_figeditor(self):
-        global global_active_textcomponent,global_active_figmark
         if self.window_figeditor and self.window_figeditor.isVisible():
             self.window_figeditor.close()
         else:
-            self.window_figeditor = Figeditor('User',global_active_figmark)
+            self.window_figeditor = Figeditor('User',self.active_figmark)
             self.fn_animation(self.window_figeditor,0.00,1.0)
             self.animation.start()
             self.window_figeditor.show()
@@ -1473,9 +1416,8 @@ class MainWindow(QMainWindow):
 
     # 显示批量替换窗口
     def show_repwindow(self):
-        global global_active_textcomponent
         try:
-            self.select_txt = global_active_textcomponent.textCursor().selectedText()
+            self.select_txt = self.active_textcomponent.textCursor().selectedText()
         except:
             self.select_txt = ''
         self.fn_show_repwindow()
@@ -1522,7 +1464,6 @@ class MainWindow(QMainWindow):
         except:
             pass
     def mouseMoveEvent(self, event):
-        global version,global_active_textcomponent
         x = event.globalX()
         y = event.globalY()
         x2 = event.x() 
@@ -1626,38 +1567,19 @@ class MainWindow(QMainWindow):
 
         
             delta = QPoint(event.globalPos() - self.old_pos)
-            # if y > 50 and y < 900 and x > 200:
+
             self.move(self.x() + delta.x(), self.y() + delta.y())
             self.old_pos = event.globalPos()
             if self.window_notebook:
                 self.window_notebook.move(self.pos().x(), self.pos().y()+63)
             if self.window_symbol:
                 self.window_symbol.move(self.pos().x(),self.pos().y()+63)
-            # if self.window_aihelp:
-            #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-            # if self.window_aitrans:
-            #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
             if self.window_rep:
                 self.window_rep.move(self.pos().x() + self.width() - 270,self.pos().y() + 100)
-            # if self.window_decorate:
-            #     self.window_decorate.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-            if self.window_continue:
-                self.window_continue.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
             if self.window_search: 
                 self.window_search.move(self.pos().x() + 358 + self.search_fill_1.width(),self.pos().y() + 30)
         # self.window_notebook.activateWindow()
         
-    def fn_aiapi(self):
-        global messages
-        messages = []
-        if not self.window_api:
-            self.api_ui()
-        if self.window_api.isVisible():
-            self.window_api.hide()
-        else:
-            self.fn_animation(self.window_api,0.0,1.0)
-            self.animation.start()
-            self.window_api.show()
     def fn_showhelp(self):
         if not self.window_help:
             self.help_ui()
@@ -1667,113 +1589,6 @@ class MainWindow(QMainWindow):
             self.fn_animation(self.window_help,0.0,1.0)
             self.animation.start()
             self.window_help.show()
-    def submit_api(self):
-        if self.combo_api.currentText() == 'Doubao':
-            ak = self.text_ak.text()
-            sk = self.text_sk.text()
-            model = self.text_model.text()
-            open('./data/doubao_token.txt','w+').write(f'{ak}\n{sk}\n{model}')
-        elif self.combo_api.currentText() == 'Deepseek':
-            ak = self.text_ak.text()
-            open('./data/deepseek_token.txt','w+').write(f'{ak}')
-        self.window_api.hide()
-    def api_ui(self):
-        global messages
-        messages = []
-        doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-        ak,sk,model = '','',''
-        if len(doubao_array) == 3:
-            ak = doubao_array[0]
-            sk = doubao_array[1]
-            model = doubao_array[2]
-        
-        self.window_api = QWidget_Notop('API')
-        self.layout_windowapi = QGridLayout(self.window_api)
-        self.window_api.move(800, 400)
-        self.window_api.setFixedSize(400, 150)
-
-        self.text_ak = QLineEdit()
-        self.text_ak.setText(ak)
-        self.text_ak.setToolTip('Access Key ID (AK)')
-        self.text_ak.setPlaceholderText(f'Access Key ID (AK)')
-        self.text_ak.setFixedSize(380,25)
-
-        self.text_sk = QLineEdit()
-        self.text_sk.setText(sk)
-        self.text_sk.setToolTip('Secret Access Key (SK)')
-        self.text_sk.setPlaceholderText(f'Secret Access Key (SK)')
-        self.text_sk.setFixedSize(380,25)
-
-        self.text_model = QLineEdit()
-        self.text_model.setText(model)
-        self.text_model.setToolTip('Model')
-        self.text_model.setPlaceholderText(f'Model')
-        self.text_model.setFixedSize(380,25)
-
-        self.combo_model = QComboBox()
-        self.combo_model.addItem('deepseek-chat')
-        self.combo_model.addItem('deepseek-reasoner')
-        self.combo_model.setCurrentIndex(0)
-        self.combo_model.currentIndexChanged.connect(self.combo_model_changed)
-        self.combo_model.setFixedSize(380,25)
-
-        self.combo_api = QComboBox()
-        self.combo_api.addItem('Doubao')
-        self.combo_api.addItem('Deepseek')
-        self.combo_api.setCurrentIndex(0)
-        self.combo_api.currentIndexChanged.connect(self.combo_api_changed)
-        self.combo_api.setFixedSize(100,25)
-
-
-        bt_submit = QPushButton("提交")
-        bt_submit.setToolTip('关闭')
-        bt_submit.clicked.connect(self.submit_api)
-        bt_submit.setStyleSheet('background-color: #e55f00;color:white')
-        bt_submit.setFixedSize(130,25)
-
-        bt_close = QPushButton("X")
-        bt_close.setToolTip('关闭')
-        bt_close.setFixedSize(130,25)
-        bt_close.clicked.connect(self.window_api.hide)
-
-        self.layout_windowapi.addWidget(self.text_ak,0,0,1,3)
-        self.layout_windowapi.addWidget(self.text_sk,1,0,1,3)
-
-        self.layout_windowapi.addWidget(self.text_model,2,0,1,3)
-        self.layout_windowapi.addWidget(self.combo_api,4,0,1,3)
-        self.layout_windowapi.addWidget(bt_submit,4,1,1,1)
-        self.layout_windowapi.addWidget(bt_close,4,2,1,1)
-    def combo_model_changed(self):
-        global deep_model
-        deep_model = self.combo_model.currentText().strip('\n ')
-            
-    def combo_api_changed(self):
-        global model_api
-        ak,sk,model = '','',''
-        doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-        if len(doubao_array) == 3:
-            ak = doubao_array[0]
-            sk = doubao_array[1]
-            model = doubao_array[2]
-        deepseek_array = open('./data/deepseek_token.txt','r').read().split('\n')
-        if len(deepseek_array) == 1:
-            deepseek_ak = deepseek_array[0]
-        if self.combo_api.currentText() == 'Deepseek':
-            self.text_sk.hide()
-            self.text_model.hide()
-            self.text_ak.setText(deepseek_ak)
-            self.combo_model.show()
-            self.layout_windowapi.addWidget(self.combo_model,1,0,1,3)
-            model_api = 'Deepseek'
-        else:
-            self.text_ak.show()
-            self.text_sk.show()
-            self.text_model.show()
-            self.combo_model.hide()
-            self.text_ak.setText(ak)
-            self.text_sk.setText(sk)
-            self.text_model.setText(model)
-            model_api = 'Doubao'
 
     def help_ui(self):
         self.window_help = QWidget_Notop('如何使用')
@@ -1822,13 +1637,12 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print('Error Code 203',e)
     def fn_showbook(self):
-        global global_active_textcomponent,global_active_figmark
         if self.window_notebook.isVisible():
             self.window_notebook.hide()
             self.dock_mark.setMinimumWidth(50)
             self.dock_mark.setMaximumWidth(1000)
         else:
-            self.window_notebook = WindowBook(global_active_figmark,global_active_textcomponent,self.status,self.dock_mark)
+            self.window_notebook = WindowBook(self.active_figmark,self.active_textcomponent,self.status,self.dock_mark)
             self.fn_animation(self.window_notebook,0.0,1.0)
             self.animation.start()
             self.window_notebook.show()
@@ -1836,29 +1650,27 @@ class MainWindow(QMainWindow):
             self.window_notebook.setFixedHeight(self.height() - 90)
             self.dock_mark.setFixedWidth(500)
     def fn_reset_allformat(self):# 重置格式
-        global global_active_textcomponent,global_active_figmark
         format = QTextCharFormat()
         # format.setForeground(QColor('#dfe1e2'))
         format.setBackground(QColor(Qt.transparent))
-        global_active_textcomponent.setFont(QFont("SimSun", 12))
+        self.active_textcomponent.setFont(QFont("SimSun", 12))
         # format.setFont('宋体')
         # format.setFontPointSize(12)
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.mergeCharFormat(format)
 
         format.setFontPointSize(9)
-        cursor = global_active_figmark.textCursor()
+        cursor = self.active_figmark.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.setCharFormat(format)
     def change_font_color(self):
-        global global_active_textcomponent
         font_format = QTextCharFormat()
         font_format.setForeground(QColor(self.font_color))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().replace('\n','\u2029')
         re_search = QRegExp(select_txt)
-        matches = re.finditer(re_search.pattern(), global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
+        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
         # 循环查找文档
         match_num = 0
         for match in matches:
@@ -1875,13 +1687,12 @@ class MainWindow(QMainWindow):
             self.bt_color.setStyleSheet("QPushButton {border-left: 0px; color:#aa0000}")
 
     def change_font_bgcolor(self):
-        global global_active_textcomponent
         font_format = QTextCharFormat()
         font_format.setBackground(QColor(self.background_color))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().replace('\n','\u2029')
         re_search = QRegExp(select_txt)
-        matches = re.finditer(re_search.pattern(), global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
+        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
         # 循环查找文档
         match_num = 0
         for match in matches:
@@ -1896,26 +1707,25 @@ class MainWindow(QMainWindow):
         
 
     def set_default_color(self):
-        global global_active_textcomponent
         format = QTextCharFormat()
-        global_active_textcomponent.setStyleSheet('background-color: #dfe1e2')
+        self.active_textcomponent.setStyleSheet('background-color: #dfe1e2')
         self.background_color = '#dfe1e2'
         format.setForeground(QColor("black"))
         format.setBackground(QColor(Qt.transparent))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.mergeCharFormat(format)
     def choose_gcolor(self): # 选择背景色
-        global global_active_textcomponent
         self.background_color = QColorDialog().getColor().name()
         if self.background_color == '#000000':
             self.choose_gcolor_action.setStyleSheet(f'background-color: {self.background_color}')
-            global_active_textcomponent.setStyleSheet(f'background-color: {self.background_color}')
+            self.active_textcomponent.setStyleSheet(f'background-color: {self.background_color}')
         else:
             self.choose_gcolor_action.setStyleSheet(f'background-color: {self.background_color}')
-            global_active_textcomponent.setStyleSheet(f'background-color: {self.background_color}')
+            self.active_textcomponent.setStyleSheet(f'background-color: {self.background_color}')
     def add_mouse_rightclick(self):  # 右键菜单
         self.action_00 = QAction(QIcon(qta.icon('fa5b.searchengin')),'专利检索')
+        self.action_summary = QAction(QIcon(qta.icon('ei.idea')),'生成摘要')
         self.action_01 = QAction(QIcon(qta.icon('mdi6.content-cut')),'剪切')
         self.action_02 = QAction(QIcon(qta.icon('ph.copy-fill')),'复制')
         self.action_03 = QAction(QIcon(qta.icon('fa.paste')),'粘贴')
@@ -1988,16 +1798,11 @@ class MainWindow(QMainWindow):
         # self.action_26.setShortcut('Alt+6')
 
         self.action_00.triggered.connect(self.fn_searchpatent)
+        self.action_summary.triggered.connect(self.fn_gen_summary)
         self.action_01.triggered.connect(self.fn_cut)
         self.action_02.triggered.connect(self.fn_copy)
         self.action_03.triggered.connect(self.fn_paste)
         self.action_04.triggered.connect(self.show_repwindow)
-        # AI
-        # self.action_05.triggered.connect(self.get_aidecorate)
-        # self.action_06.triggered.connect(self.get_aihelp)
-        # self.action_07.triggered.connect(self.get_aitrans)
-        # self.action_08.triggered.connect(self.get_aisupplement)
-        # self.action_09.triggered.connect(self.get_aicontinue)
         # 批量文本
         self.action_11.triggered.connect(lambda:[self.complete_marknum(0)])
         self.action_12.triggered.connect(lambda:[self.complete_marknum(1)])
@@ -2022,34 +1827,99 @@ class MainWindow(QMainWindow):
         self.action_23.triggered.connect(self.generate_claim_model)
         self.action_24.triggered.connect(self.generate_re_model)
         self.action_25.triggered.connect(self.generate_invalid_model)
-        # self.action_26.triggered.connect(self.generate_ai_model)
     def fn_copy(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         clipboard = QApplication.clipboard()
         self.clip_txt = cursor.selectedText()
-        self.mime_data = QMimeData()
-        fragment = QTextDocumentFragment(cursor)
-        html = fragment.toHtml()
+        # 直接用 setText 写纯文本，保证 Notepad 可粘贴
+        clipboard.setText(cursor.selectedText())
+        # 再补 HTML 格式，Word/浏览器粘贴时保留样式
         try:
-            self.mime_data.setData("text/html", bytes(html, 'utf-8'))
-            clipboard.setMimeData(self.mime_data)
+            self.mime_data = QMimeData()
+            fragment = QTextDocumentFragment(cursor)
+            self.mime_data.setHtml(fragment.toHtml())
+            self.mime_data.setText(cursor.selectedText())
+            clipboard.setMimeData(self.mime_data, clipboard.Clipboard)
         except:
-            clipboard.setText(cursor.selectedText())
+            pass
+    def fn_gen_summary(self):
+        """从说明书全文提取内容生成摘要（300字以内）
+        结构：技术领域 + 技术问题 + 技术方案（主要部件）+ 有益效果"""
+        txt = self.active_textcomponent.toPlainText()
+        if not txt.strip():
+            return
+        def extract_section(name, next_names):
+            """按章节标题提取段落内容"""
+            pat = r'(?:\n\s*' + name + r'\s*\n)(.+?)(?=\n\s*(?:' + '|'.join(next_names) + r')\s*\n|\Z)'
+            m = re.search(pat, txt, re.S)
+            return m.group(1).strip() if m else ''
+        sections = ['技术领域','背景技术','发明内容','附图说明','具体实施方式','权利要求书','摘要']
+        # 1. 技术领域
+        field = extract_section('技术领域', ['背景技术','发明内容','附图说明','具体实施方式','权利要求书'])
+        # 取前两句
+        field = re.split(r'[。；]', field)
+        field = '。'.join(field[:2]).rstrip('。') + '。' if field else ''
+        # 2. 背景技术中的问题
+        bg = extract_section('背景技术', ['发明内容','附图说明','具体实施方式','权利要求书'])
+        problem = ''
+        for kw in ['存在','缺点','不足','问题','难以','无法','导致']:
+            m = re.search(r'[^。；]*' + kw + r'[^。；]*[。；]', bg)
+            if m:
+                problem = m.group(0).strip()
+                break
+        # 3. 技术方案：独立权利要求1 或 发明内容
+        claim1 = ''
+        m = re.search(r'\n\s*1[\.、]\s*(.+?)(?=\n\s*2[\.、]|\Z)', txt, re.S)
+        if m:
+            claim1 = m.group(1).strip()
+        # 提取主要部件
+        feats = []
+        for m in re.finditer(r'(?:包括|设有|具有|设置有)([\u4e00-\u9fa5]{2,8}(?:、[\u4e00-\u9fa5]{2,8}){0,4})', txt):
+            for part in m.group(1).split('、'):
+                part = part.strip()
+                if part and part not in feats and len(part) >= 2:
+                    feats.append(part)
+        # 4. 有益效果
+        effect = ''
+        m = re.search(r'(?:有益效果|技术效果)[：:。]?\s*(.+?)(?=\n\s*[\u4e00-\u9fa5]{2,10}\n|\Z)', txt, re.S)
+        if m:
+            effect = m.group(1).strip()
+            effect = re.split(r'[。；]', effect)
+            effect = '。'.join(effect[:2]).rstrip('。') + '。' if effect else ''
+        # 拼接
+        parts = []
+        if field:
+            parts.append(field)
+        if problem:
+            parts.append('针对上述问题，' + problem.rstrip('。') + '。')
+        if claim1:
+            if '其特征在于' in claim1:
+                pre, feat = claim1.split('其特征在于', 1)
+                parts.append(pre.strip().rstrip('。') + '，')
+                parts.append('其特征在于，' + feat.strip().rstrip('。'))
+            else:
+                parts.append(claim1.rstrip('。'))
+        elif feats:
+            parts.append('主要包括' + '、'.join(feats[:5]) + '。')
+        if effect:
+            parts.append(effect)
+        summary = ''.join(parts)
+        if len(summary) > 300:
+            summary = summary[:300].rstrip('，。、；') + '。'
+        # 插入到当前光标处
+        self.active_textcomponent.textCursor().insertText(summary)
     def fn_searchpatent(self):
-        global global_active_textcomponent
         try:
             for url in open("options.txt",'r',encoding='utf-8').readlines():
                 if 'search_url' in url:
                     self.search_url = url.split('=')[1].strip(' ')
-                    self.select_txt = global_active_textcomponent.textCursor().selectedText()
+                    self.select_txt = self.active_textcomponent.textCursor().selectedText()
                     webbrowser.open(f"{self.search_url}={self.select_txt}")
                     break
         except:
             pass
     def fn_cut(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         clipboard = QApplication.clipboard()
         self.clip_txt = cursor.selectedText()
         self.mime_data = QMimeData()
@@ -2062,8 +1932,7 @@ class MainWindow(QMainWindow):
             clipboard.setText(cursor.selectedText())
         cursor.deleteChar()
     def fn_paste(self):
-        global global_active_textcomponent
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         clipboard = QApplication.clipboard()
         cursor.removeSelectedText()
         text = clipboard.text(QClipboard.Clipboard)
@@ -2098,11 +1967,11 @@ class MainWindow(QMainWindow):
         array_4 = ['Αα','Ββ','Γγ','Δδ','Εε','Ζζ','Ηη','Θθ','Ιι','Κκ','Λλ','Μμ','Νν','Ξξ','Ππ','Ρρ','Σσ','Ττ','Υυ','Φφ','Χχ','Ψψ','Ωω']
         array_5 = ['kg/m3','g/cm3','°','℃','℉','km','cm','mm','μm','nm','kg','mg','μg','ng','lbs','kPa','MPa','bar','kw·h','GW','m/s','km/h','dB']
 
-        lb_array_1 = [Label_Symbol(global_active_textcomponent,array_1[i]) for i in range(len(array_1))]
-        lb_array_2 = [Label_Symbol(global_active_textcomponent,array_2[i]) for i in range(len(array_2))]
-        lb_array_3 = [Label_Symbol(global_active_textcomponent,array_3[i]) for i in range(len(array_3))]
-        lb_array_4 = [Label_Symbol(global_active_textcomponent,array_4[i]) for i in range(len(array_4))]
-        lb_array_5 = [Label_Symbol(global_active_textcomponent,array_5[i]) for i in range(len(array_5))]
+        lb_array_1 = [Label_Symbol(self.active_textcomponent,array_1[i]) for i in range(len(array_1))]
+        lb_array_2 = [Label_Symbol(self.active_textcomponent,array_2[i]) for i in range(len(array_2))]
+        lb_array_3 = [Label_Symbol(self.active_textcomponent,array_3[i]) for i in range(len(array_3))]
+        lb_array_4 = [Label_Symbol(self.active_textcomponent,array_4[i]) for i in range(len(array_4))]
+        lb_array_5 = [Label_Symbol(self.active_textcomponent,array_5[i]) for i in range(len(array_5))]
         
         bt_close = QPushButton('×')
         bt_close.setToolTip('关闭')
@@ -2191,7 +2060,7 @@ class MainWindow(QMainWindow):
             table_html += '</tr>'
         table_html += '</table>'
 
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.insertHtml('\n' + table_html)
 
     def insert_image(self):
@@ -2214,7 +2083,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print('Error Code 204',e)
                 # 将图片转换为HTML格式，并将其插入到TextEdit中
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             html = f"<img src=\"{file_path}\" alt=\"{os.path.basename(file_path)}\" width=\"{width}\" height=\"{height}\" />"
             cursor.insertHtml(html)
  
@@ -2232,21 +2101,20 @@ class MainWindow(QMainWindow):
             self.tab_drag_flag = False
 
     def add_texteditors(self):
-        global tab_widget_text,text_editor_array,window_show_text_array,window_show_mark_array,global_active_textcomponent,global_active_figmark 
         # 多标签文本
-        tab_widget_text = QTabWidget()
-        tab_widget_text.setMouseTracking(True)
+        self.tab_widget_text = QTabWidget()
+        self.tab_widget_text.setMouseTracking(True)
 
-        text_editor_array = [QTextEditWithLineNum() for i in range(30)]
-        window_show_text_array = [QTextEditWithLineNum() for i in range(30)]
-        window_show_mark_array = [OcrDropTextEdit() for i in range(30)]
+        self.text_editor_array = [QTextEditWithLineNum() for i in range(30)]
+        self.window_show_text_array = [QTextEditWithLineNum() for i in range(30)]
+        self.window_show_mark_array = [OcrDropTextEdit() for i in range(30)]
         
         self.contextMenu_array = [_ for _ in range(30)]
-        global_active_textcomponent = text_editor_array[0]
+        self.active_textcomponent = self.text_editor_array[0]
         
         self.show_cursor_menu() # 右键菜单
         self.tab_name_array = open(f'./data/tab_name.txt','r',encoding='utf-8').read().split('，')
-        for editor in text_editor_array:
+        for editor in self.text_editor_array:
             # 设置editor
             editor.setContextMenuPolicy(Qt.CustomContextMenu)
             editor.customContextMenuRequested.connect(self.show_context_menu)
@@ -2257,7 +2125,7 @@ class MainWindow(QMainWindow):
             editor.keyPressEvent = self.fn_keypressevent
             
             editor.textChanged.connect(self.fn_text_changed)
-            editor_index = text_editor_array.index(editor)
+            editor_index = self.text_editor_array.index(editor)
             try:
                 load_txt = open(f'./data/text_saver_{editor_index + 1}.html','r',encoding='utf-8').read()
                 editor.setHtml(load_txt)
@@ -2269,26 +2137,25 @@ class MainWindow(QMainWindow):
                 for i in range(start_num,30):
                     self.tab_name_array.append(f'文档{i + 1}')
             if self.tab_name_array:
-                tab_widget_text.addTab(editor,self.tab_name_array[editor_index])
+                self.tab_widget_text.addTab(editor,self.tab_name_array[editor_index])
             else:
-                tab_widget_text.addTab(editor,f'文档{editor_index + 1}')
+                self.tab_widget_text.addTab(editor,f'文档{editor_index + 1}')
     
-        for index,editor in enumerate(window_show_text_array):
+        for index,editor in enumerate(self.window_show_text_array):
             editor.mouseReleaseEvent = self.fn_mouse_keyrelease_text
             
-        for index,editor in enumerate(window_show_mark_array):
+        for index,editor in enumerate(self.window_show_mark_array):
             editor.mouseReleaseEvent = self.fn_highlight_figmarks
 
-        self.layoutwidget.addWidget(tab_widget_text,0,0,1,1)
-        tab_widget_text.currentChanged.connect(self.fn_texttab_changed)
-        tab_widget_text.tabBarDoubleClicked.connect(self.rename_tabtext)
+        self.layoutwidget.addWidget(self.tab_widget_text,0,0,1,1)
+        self.tab_widget_text.currentChanged.connect(self.fn_texttab_changed)
+        self.tab_widget_text.tabBarDoubleClicked.connect(self.rename_tabtext)
 
     def fn_mouse_dbclick(self,event):
-        global global_active_textcomponent,global_active_figmark
 
         list_1 = list(self.load_txt_1) + ['包含','已经','可以','包括','能够','一旦','一种','通过','进行','用于','如果','可能','或者'] # 向前查找
         list_2 = list(self.load_txt_2) # 向后查找
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         format = QTextCharFormat()
         format.setBackground(QColor('#4a76d6'))
 
@@ -2318,12 +2185,12 @@ class MainWindow(QMainWindow):
                                 cursor.movePosition(cursor.Left,QTextCursor.KeepAnchor,1)
                             cursor.mergeCharFormat(format)
                             self.db_flag = True
-                            self.get_same_markindex_1(select_txt,global_active_textcomponent,self.highlight_color)
+                            self.get_same_markindex_1(select_txt,self.active_textcomponent,self.highlight_color)
                             return
                 if j == i + 9:
                     select_txt = select_txt_1[1:]
                     self.db_flag = True
-                    self.get_same_markindex_1(select_txt,global_active_textcomponent,self.highlight_color)
+                    self.get_same_markindex_1(select_txt,self.active_textcomponent,self.highlight_color)
                     return
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -2336,13 +2203,12 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def texteditor_dropEvent(self, event):
-        global tab_widget_text
         if event.mimeData().hasUrls():
             urls = [url.toLocalFile() for url in event.mimeData().urls()]
             # 处理拖放的本地文件路径
             self.in_dir = urls[0]
             self.status.showMessage('文件识别中...')
-            self.tab_txt_index = tab_widget_text.currentIndex()
+            self.tab_txt_index = self.tab_widget_text.currentIndex()
             self.ocr_thread = Worker_Ocr(self.in_dir)
             self.ocr_thread.progress.connect(self.text_editor_ocr)
             self.ocr_thread.start()
@@ -2350,15 +2216,13 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def text_editor_ocr(self,in_txt):
-        global text_editor_array
-        text_editor_array[self.tab_txt_index].insertPlainText('\n' + in_txt)
+        self.text_editor_array[self.tab_txt_index].insertPlainText('\n' + in_txt)
         self.status.showMessage('文件完成')
         self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
         self.setCursor(Qt.ArrowCursor)
     def rename_tabtext(self):
         # if event.button() != 2: # 1左键 2 右键 4 中键
         #     return
-        global tab_widget_text
         self.tab_name_widget = QWidget()
         self.tab_name_layout = QGridLayout(self.tab_name_widget)
         self.tab_name_widget.setFixedSize(220,50)
@@ -2368,8 +2232,8 @@ class MainWindow(QMainWindow):
         self.tab_name_text.setPlaceholderText('输入文档标题')
         self.tab_name_text.setMinimumHeight(30)
         self.tab_name_text.setMinimumWidth(200)
-        tab_index = tab_widget_text.currentIndex()
-        tab_txt = tab_widget_text.tabText(tab_index)
+        tab_index = self.tab_widget_text.currentIndex()
+        tab_txt = self.tab_widget_text.tabText(tab_index)
         if tab_txt != f'文档{tab_index + 1}':
             self.tab_name_text.setText(tab_txt)
         self.tab_name_layout.addWidget(self.tab_name_text,0,0)
@@ -2384,7 +2248,6 @@ class MainWindow(QMainWindow):
         self.tab_name_text.focusOutEvent = self.tab_name_focusout
         self.tab_name_text.keyPressEvent = self.tab_name_keypressEvent
     def tab_name_keypressEvent(self,event):
-        global tab_widget_text
         cursor = self.tab_name_text.cursorPosition()
         clipboard = QApplication.clipboard()
         try:
@@ -2396,7 +2259,7 @@ class MainWindow(QMainWindow):
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_V:
                 if clipboard.text():
                     cursor.insertText(clipboard.text())
-                elif self.clip_txt:
+                else:
                     cursor.insertText(self.clip_txt)
             elif event.key() == Qt.Key_Delete:
                 cursor.deleteChar()
@@ -2431,14 +2294,14 @@ class MainWindow(QMainWindow):
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_Y:
                 self.tab_name_text.redo()
             elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Escape: # 回车 或 esc
-                tab_index = tab_widget_text.currentIndex()
+                tab_index = self.tab_widget_text.currentIndex()
                 self.tab_name_widget.hide()
                 tab_txt = self.tab_name_text.toPlainText()
                 if tab_txt:
                     pass
                 elif not tab_txt:
                     tab_txt = f'文档{tab_index + 1}'
-                tab_widget_text.setTabText(tab_index, tab_txt)
+                self.tab_widget_text.setTabText(tab_index, tab_txt)
                 self.tab_name_array[tab_index] = tab_txt
                 open(f'./data/tab_name.txt','w+',encoding='utf-8').write('，'.join(self.tab_name_array))
             else:
@@ -2448,33 +2311,30 @@ class MainWindow(QMainWindow):
         self.start_drag_pos = (0,0)
         self.tab_drag_flag = False
     def tab_name_focusout(self,event):
-        global tab_widget_text
-        tab_index = tab_widget_text.currentIndex()
+        tab_index = self.tab_widget_text.currentIndex()
         self.tab_name_widget.hide()
         tab_txt = self.tab_name_text.text()
         if tab_txt:
             pass
         elif not tab_txt:
             tab_txt = f'文档{tab_index + 1}'
-        tab_widget_text.setTabText(tab_index, tab_txt)
+        self.tab_widget_text.setTabText(tab_index, tab_txt)
         self.tab_name_array[tab_index] = tab_txt
         open(f'./data/tab_name.txt','w+',encoding='utf-8').write('，'.join(self.tab_name_array))
 
         self.start_drag_pos = (0,0)
         self.tab_drag_flag = False
     def show_context_menu(self, pos):
-        global global_active_textcomponent,global_active_figmark
         # 显示右键菜单
-        self.context_menu.exec_(global_active_textcomponent.mapToGlobal(pos))
+        self.context_menu.exec_(self.active_textcomponent.mapToGlobal(pos))
     def on_text_changed(self):
-        global global_active_textcomponent,global_active_figmark
 
         # 获取当前选中的文本
-        selected_text = global_active_textcomponent.textCursor().selectedText()
+        selected_text = self.active_textcomponent.textCursor().selectedText()
         # 如果选中的文本不为空，则设置选中文本的背景色和前景色
         if selected_text:
-            select_text = global_active_textcomponent.textCursor() # 获取当前光标位置
-            text_format = global_active_textcomponent.currentCharFormat() # 获取当前字文本的字符串格式
+            select_text = self.active_textcomponent.textCursor() # 获取当前光标位置
+            text_format = self.active_textcomponent.currentCharFormat() # 获取当前字文本的字符串格式
             text_format.setBackground(QColor(self.highlight_color))  # 设置高亮颜色
             select_text.mergeCharFormat(text_format) # 追加格式到原有文本
     # text_component中高亮显示mark相同的文本
@@ -2510,7 +2370,6 @@ class MainWindow(QMainWindow):
             print('Error Code 206',e)
     
     def get_same_markindex_1(self,mark,input_component,highlight_color):
-        global global_active_textcomponent,global_active_figmark
 
         if mark == '.' or not mark:
             return
@@ -2539,9 +2398,9 @@ class MainWindow(QMainWindow):
             # input_component.setTextCursor(cursor) # 定位至标记位置
             if match_num == 1 and self.db_flag == False:
                 self.reset_textcomponentformat()
-            all_txt = global_active_textcomponent.toPlainText()
+            all_txt = self.active_textcomponent.toPlainText()
             all_txt_without_dots = all_txt
-            select_txt = global_active_textcomponent.textCursor().selectedText()
+            select_txt = self.active_textcomponent.textCursor().selectedText()
             select_txt_without_dots = select_txt
             for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！&——+\\{\\}【】‘；：”“’。，、？\'：；':
                 select_txt_without_dots = select_txt_without_dots.replace(_, '')
@@ -2556,214 +2415,35 @@ class MainWindow(QMainWindow):
                 self.status.showMessage(f"> 共匹配到{match_num}个结果 共{len_all}个字（含标点） 共{len_all_without_dots}个字（不含标点）")
         except Exception as e:
             print('Error Code 208',e)
-    # def fn_aitrans_keyrelease(self,event):
-    #     if event.key() == 16777216:
-    #         self.window_aitrans.hide()
-    # def ai_trans_changed(self):
-    #     txt = self.combo_aitrans.currentText()
-    #     self.text_aitrans_history.setPlainText(self.aitrans_search_history[txt])
-    # def fn_aitrans(self,in_txt):
-    #     # self.text_aitrans.setPlainText(in_txt)
-    #     self.aitrans_search_history[self.trans_txt] = in_txt
-    #     self.status.showMessage('翻译完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    # def get_aitrans(self):
-    #     global global_active_textcomponent,global_active_figmark
-    #     self.trans_txt = global_active_textcomponent.textCursor().selectedText()
-    #     if not self.trans_txt:
-    #         return
-    #     self.aitrans_search_history[self.trans_txt] = ''
-
-    #     self.window_aitrans = QWidget()
-    #     self.layout_aitrans = QGridLayout(self.window_aitrans)
-    #     self.window_aitrans.setWindowTitle('AI翻译')
-    #     self.window_aitrans.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-    #     self.window_aitrans.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-    #     self.window_aitrans.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
-    #     self.window_aitrans.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
-        
-    #     self.text_aitrans = QTextEdit()
-    #     self.text_aitrans.setMinimumWidth(100)
-    #     self.text_aitrans.setMinimumHeight(60)
-    #     self.text_aitrans.setFontPointSize(11)
-    #     self.text_aitrans.setPlaceholderText('翻译中,请稍后...')
-    #     self.text_aitrans.setToolTip('按ESC键关闭')
-    #     self.text_aitrans.keyReleaseEvent = self.fn_aitrans_keyrelease
-
-    #     self.text_aitrans_history = QTextEdit()
-    #     self.text_aitrans_history.setMinimumWidth(100)
-    #     self.text_aitrans_history.setMinimumHeight(60)
-    #     self.text_aitrans_history.setFontPointSize(11)
-    #     self.text_aitrans_history.setToolTip('按ESC键关闭')
-    #     self.text_aitrans_history.keyReleaseEvent = self.fn_aitrans_keyrelease
-        
-    #     self.widget_transhistory = QWidget()
-    #     self.transhistory_layout = QGridLayout(self.widget_transhistory)
-    #     self.combo_aitrans = QComboBox()
-    #     self.combo_aitrans.addItems(self.aitrans_search_history)
-    #     self.combo_aitrans.currentIndexChanged.connect(self.ai_trans_changed)
-    #     self.transhistory_layout.addWidget(self.combo_aitrans,0,0,1,1)
-    #     self.transhistory_layout.addWidget(self.text_aitrans_history,1,0,1,1)
-
-    #     self.tab_widget_aitrans = QTabWidget()
-    #     self.tab_widget_aitrans.addTab(self.text_aitrans,'翻译结果')
-    #     self.tab_widget_aitrans.addTab(self.widget_transhistory,'翻译历史')
-        
-    #     self.layout_aitrans.addWidget(self.tab_widget_aitrans,0,0,0,0)
-    #     self.fn_animation(self.window_aitrans,0.0,1.0)
-    #     self.animation.start()
-    #     self.window_aitrans.show()
-
-    #     global model_api
-    #     if model_api == 'Doubao':
-    #         self.aitrans_thread = Worker_ai_doubao('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
-    #     else:
-    #         self.aitrans_thread = Worker_ai_deepseek('你精通专利翻译，将以下文本翻译为中文：'+self.trans_txt,self.text_aitrans)
-    #     self.aitrans_thread.progress.connect(self.fn_aitrans)
-    #     self.aitrans_thread.start()
-    # def fn_aisupplement(self,in_txt):
-    #     global global_active_textcomponent,global_active_figmark
-    #     self.status.showMessage('填充完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    #     self.default_format()
-    #     all_html = global_active_textcomponent.toHtml()
-    #     self.supplement_txt = self.supplement_txt.replace('<','&lt;').replace('>','&gt;')
-    #     all_html = all_html.replace(self.supplement_txt,in_txt)
-    #     global_active_textcomponent.setHtml(all_html)
-    #     self.one_key_format()
-    #     self.get_same_markindex(in_txt,global_active_textcomponent,self.highlight_color)
-
-    # def get_aisupplement(self):
-    #     global global_active_textcomponent,global_active_figmark
-    #     self.supplement_txt = global_active_textcomponent.textCursor().selectedText().strip('\u2029\n ，。；、：')
-    #     if not self.supplement_txt:
-    #         self.status.showMessage('未识别到待填充文本，请重试')
-    #     elif self.supplement_txt[0] == '<' and self.supplement_txt[-1] == '>':
-    #         self.status.showMessage('文本补充中，请稍后...')
-    #         self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #         # self.setCursor(Qt.WaitCursor)
-            
-    #         cursor = global_active_textcomponent.textCursor()
-    #         cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,2)
-    #         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
-    #         cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,5)
-    #         all_txt = cursor.selectedText()
-
-    #         global model_api
-    #         if model_api == 'Doubao':
-    #             self.supplement_thread = Worker_ai_doubao(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
-    #         else:
-    #             self.supplement_thread = Worker_ai_deepseek(f'请结合{all_txt}上下文，以最简短的语言填充{self.supplement_txt}部分','')
-
-    #         self.supplement_thread.progress.connect(self.fn_aisupplement)
-    #         self.supplement_thread.start()
-    #     else:
-    #         self.status.showMessage('未识别到待填充文本，请重试')
-    # def fn_aihelp_keyrelease(self,event):
-    #     if event.key() == 16777216:
-    #         self.window_aihelp.hide()
-    # def ai_help_changed(self):
-    #     txt = self.combo_aihelp.currentText()
-    #     self.text_aihelp_history.setPlainText(self.aihelp_search_history[txt])
-    # def fn_aihelp(self,in_txt):
-    #     self.status.showMessage('查询完成')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-    #     self.setCursor(Qt.ArrowCursor)
-    #     # self.text_aihelp.setPlainText(in_txt)
-    #     self.aihelp_search_history[self.help_txt] = in_txt
-    # def get_aihelp(self):
-    #     global global_active_textcomponent,global_active_figmark
-    #     self.status.showMessage('内容查询中,请稍后...')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #     # self.setCursor(Qt.WaitCursor)
-
-    #     self.help_txt = global_active_textcomponent.textCursor().selectedText()
-    #     if not self.help_txt:
-    #         return
-    #     self.aihelp_search_history[self.help_txt] = ''
-
-    #     self.window_aihelp = QWidget()
-    #     self.layout_aihelp = QGridLayout(self.window_aihelp)
-    #     self.window_aihelp.setWindowTitle(self.help_txt + '的含义')
-    #     self.window_aihelp.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-    #     self.window_aihelp.move(self.pos().x() + self.width() - 430,self.pos().y() + 100)
-    #     self.window_aihelp.setFixedSize(400, int(global_active_textcomponent.height()*0.67))
-    #     self.window_aihelp.setWindowFlags(Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint) # 隐藏标题栏
-        
-    #     self.text_aihelp = QTextEdit()
-    #     self.text_aihelp.setMinimumWidth(100)
-    #     self.text_aihelp.setMinimumHeight(60)
-    #     self.text_aihelp.setFontPointSize(11)
-    #     self.text_aihelp.setPlaceholderText('内容查询中,请稍后...')
-    #     self.text_aihelp.setToolTip('按ESC键关闭')
-    #     self.text_aihelp.keyReleaseEvent = self.fn_aihelp_keyrelease
-
-    #     self.text_aihelp_history = QTextEdit()
-    #     self.text_aihelp_history.setMinimumWidth(100)
-    #     self.text_aihelp_history.setMinimumHeight(60)
-    #     self.text_aihelp_history.setFontPointSize(11)
-    #     self.text_aihelp_history.setToolTip('按ESC键关闭')
-    #     self.text_aihelp_history.keyReleaseEvent = self.fn_aihelp_keyrelease
-        
-    #     self.widget_history = QWidget()
-    #     self.history_layout = QGridLayout(self.widget_history)
-    #     self.combo_aihelp = QComboBox()
-    #     self.combo_aihelp.addItems(self.aihelp_search_history)
-    #     self.combo_aihelp.currentIndexChanged.connect(self.ai_help_changed)
-    #     self.history_layout.addWidget(self.combo_aihelp,0,0,1,1)
-    #     self.history_layout.addWidget(self.text_aihelp_history,1,0,1,1)
-
-    #     self.tab_widget_aihelp = QTabWidget()
-    #     self.tab_widget_aihelp.addTab(self.text_aihelp,'查询结果')
-    #     self.tab_widget_aihelp.addTab(self.widget_history,'查询历史')
-        
-    #     self.layout_aihelp.addWidget(self.tab_widget_aihelp,0,0,0,0)
-    #     self.fn_animation(self.window_aihelp,0.0,1.0)
-    #     self.animation.start()
-    #     self.window_aihelp.show()
-
-    #     global model_api
-
-    #     if model_api == 'Doubao':
-    #         self.aihelp_thread = Worker_ai_doubao(self.help_txt + '是什么意思？',self.text_aihelp)
-    #     else:
-    #         self.aihelp_thread = Worker_ai_deepseek(self.help_txt + '是什么意思？',self.text_aihelp)
-
-
-    #     self.aihelp_thread.progress.connect(self.fn_aihelp)
-    #     self.aihelp_thread.start()
+    
     def fn_mouse_keyrelease_text(self,event):
-        global write_type,global_active_textcomponent,global_active_figmark
         if self.brush_flag == True:
             if not self.char_format:
                 return
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.mergeCharFormat(self.char_format)
-            global_active_textcomponent.mergeCurrentCharFormat(self.char_format)
+            self.active_textcomponent.mergeCurrentCharFormat(self.char_format)
         else:
             if event.button() == 4: # 1 左键 2 右键 4 中键
                 self.reset_textcomponentformat()
             if self.db_flag == True:
                 self.db_flag = False
                 return
-            if write_type == '撰写' and QApplication.keyboardModifiers() != Qt.ControlModifier:
+            if self.write_type == '撰写' and QApplication.keyboardModifiers() != Qt.ControlModifier:
                 self.reset_textcomponentformat()
             self.status.showMessage(f"")
-            text_cursor = global_active_textcomponent.textCursor()
+            text_cursor = self.active_textcomponent.textCursor()
             select_txt = text_cursor.selectedText()
             if self.window_table:
                 self.window_table.close()
             if select_txt:
-                self.get_same_markindex(select_txt,global_active_figmark,self.highlight_color)
-                self.get_same_markindex_1(select_txt,global_active_textcomponent,self.highlight_color)
+                self.get_same_markindex(select_txt,self.active_figmark,self.highlight_color)
+                self.get_same_markindex_1(select_txt,self.active_textcomponent,self.highlight_color)
     
     def fn_texteditor_focusout_autosave(self,event):
-        global text_editor_array,global_active_textcomponent
         try:
-            text_idx = text_editor_array.index(global_active_textcomponent)
-            open(f'./data/text_saver_{text_idx + 1}.html','w+',encoding='utf-8').write(global_active_textcomponent.toHtml())
+            text_idx = self.text_editor_array.index(self.active_textcomponent)
+            open(f'./data/text_saver_{text_idx + 1}.html','w+',encoding='utf-8').write(self.active_textcomponent.toHtml())
         except Exception as e:
             print('Error Code 209',e)
     def fn_sync_clicked(self):
@@ -2782,8 +2462,6 @@ class MainWindow(QMainWindow):
                 self.on_lineheight_changed()
     def add_markeditors(self):
         '''附图标记补全'''
-        global tab_widget_mark,mark_editor_array
-        global global_active_textcomponent,global_active_figmark
         self.main_widget_mark = QWidget()
         self.layout_mark_main = QGridLayout(self.main_widget_mark) # 将frame 1 & 2 横向排列
         self.main_widget_mark.setMouseTracking(True) 
@@ -2797,13 +2475,13 @@ class MainWindow(QMainWindow):
         self.checkbox_sync.setChecked(False)
         self.checkbox_sync.clicked.connect(self.fn_sync_clicked)
 
-        tab_widget_mark = QTabWidget()
-        mark_editor_array = [OcrDropTextEdit() for i in range(30)]
-        global_active_figmark = mark_editor_array[0]
+        self.tab_widget_mark = QTabWidget()
+        self.mark_editor_array = [OcrDropTextEdit() for i in range(30)]
+        self.active_figmark = self.mark_editor_array[0]
         self.label_mark = QLabel()
         self.label_mark.setText(f"标记补全 *共0个标记")
         # 附图标记列表
-        for editor in mark_editor_array:
+        for editor in self.mark_editor_array:
             editor.focusOutEvent = self.fn_textmark_focusout_autosave
             editor.mouseReleaseEvent = self.fn_highlight_figmarks  # 绑定鼠标按下事件处理方法
             editor.mouseDoubleClickEvent = self.mark_dbclick_event
@@ -2812,7 +2490,7 @@ class MainWindow(QMainWindow):
             editor.dragMoveEvent = self.dragMoveEvent
             editor.dragEnterEvent = self.dragEnterEvent
 
-            tab_index = mark_editor_array.index(editor)
+            tab_index = self.mark_editor_array.index(editor)
             try:
                 load_txt = open(f'./data/marks_saver_{tab_index + 1}.txt','r',encoding='utf-8').read()
             except Exception as e:
@@ -2821,14 +2499,14 @@ class MainWindow(QMainWindow):
                 load_txt = ''
             editor.setPlainText(load_txt)
 
-            tab_widget_mark.addTab(editor,f'列表{tab_index + 1}')
+            self.tab_widget_mark.addTab(editor,f'列表{tab_index + 1}')
 
-        tab_widget_mark.currentChanged.connect(self.fn_marktab_changed)
+        self.tab_widget_mark.currentChanged.connect(self.fn_marktab_changed)
 
         self.layout_mark_main.addWidget(self.radio_1,0,0,1,1)
         self.layout_mark_main.addWidget(self.radio_2,0,1,1,1)
         self.layout_mark_main.addWidget(self.checkbox_sync,0,2,1,1)
-        self.layout_mark_main.addWidget(tab_widget_mark,1,0,1,3)
+        self.layout_mark_main.addWidget(self.tab_widget_mark,1,0,1,3)
         self.layout_mark_main.addWidget(self.label_mark,2,0,1,3)
 
         '''关键词补全'''
@@ -2862,17 +2540,16 @@ class MainWindow(QMainWindow):
         self.layout_keywords_main.addWidget(self.label_keywords,2,0,1,2)
 
     def mark_dbclick_event(self,event):
-        global global_active_textcomponent,global_active_figmark
-        insert_cursor = global_active_figmark.textCursor()
+        insert_cursor = self.active_figmark.textCursor()
         insert_cursor.select(insert_cursor.LineUnderCursor)
-        global_active_figmark.setTextCursor(insert_cursor)
+        self.active_figmark.setTextCursor(insert_cursor)
         select_mark = insert_cursor.selectedText().strip(' \n').split(' ')[-1]
 
         font_format = QTextCharFormat()
         font_format.setForeground(QColor(self.font_color))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         re_search = QRegExp(select_mark)
-        matches = re.finditer(re_search.pattern(), global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
+        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
         # 循环查找文档
         match_num = 0
         for match in matches:
@@ -2883,7 +2560,6 @@ class MainWindow(QMainWindow):
             cursor.mergeCharFormat(font_format)
 
     def userwords_dbclick_event(self,event):
-        global global_active_textcomponent,global_active_figmark
         insert_cursor = self.text_genword.textCursor()
         insert_cursor.select(insert_cursor.LineUnderCursor)
         self.text_genword.setTextCursor(insert_cursor)
@@ -2891,9 +2567,9 @@ class MainWindow(QMainWindow):
 
         font_format = QTextCharFormat()
         font_format.setForeground(QColor(self.font_color))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         re_search = QRegExp(select_userword)
-        matches = re.finditer(re_search.pattern(), global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
+        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
         # 循环查找文档
         match_num = 0
         for match in matches:
@@ -2904,13 +2580,12 @@ class MainWindow(QMainWindow):
             cursor.mergeCharFormat(font_format)
 
     def markeditor_dropEvent(self,event):
-        global tab_widget_mark
         if event.mimeData().hasUrls():
             urls = [url.toLocalFile() for url in event.mimeData().urls()]
             # 处理拖放的本地文件路径
             self.in_dir = urls[0]
             self.status.showMessage('文件识别中...')
-            self.tab_mark_index = tab_widget_mark.currentIndex()
+            self.tab_mark_index = self.tab_widget_mark.currentIndex()
             self.ocr_thread = Worker_Ocr(self.in_dir)
             self.ocr_thread.progress.connect(self.mark_editor_ocr)
             self.ocr_thread.start()
@@ -2918,9 +2593,8 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
     def mark_editor_ocr(self,in_txt):
-        global mark_editor_array
         in_txt = self.ocr_extract_figmarks(in_txt)
-        mark_editor_array[self.tab_mark_index].insertPlainText('\n' + in_txt)
+        self.mark_editor_array[self.tab_mark_index].insertPlainText('\n' + in_txt)
         self.status.showMessage('文件完成')
         self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
         self.setCursor(Qt.ArrowCursor)
@@ -2952,17 +2626,16 @@ class MainWindow(QMainWindow):
         self.label_keywords.setText(f'关键词补全 *共{len(all_txt_array)}个关键词')
     # 用于自由撰写的附图标记高亮
     def fn_highlight_figmarks(self,event):
-        global global_active_textcomponent,global_active_figmark
-        all_mark_txt = global_active_figmark.toPlainText().strip('\u2029\r ')
+        all_mark_txt = self.active_figmark.toPlainText().strip('\u2029\r ')
         if '、' in all_mark_txt:
             return
         # 获取当前光标所在的位置
-        cursor_mark = global_active_figmark.textCursor()
+        cursor_mark = self.active_figmark.textCursor()
         select_txt = cursor_mark.selectedText()
         self.reset_figmarkformat()
         if select_txt:
-            self.get_same_markindex(select_txt,global_active_figmark,self.highlight_color)
-            self.get_same_markindex(select_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(select_txt,self.active_figmark,self.highlight_color)
+            self.get_same_markindex(select_txt,self.active_textcomponent,self.highlight_color)
         else:
             # 获取当前光标所在的行
             cursor_mark.select(QTextCursor.LineUnderCursor)
@@ -2971,31 +2644,30 @@ class MainWindow(QMainWindow):
                 self.reset_textcomponentformat()
             try: # 纯文本
                 highlight_mark = current_mark.split(' ')[1] 
-                num_1 = self.get_same_markindex(highlight_mark,global_active_textcomponent,'#e06061')
+                num_1 = self.get_same_markindex(highlight_mark,self.active_textcomponent,'#e06061')
             except:
                 num_1 = 0
             try: # 英文括号标记
                 highlight_mark = current_mark.split(' ')[1] + '(' + current_mark.split(' ')[0] + ')'
-                num_2 = self.get_same_markindex(highlight_mark,global_active_textcomponent,self.highlight_color)
+                num_2 = self.get_same_markindex(highlight_mark,self.active_textcomponent,self.highlight_color)
             except:
                 num_2 = 0
 
             try: # 中文括号标记
                 highlight_mark = current_mark.split(' ')[1] + '（' + current_mark.split(' ')[0] + '）'
-                num_3 = self.get_same_markindex(highlight_mark,global_active_textcomponent,self.highlight_color)
+                num_3 = self.get_same_markindex(highlight_mark,self.active_textcomponent,self.highlight_color)
             except:
                 num_3 = 0
 
             try: # 无括号标记
                 highlight_mark = current_mark.split(' ')[1] + current_mark.split(' ')[0]
-                num_4 = self.get_same_markindex(highlight_mark,global_active_textcomponent,self.highlight_color)
+                num_4 = self.get_same_markindex(highlight_mark,self.active_textcomponent,self.highlight_color)
             except:
                 num_4 = 0
             self.status.showMessage(f"> 匹配结果：纯文本{num_1}个 英文括号标记{num_2}个 中文括号标记{num_3}个 无括号标记{num_4}个")
         
 
     def fn_highlight_userwords(self,event):
-        global global_active_textcomponent,global_active_figmark
         all_mark_txt = self.text_genword.toPlainText().strip('\u2029\r ')
         if '、' in all_mark_txt:
             return
@@ -3005,7 +2677,7 @@ class MainWindow(QMainWindow):
         current_mark = cursor.block().text().strip('\u2029')
         self.reset_textcomponentformat()
         try:
-            self.get_same_markindex(current_mark,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(current_mark,self.active_textcomponent,self.highlight_color)
         except:
             pass
         text_cursor = self.text_genword.textCursor()
@@ -3015,34 +2687,31 @@ class MainWindow(QMainWindow):
             self.get_same_markindex(select_txt,self.text_genword,self.highlight_color)
     # 初始化active_figmark的格式
     def reset_figmarkformat(self):
-        global global_active_textcomponent,global_active_figmark
         format = QTextCharFormat()
         format.setFontPointSize(9)
         format.setBackground(QColor(Qt.transparent))
 
-        cursor = global_active_figmark.textCursor()
+        cursor = self.active_figmark.textCursor()
         cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(global_active_textcomponent.toPlainText()))
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
         cursor.mergeCharFormat(format)
 
         cursor = self.text_genword.textCursor()
         cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(global_active_textcomponent.toPlainText()))
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
         cursor.mergeCharFormat(format)
     # 初始化active_figmark的格式
     def reset_textcomponentformat(self):
-        global global_active_textcomponent,global_active_figmark
         format = QTextCharFormat()
         format.setBackground(QColor(Qt.transparent))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(global_active_textcomponent.toPlainText()))
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
         cursor.mergeCharFormat(format)
     def fn_textmark_focusout_autosave(self,event):
-        global mark_editor_array,global_active_textcomponent,global_active_figmark
         # 统一标记格式
-        list_num = mark_editor_array.index(global_active_figmark)
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('：', '').replace(':', '').replace('	', ' ').replace('，',',').strip('\u2029。')
+        list_num = self.mark_editor_array.index(self.active_figmark)
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('：', '').replace(':', '').replace('	', ' ').replace('，',',').strip('\u2029。')
         # 选择排序方式
         if self.radio_1.isChecked():
             figmarks_array = split_marks(all_marks)
@@ -3051,16 +2720,16 @@ class MainWindow(QMainWindow):
         while ' ' in figmarks_array:
             figmarks_array.remove(' ')
         # 获取光标当前的行号
-        block_cursor = global_active_figmark.textCursor()
+        block_cursor = self.active_figmark.textCursor()
         mark_line_number = block_cursor.blockNumber()
-        total_paragraphs = global_active_figmark.document().blockCount()
-        line_add = int(global_active_figmark.height()/28)
+        total_paragraphs = self.active_figmark.document().blockCount()
+        line_add = int(self.active_figmark.height()/28)
         if mark_line_number + line_add >= total_paragraphs:
             mark_line_number = total_paragraphs
         else:
             mark_line_number += line_add
             
-        global_active_figmark.setPlainText('\n'.join(figmarks_array))
+        self.active_figmark.setPlainText('\n'.join(figmarks_array))
         # 重置format
         self.reset_figmarkformat()
         check_num_count = 0
@@ -3081,10 +2750,10 @@ class MainWindow(QMainWindow):
                     i += 1
                     j = 1
                 else:
-                    global_active_figmark.insertPlainText(f'{i}{j} {_}\u2029')
+                    self.active_figmark.insertPlainText(f'{i}{j} {_}\u2029')
         else:  # 获取标号列表 和 部件名称列表
             same_marks_array, same_nums_array = [], []
-            cursor = QTextCursor(global_active_figmark.document())
+            cursor = QTextCursor(self.active_figmark.document())
             all_marks = '\u2029' + '\u2029'.join(figmarks_array) + '\u2029'
             for item in figmarks_array:
                 fig_num, fig_text = judge_mark(item)
@@ -3104,7 +2773,7 @@ class MainWindow(QMainWindow):
                 for mark in figmarks_array:
                     if item_num == mark.split(' ')[0]:
                         # 选择相应行
-                        cursor = QTextCursor(global_active_figmark.document())
+                        cursor = QTextCursor(self.active_figmark.document())
                         cursor.movePosition(QTextCursor.Start)
                         cursor.movePosition(QTextCursor.Down,QTextCursor.MoveAnchor, figmarks_array.index(mark))
                         cursor.movePosition(QTextCursor.StartOfLine)
@@ -3122,7 +2791,7 @@ class MainWindow(QMainWindow):
                 for mark in figmarks_array:
                     if item_mark == mark.split(' ')[1]:
                         # 选择相应行
-                        cursor = QTextCursor(global_active_figmark.document())
+                        cursor = QTextCursor(self.active_figmark.document())
                         cursor.movePosition(QTextCursor.Start)
                         cursor.movePosition(QTextCursor.Down,QTextCursor.MoveAnchor, figmarks_array.index(mark))
                         cursor.movePosition(QTextCursor.EndOfLine)
@@ -3134,15 +2803,15 @@ class MainWindow(QMainWindow):
             # 重新定位光标
             for _ in range(mark_line_number):
                 cursor.movePosition(QTextCursor.Down)
-            global_active_figmark.setTextCursor(cursor)        
+            self.active_figmark.setTextCursor(cursor)        
             for _ in range(line_add):
                 cursor.movePosition(QTextCursor.Down)
         # 自动同步text_component中的标记
         if self.checkbox_sync.checkState() == 2: # 0 为未选中
             # 获取当前光标位置
-            block_cursor = global_active_textcomponent.textCursor()
+            block_cursor = self.active_textcomponent.textCursor()
             para_line_number = block_cursor.blockNumber()
-            total_paragraphs = global_active_textcomponent.document().blockCount()
+            total_paragraphs = self.active_textcomponent.document().blockCount()
             if para_line_number + 5 > total_paragraphs:
                 para_line_number = total_paragraphs
             else:
@@ -3158,26 +2827,27 @@ class MainWindow(QMainWindow):
                         if new_mark not in oldmarks_array:
                             new_num, new_txt = judge_mark(new_mark)
                             if new_txt == old_txt or new_num == old_num:
-                                all_txt = global_active_textcomponent.toHtml()
+                                all_txt = self.active_textcomponent.toHtml()
                                 # 无附图标记的不替换
                                 all_txt = all_txt.replace(f'{old_txt}{old_num}', f'{new_txt}{new_num}').replace(f'{old_txt}({old_num})', f'{new_txt}({new_num})').replace(f'{old_txt}（{old_num}）', f'{new_txt}（{new_num}）').strip('\u2029\r\t ')
                                 all_txt = all_txt.replace(f'{old_num} {old_txt}', f'{new_num} {new_txt}') # 更新附图标记列表
-                                global_active_textcomponent.setHtml(all_txt)
+                                self.active_textcomponent.setHtml(all_txt)
                                 break
             self.on_lineheight_changed()
             block_cursor.movePosition(QTextCursor.Start)
             for _ in range(para_line_number):
                 block_cursor.movePosition(QTextCursor.NextBlock)
-            global_active_textcomponent.setTextCursor(block_cursor)
+            self.active_textcomponent.setTextCursor(block_cursor)
         # 更新标记缓存
         open(f'./data/marks_saver_{list_num + 1}.txt', 'w+', encoding='utf-8').write('\u2029'.join(figmarks_array))
-        # global_active_figmark.config(foreground='grey')
+        # self.active_figmark.config(foreground='grey')
         
         self.label_mark.setText(f'标记补全 *共{len(figmarks_array)}个标记')
     def show_cursor_menu(self):
         self.context_menu = QMenu()
         # self.context_menu.addSeperator()
         self.context_menu.addAction(self.action_00)
+        self.context_menu.addAction(self.action_summary)
         self.context_menu.addAction(self.action_01)
         self.context_menu.addAction(self.action_02)
         self.context_menu.addAction(self.action_03)
@@ -3231,17 +2901,16 @@ class MainWindow(QMainWindow):
         self.toobar_alignr.triggered.connect(lambda: editor.setAlignment(Qt.AlignRight))
         self.toobar_alignj.triggered.connect(lambda: editor.setAlignment(Qt.AlignJustify))
     def set_boldfont(self):
-        global global_active_textcomponent,global_active_figmark
         count = 0
         font_format = QTextCharFormat()
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().replace('\n','\u2029')
         if cursor.charFormat().font().bold():
             count += 1
         elif not cursor.charFormat().font().bold():
             pass
         re_search = QRegExp(select_txt)
-        matches = re.finditer(re_search.pattern(), global_active_textcomponent.document().toPlainText().replace('\n','\u2029'))
+        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
         # 循环查找文档
         match_count = 0
         for match in matches:
@@ -3276,7 +2945,6 @@ class MainWindow(QMainWindow):
         dlg.setIcon(QMessageBox.Critical)
         dlg.show()
     def file_open(self):
-        global global_active_textcomponent,global_active_figmark
         path, _ = QFileDialog.getOpenFileName(self, "Open file", "", "HTML documents (*.html);;Text documents (*.txt);;Doc documents(*.doc);;Docx documents(*.docx);;All files (*.*)")
         try:
             text = open(path, 'rU').read()
@@ -3284,14 +2952,13 @@ class MainWindow(QMainWindow):
             print(e)
         else:
             self.path = path
-            global_active_textcomponent.setPlainText(text)
+            self.active_textcomponent.setPlainText(text)
     def splitext(self,p):
         return os.path.splitext(p)[1].lower()
     def file_save(self):
-        global global_active_textcomponent,global_active_figmark
         if self.path is None:
             return self.file_saveas()
-        text = global_active_textcomponent.toHtml() if self.splitext(self.path) in self.HTML_EXTENSIONS else global_active_textcomponent.toPlainText()
+        text = self.active_textcomponent.toHtml() if self.splitext(self.path) in self.HTML_EXTENSIONS else self.active_textcomponent.toPlainText()
         try:
             with open(self.path, 'w') as f:
                 f.write(text)
@@ -3301,11 +2968,10 @@ class MainWindow(QMainWindow):
     def fn_options(self):
         os.startfile('options.txt')
     def file_saveas(self):
-        global global_active_textcomponent,global_active_figmark
         path, _ = QFileDialog.getSaveFileName(self, "Save file", "未命名.html", "Doc documents (*.doc);;Docx documents (*.docx);;Text documents (*.txt);;HTML documents (*.html);;All files (*.*)")
         if not path:
             return
-        text = global_active_textcomponent.toHtml() if self.splitext(path) in self.HTML_EXTENSIONS else global_active_textcomponent.toPlainText()
+        text = self.active_textcomponent.toHtml() if self.splitext(path) in self.HTML_EXTENSIONS else self.active_textcomponent.toPlainText()
         try:
             with open(path, 'w') as f:
                 f.write(text)
@@ -3315,11 +2981,10 @@ class MainWindow(QMainWindow):
         else:
             self.path = path
     def complete_marknum(self,rep_type):
-        global global_active_textcomponent,global_active_figmark
         repeat_mark_dic = {}
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('	', ' ').replace(',','，').strip('。\r\n\t\u2029')
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('	', ' ').replace(',','，').strip('。\r\n\t\u2029')
         figmarks_array = re.split('\r|\n|\t|\u2029',all_marks)
         # 判断重复标记
         for item_1 in figmarks_array:
@@ -3342,22 +3007,20 @@ class MainWindow(QMainWindow):
                 out_txt = out_txt.replace('('+num_2+')'+'('+num_2+')','('+num_2+')')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def complete_markname(self,rep_type):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        cursor = self.active_textcomponent.textCursor()
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         select_txt = cursor.selectedText().strip('\u2029\r\t')
         if select_txt:            
             new_select_txt,repeat_array,item_lack_array = completion_marks(rep_type,all_marks,select_txt)
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def delete_figmarks_mohu(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        cursor = self.active_textcomponent.textCursor()
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
         if select_txt:
             # 删除带括号标记
@@ -3374,11 +3037,10 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def delete_figmarks(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        cursor = self.active_textcomponent.textCursor()
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
         if select_txt:
             # 删除带括号标记
@@ -3407,10 +3069,9 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def num_to_bracket_num(self): # 直接为附图标记增加括号   具体实施方式 → 权利要求 答复OA从说明书中增加内容
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t') + '。' # .lstrip('1234567890')
         if select_txt:
             new_select_txt = select_txt
@@ -3429,51 +3090,46 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt.strip('。'),new_select_txt.strip('。')).replace('。。','。').replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def refine_form(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
         if select_txt:
             new_select_txt = arrenge_document(select_txt)
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def del_useless_enters(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().replace('\u2029','\n').strip('\u2029\n\r\t')#.lstrip('1234567890')
         new_select_txt = refine_mutilines(select_txt)
         out_txt = select_txt.replace(select_txt,new_select_txt).replace('。。','。')
         cursor.deleteChar()
         cursor.insertText(out_txt)
-        self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+        self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def del_spaces(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().replace('\u2029','\n').strip('\u2029\r\t')
         if select_txt:
             new_select_txt = select_txt.replace(' ','').replace(']','] ').replace(']  ','] ')
             out_txt = select_txt.replace('\u2029','\n').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def rep_element(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')#.lstrip('1234567890')
         if select_txt:
             new_select_txt = rep_elements(select_txt)
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def bracket_num2num(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         figmarks_array = split_marks(all_marks)
         if select_txt:
             new_select_txt = select_txt
@@ -3487,11 +3143,10 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     def marks_to_para(self):
-        global global_active_textcomponent,global_active_figmark
         try:
-            marks_array = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ').split('\u2029')
+            marks_array = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ').split('\u2029')
             out_txt = marks_array[0]
             temp_num = marks_array[0][0]
             for mark_index in range(1,len(marks_array)):
@@ -3504,13 +3159,12 @@ class MainWindow(QMainWindow):
                     out_txt += '。'
                 temp_num = _[0]
             out_txt = '\u2029附图标记说明：\u2029' + out_txt
-            global_active_textcomponent.insertHtml(out_txt)
+            self.active_textcomponent.insertHtml(out_txt)
         except Exception as e:
             print('Error Code 103',e)
     def extract_patent_content(self):#claim 2 content
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        cursor = self.active_textcomponent.textCursor()
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         select_txt = cursor.selectedText().strip('\u2029\r\t')
         if select_txt:
             # 删除带括号标记
@@ -3526,33 +3180,71 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.strip('\u2029').replace(select_txt,new_select_txt).replace('。。','。').replace(' ','')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
     #获取附图标记
     def extract_figmarks(self):
-        global global_active_textcomponent,global_active_figmark
-        # 统一标点符号
-        cursor = global_active_textcomponent.textCursor()
-        select_txt = cursor.selectedText().strip(r'\u2029\r\t')
-        select_txt = refine_intxt(select_txt)
-        if select_txt:
-            # 给附图标记加括号
-            find_txt = re.findall(rf'.\d\d?\d?\d?[a-z|A-Z]?.',select_txt)
-            if find_txt:
-                for _ in find_txt:
-                    if ('（' in _ and '）' in _) or ('(' in _ and ')' in _):
-                        continue
-                    if _[0] not in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' and _[-1] not in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
-                        select_txt = select_txt.replace(_,_[0]+'（' + _[1:-1] + '）' +_[-1])
-            # 查找附图标记名称
-            mark_array_name = search_marks(select_txt)
-            # 查找附图标记编号
-            mark_array,same_marks_array = get_figmarks(mark_array_name,select_txt)
-            # 输出结果
-            global_active_figmark.insertPlainText('\n'+'\n'.join(mark_array))
+        """从选中文本提取附图标记，输出到左侧标记面板。
+        识别模式：
+        1) 名称(标号)  如 壳体(1)、绑带（11）、电机(2a)
+        2) 名称标号   如 壳体1、电机2a（后接标点或中文）
+        输出格式：每行"标号 名称"，按标号数字排序，自动去重。"""
+        cursor = self.active_textcomponent.textCursor()
+        select_txt = cursor.selectedText().strip('\u2029\r\t')
+        if not select_txt:
+            return
+        # 清洗：去掉年份、百分比、数量词，避免误识别
+        cleaned = re.sub(r'(19|20)\d{2}\s*年', '', select_txt)
+        cleaned = re.sub(r'\d+\s*%', '', cleaned)
+        cleaned = re.sub(r'\d+\s*(个|件|台|套|次|项|倍|米|毫米|厘米|cm|mm|kg|g|度|伏|安|瓦)', '', cleaned)
+        # 统一括号为全角
+        cleaned = cleaned.replace('(', '（').replace(')', '）')
+        # 提取标记：{标号: 名称}，同一标号取最长名称
+        # 截词符：动词/介词，匹配到的名称按截词符分割，只保留后半部分
+        # 如 "还包括壳体" → "壳体"，"通过绑带" → "绑带"
+        split_words = ('还包括','包括','通过','设有','设置','具有','所述的','所述','根据','与','和',
+                       '用于','在于','于',
+                        '以上','以下','上述','中的')
+        def extract_name(raw):
+            for sw in split_words:
+                if sw in raw:
+                    tail = raw.split(sw)[-1].strip()
+                    if 2 <= len(tail) <= 8:
+                        return tail
+                    return None
+            return raw
+        marks = {}
+        # 模式1：名称（标号）  如 壳体（1）、绑带（11）
+        for m in re.finditer(r'([\u4e00-\u9fa5]{2,15})（(\d{1,3}[a-zA-Z]?)）', cleaned):
+            name = extract_name(m.group(1))
+            num = m.group(2)
+            if not name:
+                continue
+            if num not in marks or len(name) > len(marks[num]):
+                marks[num] = name
+        # 模式2：名称标号（无括号，后接标点/中文/结尾）
+        for m in re.finditer(r'([\u4e00-\u9fa5]{2,15})(\d{1,3}[a-zA-Z]?)(?=[，。；、：\u4e00-\u9fa5]|$)', cleaned):
+            raw = m.group(1)
+            if raw[-1] in '个件台套次项倍米度':
+                continue
+            name = extract_name(raw)
+            num = m.group(2)
+            if not name:
+                continue
+            if num not in marks or len(name) > len(marks[num]):
+                marks[num] = name
+        # 按标号数字排序
+        def sort_key(item):
+            num = item[0]
+            m = re.match(r'(\d+)', num)
+            return (int(m.group(1)) if m else 999, num)
+        sorted_marks = sorted(marks.items(), key=sort_key)
+        # 输出"标号 名称"
+        lines = [f'{num} {name}' for num, name in sorted_marks]
+        if lines:
+            self.active_figmark.insertPlainText('\n' + '\n'.join(lines))
     # 删除段号
     def del_paranum(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t')
         if select_txt:
             new_select_txt = select_txt
@@ -3562,12 +3254,11 @@ class MainWindow(QMainWindow):
             out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
             cursor.deleteChar()
             cursor.insertText(out_txt)
-            self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
-            global_active_textcomponent.setTextCursor(cursor)
+            self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
+            self.active_textcomponent.setTextCursor(cursor)
     # 增加段号
     def add_paranum(self):
-        global global_active_textcomponent,global_active_figmark
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         select_txt = cursor.selectedText().strip('\u2029\r\t').replace('\n','\u2029').replace('］',']').replace('[','[')
         txt_array = select_txt.split('\u2029')
         para_array = []
@@ -3585,79 +3276,59 @@ class MainWindow(QMainWindow):
         out_txt = select_txt.replace('\n','\u2029').replace(select_txt,new_select_txt).replace('。。','。')
         cursor.deleteChar()
         cursor.insertText(out_txt)
-        self.get_same_markindex(out_txt,global_active_textcomponent,self.highlight_color)
-        global_active_textcomponent.setTextCursor(cursor)
+        self.get_same_markindex(out_txt,self.active_textcomponent,self.highlight_color)
+        self.active_textcomponent.setTextCursor(cursor)
     def generate_oa_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = global_active_textcomponent.toHtml() + open('./data/model_oa.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
+        tab_index = self.tab_widget_text.currentIndex()
+        title = self.tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+        all_txt = self.active_textcomponent.toHtml() + open('./data/model_oa.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(all_txt)
     def generate_description_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = global_active_textcomponent.toHtml() + open('./data/model_des.html','r',encoding='utf-8').read().replace('&lt;标题&gt;',title) 
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
+        tab_index = self.tab_widget_text.currentIndex()
+        title = self.tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+        all_txt = self.active_textcomponent.toHtml() + open('./data/model_des.html','r',encoding='utf-8').read().replace('&lt;标题&gt;',title) 
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(all_txt)
     def generate_claim_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = open('./data/model_claim.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title) + global_active_textcomponent.toHtml()
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
+        tab_index = self.tab_widget_text.currentIndex()
+        title = self.tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+        all_txt = open('./data/model_claim.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title) + self.active_textcomponent.toHtml()
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(all_txt)
     def generate_re_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = global_active_textcomponent.toHtml() + open('./data/model_re.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
+        tab_index = self.tab_widget_text.currentIndex()
+        title = self.tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+        all_txt = self.active_textcomponent.toHtml() + open('./data/model_re.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(all_txt)
     def generate_invalid_model(self):
-        global tab_widget_text,global_active_textcomponent,global_active_figmark
-        tab_index = tab_widget_text.currentIndex()
-        title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-        all_txt = global_active_textcomponent.toHtml() + open('./data/model_invalid.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
-        global_active_textcomponent.clear()
-        global_active_textcomponent.setHtml(all_txt)
-    # def generate_ai_model(self):
-    #     global tab_widget_text,global_active_textcomponent,global_active_figmark
-    #     tab_index = tab_widget_text.currentIndex()
-    #     title = tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
-    #     all_txt = global_active_textcomponent.toHtml() + open('./data/model_ai.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
-    #     global_active_textcomponent.clear()
-    #     global_active_textcomponent.setHtml(all_txt)
+        tab_index = self.tab_widget_text.currentIndex()
+        title = self.tab_widget_text.tabText(tab_index).replace('实用新型-','').replace('发明-','')
+        all_txt = self.active_textcomponent.toHtml() + open('./data/model_invalid.html','r',encoding='utf-8').read().replace('&lt;TITLE&gt;',title)
+        self.active_textcomponent.clear()
+        self.active_textcomponent.setHtml(all_txt)
     def image_marks(self, inputtxt, fig_dic):
+        '''支持数字 + a/b/c/d 附图标记后缀，如11,11a,11b'''
         self.word_array, self.ori_array = [], []
-        for key in fig_dic:  # 判断附图标记
+        # fig_dic: [(num_str, name),...] 例如 ("11a","外壁")
+        for key in fig_dic:
             if len(self.word_array) >= 5:
                 break
-            if inputtxt[-5:] == key[0] and len(inputtxt) == 5:
-                self.word_array.append(key[1])
-                self.ori_array.append(inputtxt[-5:])
-                break
-            elif inputtxt[-4:] == key[0] and len(inputtxt) >= 4:
-                self.word_array.append(key[1])
-                self.ori_array.append(inputtxt[-4:])
-                break
-            elif inputtxt[-3:] == key[0] and len(inputtxt) >= 3:
-                self.word_array.append(key[1])
-                self.ori_array.append(inputtxt[-3:])
-                break
-            elif inputtxt[-2:] == key[0] and len(inputtxt) >= 2:
-                self.word_array.append(key[1])
-                self.ori_array.append(inputtxt[-2:])
-                break
-            elif inputtxt[-1:] == key[0] and len(inputtxt) >= 1:
-                self.word_array.append(key[1])
-                self.ori_array.append(inputtxt[-1:])
+            # key允许格式：纯数字 / 数字+a~d
+            # 匹配尾部N / Na / Nb / Nc / Nd
+            key_str = key[0]
+            len_k = len(key_str)
+            for check_len in range(len_k,0,-1):
+                tail = inputtxt[-check_len:]
+                if tail == key_str:
+                    self.word_array.append(key[1])
+                    self.ori_array.append(tail)
+                    return
     def get_totalkeys(self):
-        global global_active_textcomponent,global_active_figmark
         try:
             self.key_1, self.key_2, self.key_3, self.key_4,self.key_5 = '', '', '', '',''
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,5)
             self.total_key = cursor.selectedText()
             self.key_5 = self.total_key[4]
@@ -3668,11 +3339,10 @@ class MainWindow(QMainWindow):
         except:
             pass
     def count_words(self,event):
-        global global_active_textcomponent,global_active_figmark
         # 统计字数
-        all_txt = global_active_textcomponent.toPlainText()
+        all_txt = self.active_textcomponent.toPlainText()
         all_txt_without_dots = all_txt
-        select_txt = global_active_textcomponent.textCursor().selectedText()
+        select_txt = self.active_textcomponent.textCursor().selectedText()
         select_txt_without_dots = select_txt
         for _ in '!"#$%&\！@￥%……*（）()-_+=[]\\|;:，。《》？、~·！#——+\\{\\}【】‘；：”“’。，、？\'：；':
             select_txt_without_dots = select_txt_without_dots.replace(_, '')
@@ -3689,9 +3359,8 @@ class MainWindow(QMainWindow):
         self.old_y = self.pos().y()
         self.drag_flag = 'down'
     def get_word_array(self):
-        global global_active_textcomponent,global_active_figmark
         self.fig_dic = {}
-        all_marks = global_active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
+        all_marks = self.active_figmark.toPlainText().replace('\n','\u2029').replace('；', ';').replace('	', ' ').strip('\u2029。 ')
         figmarks_array = split_marks(all_marks)
         for _ in figmarks_array:
             fig_num, fig_text = judge_mark(_)
@@ -3700,28 +3369,26 @@ class MainWindow(QMainWindow):
         self.fig_dic = sorted(fig_dic_t.items(), key=lambda fig_dic_t: len(fig_dic_t[0]), reverse=True)
         self.image_marks(self.total_key, self.fig_dic)
     def fn_keypressevent_tmp(self,event):
-        global global_active_textcomponent,global_active_figmark
         try:
             insert_txt = chr(event.key())
-            global_active_textcomponent.insertPlainText(insert_txt)
+            self.active_textcomponent.insertPlainText(insert_txt)
         except:
             pass
         if event.key() == 16777219: # 代表退格键
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.deletePreviousChar()
         elif event.key() == 32: # 空格
-            global_active_textcomponent.insertPlainText(' ')
+            self.active_textcomponent.insertPlainText(' ')
     def fn_text_changed(self):
-        global global_active_textcomponent,global_active_figmark
         select_txt = ''
-        if write_auto == '补全' and self.total_key:
+        if self.write_auto == '补全' and self.total_key:
             self.total_key = ''
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,2)
             select_txt = cursor.selectedText()
             try:
                 if select_txt[-1] not in '1234567890\u2029\n' and select_txt[0] in '1234567890':
-                    cursor = global_active_textcomponent.textCursor()
+                    cursor = self.active_textcomponent.textCursor()
                     for i in range(0,5):
                         cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,1)
                         select_txt = cursor.selectedText().replace(')','）').replace('(','（')
@@ -3740,25 +3407,24 @@ class MainWindow(QMainWindow):
                         return
                     self.space_out_words()
                     if select_txt[-1] == '.':
-                        global_active_textcomponent.insertPlainText('。')
+                        self.active_textcomponent.insertPlainText('。')
                     else:
-                        global_active_textcomponent.insertPlainText(select_txt[-1])
+                        self.active_textcomponent.insertPlainText(select_txt[-1])
             except Exception as e:
                 print(e)
     def fn_keyreleaseevent(self,event): # active_textcomponent 按下任意键
-        global model_type,write_auto,global_active_textcomponent,global_active_figmark
         if event.key() in [Qt.Key_Up,Qt.Key_Down,Qt.Key_Left,Qt.Key_Right]:
             self.reset_textcomponentformat()
-            cursor = global_active_textcomponent.textCursor()
-            self.get_same_markindex_1(cursor.selectedText(),global_active_textcomponent,self.highlight_color)
-        if model_type == '联想':
+            cursor = self.active_textcomponent.textCursor()
+            self.get_same_markindex_1(cursor.selectedText(),self.active_textcomponent,self.highlight_color)
+        if self.model_type == '联想':
             self.get_totalkeys()
             try:
                 # 高亮未使用标记
                 if self.checkbox_markcheck.checkState() == 2: 
                     self.check_text_figmarks_unused()
                 # 编号联想输入
-                elif event.key() in [i for i in range(48,58)] or event.key() in [i for i in range(65,72)] and write_auto == '关闭':  # '1234567890abcdefg'未选中自动补全附图标记
+                elif event.key() in [i for i in range(48,58)] or event.key() in [i for i in range(65,72)] and self.write_auto == '关闭':  # '1234567890abcdefg'未选中自动补全附图标记
                     self.get_word_array()
                     modifiers = event.modifiers()
                     if not self.word_array:
@@ -3774,7 +3440,7 @@ class MainWindow(QMainWindow):
                 elif self.checkbox_userwords.checkState() == 2 and self.total_key and event.modifiers() == Qt.ControlModifier and event.key() == 96: 
                     self.fn_show_window_keywords()
                 elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_Return: # 判断序号 并自动续写
-                    cursor = global_active_textcomponent.textCursor()
+                    cursor = self.active_textcomponent.textCursor()
                     cursor.movePosition(QTextCursor.MoveOperation.PreviousBlock,QTextCursor.KeepAnchor,1)
                     cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
                     cursor.movePosition(QTextCursor.MoveOperation.NextBlock,QTextCursor.KeepAnchor,2) # 包括前文1段内容
@@ -3831,9 +3497,8 @@ class MainWindow(QMainWindow):
 
 
     def fn_keypressevent(self, event):
-        global global_active_textcomponent, global_active_figmark, tab_widget_text
         try:
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             clipboard = QApplication.clipboard()
 
             def copy_action():
@@ -3864,7 +3529,7 @@ class MainWindow(QMainWindow):
                 elif self.clip_txt:
                     cursor.insertText(self.clip_txt)
             def update_status():
-                tab_index = tab_widget_text.currentIndex()
+                tab_index = self.tab_widget_text.currentIndex()
                 tab_name = self.tab_name_array[tab_index]
                 self.status.showMessage(f'> 《{tab_name}》 保存成功')
             # 定义按键映射
@@ -3890,21 +3555,15 @@ class MainWindow(QMainWindow):
                 (Qt.ControlModifier, Qt.Key_J): self.del_paranum,
                 (Qt.ControlModifier, Qt.Key_G): self.add_paranum,
                 (Qt.ControlModifier, 96): lambda: self.fn_show_window_keywords() if self.checkbox_userwords.checkState() == 2 and self.total_key else None,
-                (Qt.ControlModifier, Qt.Key_A): lambda: global_active_textcomponent.selectAll(),
-                (Qt.ControlModifier, Qt.Key_Z): lambda: global_active_textcomponent.undo(),
-                (Qt.ControlModifier, Qt.Key_Y): lambda: global_active_textcomponent.redo(),
+                (Qt.ControlModifier, Qt.Key_A): lambda: self.active_textcomponent.selectAll(),
+                (Qt.ControlModifier, Qt.Key_Z): lambda: self.active_textcomponent.undo(),
+                (Qt.ControlModifier, Qt.Key_Y): lambda: self.active_textcomponent.redo(),
                 (Qt.ControlModifier, Qt.Key_S): lambda: (self.fn_texteditor_focusout_autosave(event), self.fn_textmark_focusout_autosave(event), update_status()),
                 (Qt.AltModifier, Qt.Key_1): self.generate_oa_model,
                 (Qt.AltModifier, Qt.Key_2): self.generate_description_model,
                 (Qt.AltModifier, Qt.Key_3): self.generate_claim_model,
                 (Qt.AltModifier, Qt.Key_4): self.generate_re_model,
                 (Qt.AltModifier, Qt.Key_5): self.generate_invalid_model,
-                (Qt.AltModifier, Qt.Key_R): self.get_aihelp,
-                # (Qt.AltModifier, Qt.Key_Q): self.get_aisupplement,
-                # (Qt.AltModifier, Qt.Key_6): self.generate_ai_model,
-                # (Qt.AltModifier, Qt.Key_W): self.get_aicontinue,
-                # (Qt.AltModifier, Qt.Key_E): self.get_aidecorate,
-                # (Qt.AltModifier, Qt.Key_T): self.get_aitrans,
             }
 
             # 处理按键组合
@@ -3913,15 +3572,15 @@ class MainWindow(QMainWindow):
                 key_mapping[key_combination]()
             elif event.key() == Qt.Key_PageDown:
                 cursor.movePosition(QTextCursor.Down, n=20)
-                global_active_textcomponent.setTextCursor(cursor)
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_PageUp:
                 cursor.movePosition(QTextCursor.Up, n=20)
-                global_active_textcomponent.setTextCursor(cursor)
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_Escape:
                 self.reset_textcomponentformat()
-                for window in [self.window_continue, self.window_search,
-                            self.window_decorate, self.window_show, self.window_symbol, self.window_rep,
-                            self.window_table, self.window_api]: # self.window_aitrans, self.window_aihelp, 
+                for window in [self.window_search,
+                            self.window_show, self.window_symbol, self.window_rep,
+                            self.window_table, self.window_api]:  
                     if window:
                         window.close()
             elif event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
@@ -3932,11 +3591,11 @@ class MainWindow(QMainWindow):
                     Qt.Key_Backspace: cursor.deletePreviousChar,
                     Qt.Key_Tab: lambda: cursor.insertText('\t'),
                     Qt.Key_Home: lambda: cursor.setPosition(0),
-                    Qt.Key_End: lambda: cursor.setPosition(len(global_active_textcomponent.toPlainText()))
+                    Qt.Key_End: lambda: cursor.setPosition(len(self.active_textcomponent.toPlainText()))
                 }
                 actions[event.key()]()
                 if event.key() in [Qt.Key_Home, Qt.Key_End]:
-                    global_active_textcomponent.setTextCursor(cursor)
+                    self.active_textcomponent.setTextCursor(cursor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() in [Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right]:
                 directions = {
                     Qt.Key_Up: QTextCursor.Up,
@@ -3944,7 +3603,7 @@ class MainWindow(QMainWindow):
                     Qt.Key_Left: QTextCursor.Left,
                     Qt.Key_Right: QTextCursor.Right
                 }
-                global_active_textcomponent.moveCursor(directions[event.key()], QTextCursor.KeepAnchor)
+                self.active_textcomponent.moveCursor(directions[event.key()], QTextCursor.KeepAnchor)
             elif event.key() in [Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right]:
                 directions = {
                     Qt.Key_Up: QTextCursor.Up,
@@ -3952,7 +3611,7 @@ class MainWindow(QMainWindow):
                     Qt.Key_Left: QTextCursor.Left,
                     Qt.Key_Right: QTextCursor.Right
                 }
-                global_active_textcomponent.moveCursor(directions[event.key()])
+                self.active_textcomponent.moveCursor(directions[event.key()])
             elif event.text() and event.text() in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
                 cursor.insertText(event.text())
             elif event.modifiers() in [Qt.ControlModifier, Qt.AltModifier]:
@@ -3965,9 +3624,8 @@ class MainWindow(QMainWindow):
 
 
     def fn_keypressevent_xxxx(self,event):
-        global global_active_textcomponent,global_active_figmark,tab_widget_text
         try:
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             clipboard = QApplication.clipboard()
             if event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C and cursor.hasSelection():
                 self.clip_txt = cursor.selectedText()
@@ -4037,15 +3695,15 @@ class MainWindow(QMainWindow):
                 if self.checkbox_userwords.checkState() == 2 and self.total_key:
                     self.fn_show_window_keywords()
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_A:
-                global_active_textcomponent.selectAll()
+                self.active_textcomponent.selectAll()
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_Z:
-                global_active_textcomponent.undo()
+                self.active_textcomponent.undo()
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_Y:
-                global_active_textcomponent.redo()
+                self.active_textcomponent.redo()
             elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_S:
                 self.fn_texteditor_focusout_autosave(event)
                 self.fn_textmark_focusout_autosave(event)
-                tab_index = tab_widget_text.currentIndex()
+                tab_index = self.tab_widget_text.currentIndex()
                 tab_name = self.tab_name_array[tab_index]
                 self.status.showMessage(f'> 《{tab_name}》 保存成功')
             elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_1:
@@ -4058,31 +3716,15 @@ class MainWindow(QMainWindow):
                 self.generate_re_model()
             elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_5:
                 self.generate_invalid_model()
-            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_6:
-            #     self.generate_ai_model()
-            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_Q:
-            #     self.get_aisupplement()
-            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_W:
-            #     self.get_aicontinue()
-            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_E:
-            #     self.get_aidecorate()
-            elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_R:
-                self.get_aihelp()
-            # elif event.modifiers() == Qt.AltModifier and event.key() == Qt.Key_T:
-            #     self.get_aitrans()
             elif event.key() == Qt.Key_PageDown:
                 cursor.movePosition(QTextCursor.Down, n=20)
-                global_active_textcomponent.setTextCursor(cursor)
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_PageUp:
                 cursor.movePosition(QTextCursor.Up, n=20)
-                global_active_textcomponent.setTextCursor(cursor)
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_Escape:
                 self.reset_textcomponentformat()
-                # if self.window_aitrans:self.window_aitrans.close()
-                # if self.window_aihelp:self.window_aihelp.close()
-                if self.window_continue:self.window_continue.close()
                 if self.window_search:self.window_search.close()
-                if self.window_decorate:self.window_decorate.close()
                 if self.window_show:self.window_show.close()
                 if self.window_symbol:self.window_symbol.close()
                 if self.window_rep:self.window_rep.close()
@@ -4098,26 +3740,26 @@ class MainWindow(QMainWindow):
                 cursor.insertText('\t')
             elif event.key() == Qt.Key_Home:
                 cursor.setPosition(0)
-                global_active_textcomponent.setTextCursor(cursor)
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_End:
-                cursor.setPosition(len(global_active_textcomponent.toPlainText()))
-                global_active_textcomponent.setTextCursor(cursor)
+                cursor.setPosition(len(self.active_textcomponent.toPlainText()))
+                self.active_textcomponent.setTextCursor(cursor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Up:
-                global_active_textcomponent.moveCursor(QTextCursor.Up, QTextCursor.KeepAnchor)
+                self.active_textcomponent.moveCursor(QTextCursor.Up, QTextCursor.KeepAnchor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Down:
-                global_active_textcomponent.moveCursor(QTextCursor.Down, QTextCursor.KeepAnchor)
+                self.active_textcomponent.moveCursor(QTextCursor.Down, QTextCursor.KeepAnchor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Left:
-                global_active_textcomponent.moveCursor(QTextCursor.Left, QTextCursor.KeepAnchor)
+                self.active_textcomponent.moveCursor(QTextCursor.Left, QTextCursor.KeepAnchor)
             elif event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_Right:
-                global_active_textcomponent.moveCursor(QTextCursor.Right, QTextCursor.KeepAnchor)
+                self.active_textcomponent.moveCursor(QTextCursor.Right, QTextCursor.KeepAnchor)
             elif event.key() == Qt.Key_Up:
-                global_active_textcomponent.moveCursor(QTextCursor.Up)
+                self.active_textcomponent.moveCursor(QTextCursor.Up)
             elif event.key() == Qt.Key_Down:
-                global_active_textcomponent.moveCursor(QTextCursor.Down)
+                self.active_textcomponent.moveCursor(QTextCursor.Down)
             elif event.key() == Qt.Key_Left:
-                global_active_textcomponent.moveCursor(QTextCursor.Left)
+                self.active_textcomponent.moveCursor(QTextCursor.Left)
             elif event.key() == Qt.Key_Right:
-                global_active_textcomponent.moveCursor(QTextCursor.Right)
+                self.active_textcomponent.moveCursor(QTextCursor.Right)
             elif event.text() and event.text() in '1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
                 cursor.insertText(event.text())            
             elif event.modifiers() == Qt.ControlModifier or event.modifiers() == Qt.AltModifier:
@@ -4129,12 +3771,11 @@ class MainWindow(QMainWindow):
             pass
     # 校验未被使用的附图标记
     def check_text_figmarks_unused(self):
-        global global_active_textcomponent,global_active_figmark
         self.reset_figmarkformat()
         self.fig_dic = {}
-        all_marks = global_active_figmark.toPlainText().replace('；', ';').replace('\n', '\u2029').replace('	', ' ').strip('\u2029。 ')
+        all_marks = self.active_figmark.toPlainText().replace('；', ';').replace('\n', '\u2029').replace('	', ' ').strip('\u2029。 ')
         figmarks_array = split_marks(all_marks)
-        all_txt = global_active_textcomponent.toPlainText()
+        all_txt = self.active_textcomponent.toPlainText()
         for _ in figmarks_array:
             fig_num, fig_text = judge_mark(_)
             self.fig_dic[fig_num] = fig_text
@@ -4144,12 +3785,12 @@ class MainWindow(QMainWindow):
             item = self.fig_dic[_]
             if item not in all_txt:
                 # 选择相应行
-                cursor = QTextCursor(global_active_figmark.document())
+                cursor = QTextCursor(self.active_figmark.document())
                 cursor.movePosition(QTextCursor.Start)
                 cursor.movePosition(QTextCursor.Down,QTextCursor.MoveAnchor, figmarks_array.index(f'{_} {item}'))
                 cursor.movePosition(QTextCursor.StartOfLine)
                 cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
-                global_active_figmark.setTextCursor(cursor)
+                self.active_figmark.setTextCursor(cursor)
                 # 设置高亮
                 format = cursor.charFormat()
                 format.setBackground(QColor(self.highlight_color))
@@ -4175,14 +3816,13 @@ class MainWindow(QMainWindow):
     # 生成关联内容
     # 用于自由撰写的附图标记
     def fn_show_repwindow(self):
-        global global_active_textcomponent,global_active_figmark
         self.window_rep = QWidget()
         self.window_rep_layout = QGridLayout(self.window_rep)
         self.window_rep.setWindowTitle("替换")
         self.window_rep.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
         self.window_rep.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
-        self.window_rep.setFixedSize(240, 250)
-        self.window_rep.move(self.pos().x() + self.width() - 270,self.pos().y() + 100)
+        self.window_rep.setFixedSize(240, 240)
+        self.window_rep.move(self.pos().x() + self.width() - 255,self.pos().y() + 95)
 
         self.text_rename_before = QTextEdit()
         self.text_rename_before.setFixedSize(self.window_rep.width()-15,30)
@@ -4203,69 +3843,122 @@ class MainWindow(QMainWindow):
         self.text_rename_history.setPlainText('\n'.join(self.rename_history_array))
         self.text_rename_history.mouseReleaseEvent = self.fn_rep_mouserelease
 
-        bt_rep = QPushButton('全部替换')
-        bt_rep.setFixedSize(95, 30)
+        bt_find_prev = QPushButton(qta.icon('ri.arrow-left-s-line', color='white'), '')
+        bt_find_prev.setToolTip('查找上一个')
+        bt_find_prev.setFixedSize(30, 20)
+        bt_find_prev.clicked.connect(self.fn_find_prev)
+
+        bt_find_next = QPushButton(qta.icon('ri.arrow-right-s-line', color='white'), '')
+        bt_find_next.setToolTip('查找下一个')
+        bt_find_next.setFixedSize(30, 20)
+        bt_find_next.clicked.connect(self.fn_find_next)
+
+        bt_rep_one = QPushButton(qta.icon('fa.pencil', color='white'), '')
+        bt_rep_one.setToolTip('替换当前')
+        bt_rep_one.setFixedSize(30, 20)
+        bt_rep_one.clicked.connect(self.fn_rep_one)
+
+        bt_rep = QPushButton(qta.icon('fa.exchange', color='white'), '')
+        bt_rep.setToolTip('全部替换')
+        bt_rep.setFixedSize(30, 20)
         bt_rep.clicked.connect(self.fn_rep)
 
-        bt_close = QPushButton('关  闭')
-        bt_close.setFixedSize(95, 30)
+        bt_close = QPushButton(qta.icon('fa.times', color='white'), '')
+        bt_close.setToolTip('关闭')
+        bt_close.setFixedSize(30, 20)
         bt_close.clicked.connect(lambda:[self.window_rep.hide()])
-       
-        bt_more = QPushButton('<>')
-        bt_more.setToolTip('切换模式')
-        bt_more.setFixedSize(15, 30)
+
+        bt_more = QPushButton(qta.icon('fa.columns', color='white'), '')
+        bt_more.setToolTip('批量模式')
+        bt_more.setFixedSize(30, 20)
         bt_more.clicked.connect(self.fn_more)
 
         self.text_rep_left = QTextEdit()
-        self.text_rep_left.setFixedSize(95,190)
+        self.text_rep_left.setFixedSize(110,190)
         self.text_rep_left.setPlaceholderText('替换前')
         self.text_rep_left.setText(self.select_txt)
 
         self.text_rep_right = QTextEdit()
-        self.text_rep_right.setFixedSize(95,190)
+        self.text_rep_right.setFixedSize(110,190)
         self.text_rep_right.setPlaceholderText('替换后')
         self.text_rep_right.setText(self.select_txt)
 
-        self.window_rep_layout.addWidget(self.text_rename_before,0,0,1,3)
-        self.window_rep_layout.addWidget(self.text_rename_after,1,0,1,3)
-        self.window_rep_layout.addWidget(self.text_rename_history,2,0,1,3)
-        self.window_rep_layout.addWidget(bt_rep,3,0,1,1)
-        self.window_rep_layout.addWidget(bt_close,3,1,1,1)
-        self.window_rep_layout.addWidget(bt_more,3,2,1,1)
+        self.window_rep_layout.addWidget(self.text_rename_before,0,0,1,6)
+        self.window_rep_layout.addWidget(self.text_rename_after,1,0,1,6)
+        self.window_rep_layout.addWidget(self.text_rename_history,2,0,1,6)
+        self.window_rep_layout.addWidget(bt_find_prev,3,0,1,1)
+        self.window_rep_layout.addWidget(bt_find_next,3,1,1,1)
+        self.window_rep_layout.addWidget(bt_rep_one,3,2,1,1)
+        self.window_rep_layout.addWidget(bt_rep,3,3,1,1)
+        self.window_rep_layout.addWidget(bt_more,3,4,1,1)
+        self.window_rep_layout.addWidget(bt_close,3,5,1,1)
 
-        array_txt = global_active_figmark.toPlainText().replace(' ','')
+        array_txt = self.active_figmark.toPlainText().replace(' ','')
         for i in '0123456789':
             array_txt = array_txt.replace(i,'')
         # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_before)
         # self.auto_complete(array_txt.split('\n') + self.text_genword.toPlainText().split('\n'),self.text_rename_after)
     def fn_more(self):
-        global rep_model
-        if rep_model == 1:
+        if self.rep_model == 1:
             self.text_rename_before.show()
             self.text_rename_after.show()
             self.text_rename_history.show()
             self.text_rep_left.hide()
             self.text_rep_right.hide()
-            rep_model = 0
-        elif rep_model == 0:
+            self.rep_model = 0
+        elif self.rep_model == 0:
             self.text_rename_before.hide()
             self.text_rename_after.hide()
             self.text_rename_history.hide()
             self.text_rep_left.show()
             self.text_rep_right.show()
             self.window_rep_layout.addWidget(self.text_rep_left,0,0,1,1)
-            self.window_rep_layout.addWidget(self.text_rep_right,0,1,1,1)
-            rep_model = 1
+            self.window_rep_layout.addWidget(self.text_rep_right,0,3,1,1)
+            self.rep_model = 1
+    def fn_find_prev(self):
+        find_txt = self.text_rename_before.toPlainText().strip()
+        if not find_txt:
+            return
+        cursor = self.active_textcomponent.textCursor()
+        doc = self.active_textcomponent.document()
+        found = doc.find(find_txt, cursor, QTextDocument.FindBackward)
+        if found.isNull():
+            tail = QTextCursor(doc)
+            tail.movePosition(QTextCursor.End)
+            found = doc.find(find_txt, tail, QTextDocument.FindBackward)
+        if not found.isNull():
+            self.active_textcomponent.setTextCursor(found)
+            self.active_textcomponent.ensureCursorVisible()
+    def fn_find_next(self):
+        find_txt = self.text_rename_before.toPlainText().strip()
+        if not find_txt:
+            return
+        cursor = self.active_textcomponent.textCursor()
+        doc = self.active_textcomponent.document()
+        found = doc.find(find_txt, cursor)
+        if found.isNull():
+            found = doc.find(find_txt, QTextCursor(doc))
+        if not found.isNull():
+            self.active_textcomponent.setTextCursor(found)
+            self.active_textcomponent.ensureCursorVisible()
+    def fn_rep_one(self):
+        before_txt = self.text_rename_before.toPlainText().strip('\n\r\t\u2029')
+        after_txt = self.text_rename_after.toPlainText().strip('\n\r\t\u2029')
+        cursor = self.active_textcomponent.textCursor()
+        selected = cursor.selectedText().replace('\u2029', '\n')
+        if selected == before_txt and before_txt:
+            cursor.insertText(after_txt)
+            self.active_textcomponent.setTextCursor(cursor)
+            self.fn_find_next()
     def fn_rep(self):
-        global global_active_textcomponent,global_active_figmark
-        block_cursor = global_active_textcomponent.textCursor()
+        block_cursor = self.active_textcomponent.textCursor()
         line_number = block_cursor.blockNumber()
-        total_paragraphs = global_active_textcomponent.document().blockCount()
+        total_paragraphs = self.active_textcomponent.document().blockCount()
         if line_number + 5 > total_paragraphs:
             line_number = total_paragraphs
         else:
             line_number += 5
-        if rep_model == 0:
+        if self.rep_model == 0:
             before_txt = self.text_rename_before.toPlainText().strip('\n\u2029')
             end_txt = self.text_rename_after.toPlainText().strip('\n\u2029')
             self.rename_history_array = [f'{before_txt} => {end_txt}'] + self.rename_history_array
@@ -4278,7 +3971,7 @@ class MainWindow(QMainWindow):
             else:
                 end_txt = end_txt.strip('\n\r\t\u2029')
             if before_txt == ' ':
-                all_txt = global_active_textcomponent.toHtml()
+                all_txt = self.active_textcomponent.toHtml()
                 rep_array = re.findall(r'>.*?<',all_txt)
                 temp_array = []
                 for item in rep_array:
@@ -4289,33 +3982,32 @@ class MainWindow(QMainWindow):
                     before_txt = item.split('<_>')[0] +'<'
                     end_txt = '>'+item.split('<_>')[1]
                     all_txt = all_txt.replace(before_txt, end_txt)
-                global_active_textcomponent.setHtml(all_txt)
+                self.active_textcomponent.setHtml(all_txt)
             elif end_txt != before_txt:
-                all_txt = global_active_textcomponent.toHtml()
+                all_txt = self.active_textcomponent.toHtml()
                 all_txt = all_txt.replace(before_txt, end_txt)
                 all_txt = all_txt.replace('实用新型人', '发明人')
-                global_active_textcomponent.setHtml(all_txt)
+                self.active_textcomponent.setHtml(all_txt)
             self.window_rep.hide()
             self.on_lineheight_changed()
-        elif rep_model == 1:
+        elif self.rep_model == 1:
             before_array = re.split('\n | \u2029',self.text_rep_left.toPlainText().strip('\n\u2029'))
             end_array = re.split('\n | \u2029',self.text_rep_right.toPlainText().strip('\n\u2029'))
             
-            all_txt = global_active_textcomponent.toHtml()
+            all_txt = self.active_textcomponent.toHtml()
             if before_array and len(before_array) == len(end_array):
                 for i in range(0,len(before_array)):
                     before_txt = before_array[i]
                     end_txt = end_array[i]
                     all_txt = all_txt.replace(before_txt, end_txt)
-            global_active_textcomponent.setHtml(all_txt)
+            self.active_textcomponent.setHtml(all_txt)
         # 重新定位光标
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.movePosition(QTextCursor.Start)
         for _ in range(line_number):
             cursor.movePosition(QTextCursor.NextBlock)
-        global_active_textcomponent.setTextCursor(cursor)
+        self.active_textcomponent.setTextCursor(cursor)
     def fn_rep_keypressEvent(self,event):
-        global global_active_textcomponent,global_active_figmark
         cursor = self.text_rename_after.textCursor()
         clipboard = QApplication.clipboard()
         try:
@@ -4376,7 +4068,7 @@ class MainWindow(QMainWindow):
                 else:
                     end_txt = end_txt.strip('\n\r\t\u2029')
                 if before_txt == ' ':
-                    all_txt = global_active_textcomponent.toHtml()
+                    all_txt = self.active_textcomponent.toHtml()
                     rep_array = re.findall(r'>.*?<',all_txt)
                     temp_array = []
                     for item in rep_array:
@@ -4387,11 +4079,11 @@ class MainWindow(QMainWindow):
                         before_txt = item.split('<_>')[0] +'<'
                         end_txt = '>'+item.split('<_>')[1]
                         all_txt = all_txt.replace(before_txt, end_txt)
-                    global_active_textcomponent.setHtml(all_txt)
+                    self.active_textcomponent.setHtml(all_txt)
                 elif end_txt != before_txt:
-                    all_txt = global_active_textcomponent.toHtml()
+                    all_txt = self.active_textcomponent.toHtml()
                     all_txt = all_txt.replace(before_txt, end_txt)
-                    global_active_textcomponent.setHtml(all_txt)
+                    self.active_textcomponent.setHtml(all_txt)
                 self.window_rep.hide()
                 self.on_lineheight_changed()
             else:
@@ -4449,15 +4141,7 @@ class MainWindow(QMainWindow):
         self.word_array = self.text_genword.toPlainText().replace('\n','\u2029').strip('\u2029\r ').split('\u2029')
         self.word_array = list(set(self.word_array))
         self.image_keywords()
-        # cursor = global_active_textcomponent.textCursor()
-        # cursor.movePosition(QTextCursor.Left, 2)
-        # cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(self.ori_keywords)-1)
-        # cursor.deleteChar()
-        # cursor.insertText(self.out_keywords)
-        # self.total_key = ''
-        # self.word_array = ''
-        # self.out_keywords = ''
-        # self.ori_keywords = ''
+        
     def image_keywords(self):
         for _ in self.word_array:
             if len(_) >= 5:
@@ -4543,20 +4227,18 @@ class MainWindow(QMainWindow):
                 self.ori_array.append(inputtxt[-1:])
 
     def fn_windowshow_onchange(self,txt):
-        global global_active_textcomponent,global_active_figmark
         try:
             # if txt[-1] in list('~·、，；。！：“”’‘@#￥$%……^&*()（）【】[]？《》<>'):
-            if txt[-1] not in '1234567890abcdefg':
+            if txt[-1] not in '1234567890abcde':
                 self.window_show.hide()
-                cursor = global_active_textcomponent.textCursor()
+                cursor = self.active_textcomponent.textCursor()
                 cursor.insertText(txt[-1])
         except:
             pass
     def fn_windowshow_keypressevent_keywords(self,event):
-        global global_active_textcomponent,global_active_figmark
         self.get_totalkeys()
         if event.key() == Qt.Key_Backspace:
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,1)
             cursor.deleteChar()
             current_text = self.text_windowshow.text()
@@ -4564,7 +4246,7 @@ class MainWindow(QMainWindow):
             self.text_windowshow.clear()
             self.text_windowshow.insert(new_text)
         elif event.key() == 32:# 32代表空格
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.movePosition(QTextCursor.Left, 2)
             cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(self.ori_keywords)-1)
             cursor.deleteChar()
@@ -4577,12 +4259,11 @@ class MainWindow(QMainWindow):
         else:
             self.window_show.hide()
     def fn_windowshow_keypressevent(self,event):
-        global global_active_textcomponent,global_active_figmark
         self.get_totalkeys()
         # if event.key() == Qt.Key_Escape:
         #     self.window_show.hide()
         if event.key() == Qt.Key_Backspace:
-            cursor = global_active_textcomponent.textCursor()
+            cursor = self.active_textcomponent.textCursor()
             cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor,1)
             cursor.deleteChar()
             current_text = self.text_windowshow.text()
@@ -4601,8 +4282,8 @@ class MainWindow(QMainWindow):
             if not self.word_array:
                 return
             self.space_out_words()
-        elif event.text() in '1234567890abcdefg':
-            cursor = global_active_textcomponent.textCursor()
+        elif event.text() in '1234567890abcde':
+            cursor = self.active_textcomponent.textCursor()
             try:
                 cursor.insertText(event.text())
                 self.text_windowshow.insert(event.text())
@@ -4615,7 +4296,6 @@ class MainWindow(QMainWindow):
             self.window_show.hide()
             
     def space_out_words(self):
-        global global_active_textcomponent,global_active_figmark,write_auto
         insert_word = self.word_array[0]
         self.type_v = self.combo_typev.currentText() # 选择 '(Num)', '（Num）', '[Num]', 'Num','-Num-'
         for key in self.fig_dic:
@@ -4632,11 +4312,11 @@ class MainWindow(QMainWindow):
                     all_word = f'{insert_word}'
                 all_word = all_word.replace(' ','')
                 # 手动补全
-                cursor = global_active_textcomponent.textCursor()
-                if write_auto == '补全':
+                cursor = self.active_textcomponent.textCursor()
+                if self.write_auto == '补全':
                     cursor.movePosition(QTextCursor.Left, 2)
                     cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(key[0]))
-                elif write_auto == '关闭':
+                elif self.write_auto == '关闭':
                     cursor.movePosition(QTextCursor.Left, QTextCursor.KeepAnchor, len(key[0]))
                 cursor.deleteChar()
                 cursor.insertText(all_word)
@@ -4644,132 +4324,20 @@ class MainWindow(QMainWindow):
                 self.word_array = ''
                 if self.window_show:self.window_show.close()
                 break
-class LoginWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        global window_main
-        self.dragging = False
-        self.in_widget = window_main
-        self.get_sysinfo()
-        txt_read = open('login.txt', 'r', encoding='utf-8').read()
-        self.user_login = ''
-        self.user_password = ''
-        self.user_superkey = ''
-        try:
-            self.user_login = txt_read.split('\n')[0].split('=')[-1]
-            self.user_password = txt_read.split('\n')[1].split('=')[-1]
-            self.user_superkey = txt_read.split('\n')[2].split('=')[-1]
-        except:
-            self.user_login = ''
-            self.user_password = ''
-        self.closeEvent = self.closeEvent
-        self.login_ui()
-            
-    def closeEvent(self,event):
-        self.close()
-        if self.in_widget:self.in_widget.close()
-
-    def login_ui(self):
-        self.status_wait = False
-        self.user_level = ''
-        self.fig_txt_array_temp = []
-        self.main_login_layout = QGridLayout(self)
-        self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-        self.setWindowTitle(f"FENRIR ver{version}")
-        self.setWindowFlags(Qt.FramelessWindowHint) # 隐藏标题栏
-        # logo
-        self.label_logo = QLabel()
-        self.label_logo.setToolTip('点击')
-        self.label_logo.setMaximumHeight(300)
-        self.label_logo.setScaledContents(True)
-        self.label_logo.mousePressEvent = self.change_pic
-
-        self.change_pic(self.event)
-        # 获取窗口坐标系
-        screen = QDesktopWidget().screenGeometry()
-        size = self.geometry()
-        self.setFixedSize(350, 420)
-        self.move(int((screen.width() - size.width()) / 2)+150, int((screen.height() - size.height()) / 2))
-        self.mousePressEvent = self.start_drag
-        self.mouseReleaseEvent = self.window_pressrelease
-        self.closeEvent = self.closeEvent
-
-        self.text_user = QLineEdit()
-        self.text_user.setPlaceholderText('用户名')
-        self.text_user.setMaximumHeight(30)
-        self.text_user.setMinimumWidth(300)
-        self.text_user.insert(self.user_login)
-
-        self.text_password = QLineEdit()
-        self.text_password.setPlaceholderText('密码')
-        self.text_password.setMaximumHeight(30)
-        self.text_password.setMinimumWidth(300)
-        self.text_password.insert(self.user_password)
-        self.text_password.setEchoMode(QLineEdit.Password)
-
-        self.bt_login = QPushButton(QIcon(qta.icon('fa5b.wolf-pack-battalion')),'')
-        self.bt_login.setIconSize(QSize(40, 40))
-        self.bt_login.setMaximumHeight(40)
-        self.bt_login.setToolTip('账号注册请访问 http://www.fenrir.fun/register')
-        self.bt_login.clicked.connect(self.fn_login)
-        
-        self.label_login_status = QLabel()
-        self.label_login_status.setStyleSheet("color : red")
-
-        self.main_login_layout.addWidget(self.label_logo,0,0,2,2)
-        self.main_login_layout.addWidget(self.text_user,5,0,1,2)
-        self.main_login_layout.addWidget(self.text_password,6,0,1,2)
-        self.main_login_layout.addWidget(self.bt_login,7,0,1,2)
-        
-        self.show()
-    
-    def fn_login(self):
-        user = self.text_user.text()
-        password = self.text_password.text()
-        if not user:
-            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-            self.label_login_status.setText('请输入用户名')
-            return
-        elif not password:
-            self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-            self.label_login_status.setText('请输入密码')
-            return
-        else:
-            self.label_login_status.setText('')
-            self.get_wanip()
-            self.get_mac()
-            data = {"username": user,
-                    "password": password,
-                    }
-            try:
-                response = requests.post('http://www.fenrir.fun/postlogin', data=data)
-            except:
-                QMessageBox.critical(self, "连接失败", "服务器连接失败，请联系管理员")
-                return
-            json_data = json.loads(response.text)
-            if json_data['Status'] == 'OK':
-                txt_write = open('login.txt', 'r', encoding='utf-8').read().replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[0], '[user]=' + user).replace(open('login.txt', 'r', encoding='utf-8').read().split('\n')[1], '[password]=' + password)
-                open('login.txt', 'w+', encoding='utf-8').write(txt_write)
-                self.close()
-                self.in_widget.show()
-                self.send_state_login('Login' ,user)
-                self.setWindowTitle(f"FENRIR ver{version} | {user}")
-                self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
-            else:
-                self.main_login_layout.addWidget(self.label_login_status,0,0,1,1)
-                self.label_login_status.setText('用户名或密码错误，请重试！')
 
 class WindowBook(QWidget):
+    """文本校验面板。提供说明书/权利要求书的合规检查：
+    附图标记一致性、权利要求多引多、不确定用语、句号、
+    术语一致性、空泛词26条等。"""
     def __init__(self,active_figmark,active_textcomponent,status,dock_mark):
-        global global_active_textcomponent,global_active_figmark
         super().__init__()
         self.setWindowIcon(QIcon(qta.icon('fa5b.wolf-pack-battalion')))
         self.setWindowTitle('文本校验')
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint) # 隐藏标题栏
         self.setFixedWidth(500)
         self.move(1700, 100)
-        global_active_figmark = active_figmark
-        global_active_textcomponent = active_textcomponent
+        self.active_figmark = active_figmark
+        self.active_textcomponent = active_textcomponent
         self.status = status
         self.dock_mark = dock_mark
         self.highlight_color = '#4a76d6'
@@ -4819,12 +4387,6 @@ class WindowBook(QWidget):
         bt_check.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
         bt_check.clicked.connect(self.submit_check_main)
 
-        # bt_aicheck = QPushButton('AI校验')
-        # bt_aicheck.setFixedSize(90,30)
-        # bt_aicheck.setCheckable(True)
-        # bt_aicheck.setStyleSheet('QPushButton {background-color: #e55f00 ; color:white} QPushButton:hover {background-color: #f69958}')
-        # bt_aicheck.clicked.connect(self.submit_aicheck)
-
         bt_close = QPushButton('关闭')
         bt_close.setFixedSize(90,30)
         bt_close.clicked.connect(self.fn_close_book)
@@ -4838,10 +4400,138 @@ class WindowBook(QWidget):
 
         main_layout.addWidget(self.check_claimtree,0,8,1,2)
         main_layout.addWidget(bt_check,2,8,1,2)
-        # main_layout.addWidget(bt_aicheck,3,8,1,2)
         main_layout.addWidget(bt_close,6,8,1,2)
         
         self.tab_widget_book.addTab(main_widget, '文本校验')
+    def check_terms_consistency(self, quiet=False):
+        """技术术语一致性检查：
+        扫描全文，识别"该X/上述X/其X"三种指代前缀；
+        同一术语出现≥3次且混用≥2种前缀时报告不一致；
+        quiet=True 时追加到结果区（用于全文校验整合）。"""
+        import re
+        text = self.active_textcomponent.toPlainText()
+        pattern = re.compile(r'(该|上述|其)([\u4e00-\u9fa5]{2,8})')
+        term_prefix = {}
+        term_count = {}
+        for m in pattern.finditer(text):
+            prefix, term = m.group(1), m.group(2)
+            term_prefix.setdefault(term, set()).add(prefix)
+            term_count[term] = term_count.get(term, 0) + 1
+        inconsistent = []
+        for term, prefixes in term_prefix.items():
+            if term_count[term] >= 3 and len(prefixes) >= 2:
+                inconsistent.append((term, sorted(prefixes), term_count[term]))
+        inconsistent.sort(key=lambda x: -x[2])
+        if not quiet:
+            self.text_checkresult.clear()
+        self.text_checkresult.insertPlainText('\n=== 术语一致性检查 ===\n')
+        if not inconsistent:
+            self.text_checkresult.insertPlainText('未发现明显的指代不一致。\n')
+        else:
+            self.text_checkresult.insertPlainText(f'发现 {len(inconsistent)} 个术语存在多种指代前缀混用：\n\n')
+            for term, prefixes, cnt in inconsistent[:50]:
+                self.text_checkresult.insertPlainText(f'  「{term}」共出现{cnt}次，混用前缀：{"、".join(prefixes)}\n')
+            self.text_checkresult.insertPlainText('\n建议：全文统一为一种指代。\n')
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor('#e55f00'))
+            fmt.setForeground(QColor('white'))
+            for term, prefixes, cnt in inconsistent[:50]:
+                for m in re.finditer(re.escape(term), self.active_textcomponent.toPlainText()):
+                    cursor = self.active_textcomponent.textCursor()
+                    cursor.setPosition(m.start())
+                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(term))
+                    cursor.mergeCharFormat(fmt)
+    def check_vague_words(self, quiet=False):
+        """专利法26条3/4款空泛词自检：
+        统计"等/大约/优选地/例如/最好/特别是/左右/上下"等模糊用语出现次数；
+        在文档中黄色高亮所有命中位置；
+        quiet=True 时追加到结果区（用于全文校验整合）。"""
+        import re
+        vague_words = ['等','大约','优选地','例如','最好','特别是','左右','上下','基本上','本质上','约','大概','尽量','最好是','较为']
+        text = self.active_textcomponent.toPlainText()
+        if not quiet:
+            self.text_checkresult.clear()
+        self.text_checkresult.insertPlainText('\n=== 专利法26条3/4款 空泛词检查 ===\n')
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor('#ffcc00'))
+        fmt.setForeground(QColor('black'))
+        total = 0
+        for w in vague_words:
+            cnt = len(re.findall(re.escape(w), text))
+            if cnt > 0:
+                total += cnt
+                self.text_checkresult.insertPlainText(f'  「{w}」出现 {cnt} 次\n')
+                # 高亮
+                for m in re.finditer(re.escape(w), text):
+                    cursor = self.active_textcomponent.textCursor()
+                    cursor.setPosition(m.start())
+                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(w))
+                    cursor.mergeCharFormat(fmt)
+        self.text_checkresult.insertPlainText(f'\n合计空泛词 {total} 处（黄色高亮）。\n')
+        self.text_checkresult.insertPlainText('提示：专利法26条3款要求说明书充分公开，4款要求权利要求书得到说明书支持。空泛词过多可能导致保护范围不清楚。\n')
+    def check_mark_name_consistency(self):
+        """标号-名称对应关系检查：
+        从说明书正文和左侧标记面板提取所有"名称(标号)"对，
+        1) 同一个标号对应多个不同名称
+        2) 同一个名称对应多个不同标号
+        错误项填入 table_marks 红色高亮，并输出到 text_checkresult。"""
+        pairs = []
+        # 1) 从左侧标记面板解析
+        for item in self.marks_array:
+            item = item.strip()
+            if not item:
+                continue
+            m = re.match(r'^(\d+[a-zA-Z]?)[\s\.、：:_-]*(.+)', item)
+            if m and m.group(2).strip():
+                pairs.append((m.group(1), m.group(2).strip()))
+                continue
+            m = re.match(r'^([\u4e00-\u9fa5A-Za-z]{2,})[\s\(\（\[]*(\d+[a-zA-Z]?)[\s\)\）\]]*$', item)
+            if m:
+                pairs.append((m.group(2), m.group(1)))
+        # 2) 从说明书正文提取 "名称(标号)" / "名称（标号）" 模式
+        if hasattr(self, 'all_txt') and self.all_txt:
+            for m in re.finditer(r'([\u4e00-\u9fa5]{2,15})[\(（](\d+[a-zA-Z]?)[\)）]', self.all_txt):
+                pairs.append((m.group(2), m.group(1)))
+        if not pairs:
+            return
+        # 标号 -> 名称集合
+        num_to_names = {}
+        name_to_nums = {}
+        for num, name in pairs:
+            num_to_names.setdefault(num, set()).add(name)
+            name_to_nums.setdefault(name, set()).add(num)
+        num_conflicts = {num: names for num, names in num_to_names.items() if len(names) > 1}
+        name_conflicts = {name: nums for name, nums in name_to_nums.items() if len(nums) > 1}
+        if not num_conflicts and not name_conflicts:
+            return
+        # 输出到 text_checkresult
+        self.text_checkresult.insertPlainText('\n=== 标号-名称对应关系检查 ===\n')
+        red = QColor('#e20000')
+        white = Qt.white
+        # 填入 table_marks（追加到现有行后）
+        row = len(self.fig_dic)
+        for num, names in sorted(num_conflicts.items()):
+            item_num = QTableWidgetItem(num)
+            item_num.setBackground(red); item_num.setForeground(white)
+            item_name = QTableWidgetItem(' / '.join(sorted(names)))
+            item_name.setBackground(red); item_name.setForeground(white)
+            self.table_marks.setItem(row, 0, item_num)
+            self.table_marks.setItem(row, 1, item_name)
+            self.table_marks.setItem(row, 2, QTableWidgetItem('?'))
+            self.table_marks.setItem(row, 3, QTableWidgetItem('?'))
+            self.text_checkresult.insertPlainText(f'  标号「{num}」对应多个名称：{"、".join(sorted(names))}\n')
+            row += 1
+        for name, nums in sorted(name_conflicts.items()):
+            item_num = QTableWidgetItem(' / '.join(sorted(nums)))
+            item_num.setBackground(red); item_num.setForeground(white)
+            item_name = QTableWidgetItem(name)
+            item_name.setBackground(red); item_name.setForeground(white)
+            self.table_marks.setItem(row, 0, item_num)
+            self.table_marks.setItem(row, 1, item_name)
+            self.table_marks.setItem(row, 2, QTableWidgetItem('?'))
+            self.table_marks.setItem(row, 3, QTableWidgetItem('?'))
+            self.text_checkresult.insertPlainText(f'  名称「{name}」对应多个标号：{"、".join(sorted(nums))}\n')
+            row += 1
     def fn_close_book(self):
         self.close()
         self.dock_mark.setMinimumWidth(50)
@@ -4863,7 +4553,7 @@ class WindowBook(QWidget):
         select_txt = self.text_checkresult.textCursor().selectedText()
         if select_txt:
             self.reset_textcomponentformat()
-            self.get_same_markindex(select_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(select_txt,self.active_textcomponent,self.highlight_color)
     def get_same_markindex(self,mark,input_component,highlight_color):
         if mark == '.' or not mark:
             return
@@ -4921,49 +4611,23 @@ class WindowBook(QWidget):
                 cursor.mergeCharFormat(format)  # 改变文本的背景颜色
         except:
             pass
-    # def submit_aicheck(self):
-    #     self.status.showMessage('文本校验中，请稍后...')
-    #     self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
-    #     # self.setCursor(Qt.WaitCursor)
-
-    #     all_txt = global_active_textcomponent.toPlainText()
-    #     global model_api
-    #     if model_api == 'Doubao':
-    #         if '尊敬的审查员' in all_txt:
-    #             self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
-    #         else:
-    #             self.aicheck_thread = Worker_ai_doubao('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
-    #     else:
-    #         if '尊敬的审查员' in all_txt:
-    #             self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请根据下文的审查意见答复提出修改建议，以提高授权率：' + all_txt,self.text_checkresult)        
-    #         else:
-    #             self.aicheck_thread = Worker_ai_deepseek('你是一个经验丰富的专利代理人，请检查以下专利文本中的撰写缺陷，例如错别字，语法错误，附图标记不一致等，并提出改进建议：' + all_txt,self.text_checkresult)
-
-    #     self.aicheck_thread.progress.connect(self.fn_aicheck)
-    #     self.aicheck_thread.start()
-    def fn_aicheck(self,in_txt):
-        # self.text_checkresult.insertPlainText(in_txt)
-        self.status.showMessage('校验完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
     def reset_textcomponentformat(self):
         format = QTextCharFormat()
         format.setBackground(QColor(Qt.transparent))
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(global_active_textcomponent.toPlainText()))
+        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
         cursor.mergeCharFormat(format)
     def cell_clicked(self,item):
         row,column = item.row(),item.column()
         self.reset_textcomponentformat()
         if column == 0:
             select_txt = self.table_marks.item(row, 0).text()
-            self.get_same_markindex(select_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(select_txt,self.active_textcomponent,self.highlight_color)
         elif column in [1,2,3]:
             select_txt = self.table_marks.item(row, 1).text()
-            self.get_same_markindex(select_txt,global_active_textcomponent,self.highlight_color)
+            self.get_same_markindex(select_txt,self.active_textcomponent,self.highlight_color)
     def submit_check_main(self):
-        global global_active_textcomponent,global_active_figmark
         # 参数初始化
         self.textsplit_array = []
         self.dataframe_list = [] # 输出dataframe结果
@@ -4985,15 +4649,15 @@ class WindowBook(QWidget):
         self.parts_dic = {} # 获取权利要求序号,引用权要,特征列表
         self.fig_dic = {}
        # 获取校验文本与附图标记
-        self.all_txt = global_active_textcomponent.toPlainText().replace(' ','').replace('\r','\u2029').replace('\t','\u2029').replace('\n','\u2029').replace('\u2029\u2029','\u2029').strip('\u2029')
+        self.all_txt = self.active_textcomponent.toPlainText().replace(' ','').replace('\r','\u2029').replace('\t','\u2029').replace('\n','\u2029').replace('\u2029\u2029','\u2029').strip('\u2029')
         self.para_array = self.all_txt.split('\u2029')
-        self.marks_array = global_active_figmark.toPlainText().replace('\n','\u2029').strip('\u2029').split('\u2029')
+        self.marks_array = self.active_figmark.toPlainText().replace('\n','\u2029').strip('\u2029').split('\u2029')
         self.figmarks_array = split_marks('\u2029'.join(self.marks_array))
         self.status.showMessage('文本校验中...')
         self.status.setStyleSheet("QStatusBar {background-color: #cc6633;color: white;border:none} QStatusBar:hover{background-color:#d2794c;color: white}")
         # self.setCursor(Qt.WaitCursor)
         self.text_checkresult.clear()
-        if not global_active_figmark.toPlainText().strip('\n\u2029 '):
+        if not self.active_figmark.toPlainText().strip('\n\u2029 '):
             self.text_checkresult.insertPlainText('\n> 未识别到附图标记，请在左侧填入附图标记后重试')
         else:
             while '\u2029\u2029' in self.all_txt:
@@ -5018,14 +4682,9 @@ class WindowBook(QWidget):
             # 为dataframe编号列赋值
             self.add_num_to_data() 
             self.text_checkresult.insertPlainText(self.ckresult_txt)
-        if self.txt_type =='description' and self.des_check_flag:
-            self.status.showMessage('正在给出进一步撰写建议，请稍后...')
-            # 修改建议
-            self.ai_suggestion() 
-        else:
-            self.status.showMessage('校验完成')
-            self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-            self.setCursor(Qt.ArrowCursor)
+        self.status.showMessage('校验完成')
+        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
+        self.setCursor(Qt.ArrowCursor)
             
     def marks_to_table(self):
         self.table_marks.clearContents()
@@ -5052,18 +4711,6 @@ class WindowBook(QWidget):
             self.table_marks.setItem(index, 1, item_2)
             self.table_marks.setItem(index, 2, item_3)
             self.table_marks.setItem(index, 3, item_4)
-    def ai_suggestion(self):
-        global model_api
-        
-        self.status.showMessage('校验完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
-    def fn_ai_suggestion(self,in_txt):
-        self.ckresult_txt += f'\u2029=======<撰写建议>=======\u2029{in_txt}\u2029'
-        # self.text_checkresult.insertPlainText(self.ckresult_txt)
-        self.status.showMessage('校验完成')
-        self.status.setStyleSheet("QStatusBar {background-color: #455364;color: white;border:none} QStatusBar:hover{background-color:#54687a;color: white}")
-        self.setCursor(Qt.ArrowCursor)
     ''' 技术特征 & 附图编号一致性'''
     def marks_consistent(self):
         self.ckresult_txt += f'\u2029<附图标记一致性>\u2029'
@@ -5136,7 +4783,7 @@ class WindowBook(QWidget):
                             para_index,sen_index = self.get_para_sen_index(error,para)
                             self.ckresult_txt += f'第{para_index}段，第[{sen_index}]句,<{error}>与附图标记不一致\u2029'
                             self.dataframe_list.append(['','标记不一致',f'第{para_index}段，第[{sen_index}]句,',f'{error}与附图标记不一致','-5'])
-                        self.get_same_markindex_check(error,global_active_textcomponent)
+                        self.get_same_markindex_check(error,self.active_textcomponent)
 
     def is_description(self):  # 判断是否为说明书
         for para in self.para_array:
@@ -5202,7 +4849,7 @@ class WindowBook(QWidget):
                     self.err_details.append((ori_char, corrected_text[i], i, i + 1))
             except:
                 pass
-        self.err_details = sorted(self.err_details, key=operator.itemgetter(2))
+        self.err_details = sorted(self.err_details, key=__import__('operator').itemgetter(2))
 
     ''' 校验说明书 '''
     def get_para_sen_index(self,error,para_txt):  # 判断错误位于说明书的第几段第几句
@@ -5599,121 +5246,10 @@ class WindowBook(QWidget):
         if self.check_claimtree.checkState() == 2: # 选中  0未选中
             self.extract_claim_tree()
 
-# class Worker_ai_deepseek(QThread):
-#     progress = pyqtSignal(str)
-#     def __init__(self,in_txt,in_widget):
-#         super().__init__()
-#         self.result = ''
-#         self.in_txt = in_txt
-#         if not user:
-#             deepseek_array = open('./data/deepseek_token.txt','r').read().split('\n')
-#             ak = deepseek_array[0]
-#             self.client = OpenAI(api_key="", base_url="https://api.deepseek.com")
-#         else:
-#             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-#             ak = doubao_array[0]
-#             self.client = OpenAI(api_key=ak, base_url="https://api.deepseek.com")
-#         self.text_out = in_widget
-#     def run(self):
-#         self.result = self.deepseek_ai(self.in_txt)
-#         self.progress.emit(self.result)
-#     def out_txt_by_time(self):
-#         txt_array = self.reply.split('，')
-#         for index,word in enumerate(txt_array):
-#             if index == len(txt_array) -1:
-#                 self.text_out.insertPlainText(word)
-#             else:
-#                 self.text_out.insertPlainText(word + '，')
-#             time.sleep(random.uniform(0.05,0.2))
-#     def deepseek_ai(self,in_txt):
-#         global messages,deep_model
-#         try:
-#             if not in_txt:
-#                 self.reply = ""
-#                 return
-#             if user and not open('./data/deepseek_token.txt','r').read():
-#                 return '请先在AI接口(F4)中输入deepseek的API Key'
-#             else:
-#                 # if not messages:
-#                 messages=[
-#                     {"role": "system", "content":"经验丰富的具有所有领域相关知识的专利代理人"},
-#                     {"role": "user", "content": in_txt},
-#                     ]
-#                 # else:
-#                 #     messages.append({"role": "user","content": in_txt})
-#                 response = self.client.chat.completions.create(
-#                 model = 'deepseek-chat', # deep_model
-#                 messages = messages,
-#                 stream=False
-#                 )
-#                 self.reply = response.choices[0].message.content
-#                 # if deep_model != 'deepseek-chat':
-#                 # messages = []
-#                 # else:
-#                 # if len(messages) >= 10:
-#                 #     messages = [{"role": "user","content": in_txt},{"role": "system","content": self.reply},]
-#                 # else:
-#                 #     messages.append(response.choices[0].message)
-                    
-#                 if self.text_out:
-#                     self.out_txt_by_time()
-#             return self.reply
-#         except Exception as e:
-#             return f"错误代码101：API调用失败"
-# class Worker_ai_doubao(QThread):
-#     progress = pyqtSignal(str)
-#     def __init__(self,in_txt,in_widget):
-#         super().__init__()
-#         self.result = ''
-#         self.in_txt = in_txt
-#         if not user:
-#             self.client = Ark(ak="", sk="")
-#             self.model = ''
-#         else:
-#             doubao_array = open('./data/doubao_token.txt','r').read().split('\n')
-#             ak = doubao_array[0]
-#             sk = doubao_array[1]
-#             self.model = doubao_array[2]
-#             self.client = Ark(ak=ak, sk=sk)
-
-#         self.text_out = in_widget
-#     def run(self):
-#         self.result = self.doubao_ai(self.in_txt)
-#         self.progress.emit(self.result)
-#     def out_txt_by_time(self):
-#         txt_array = self.reply.split('，')
-#         for index,word in enumerate(txt_array):
-#             if index == len(txt_array) -1:
-#                 self.text_out.insertPlainText(word)
-#             else:
-#                 self.text_out.insertPlainText(word + '，')
-#             time.sleep(random.uniform(0.05,0.2))
-#     def doubao_ai(self,in_txt):
-#         global messages
-#         try:
-#             if not in_txt:
-#                 self.reply = ""
-#                 return
-#             messages =[{"role": "user","content": in_txt}]
-                
-#             if user and len(open('./data/doubao_token.txt','r').read().split('\n')) != 3:
-#                 return '请先在AI接口(F4)中输入doubao的ak & sk & model'
-#             else:
-#                 completion = self.client.chat.completions.create(
-#                     model=self.model,
-#                     messages=messages)
-#                 self.reply = completion.choices[0].message.content.strip('\n\r')
-#                 # messages.append({"role": "assistant","content": self.reply})
-#                 # if len(messages) >= 5:
-#                 #     messages = [{"role": "user","content": in_txt},{"role": "assistant","content": self.reply},]
-#                 # messages = []
-#                 if self.text_out:
-#                     self.out_txt_by_time()
-#             return self.reply
-#         except Exception as e:
-#             return f"错误代码102：API调用失败"
 
 class Worker_Ocr(QThread):
+    """OCR 后台线程：调用百度 OCR API 识别 PDF/Word/图片中的文字。
+    避免阻塞 UI 线程。"""
     progress = pyqtSignal(str)
     def __init__(self,strPathFile):
         super().__init__()
@@ -5724,6 +5260,7 @@ class Worker_Ocr(QThread):
             self.image_ocr()
             self.progress.emit(self.out_ocr_txt)
     def image_ocr(self):
+        import requests, base64
         self.api_key = ''
         self.secret_key = ''
         self.access_token = ''
@@ -5759,12 +5296,14 @@ class Worker_Ocr(QThread):
             self.out_ocr_txt = ''
     def get_pdftxt(self,file_path):
         try:
+            import pdfplumber
             pdf = pdfplumber.open(file_path)
             for page in pdf.pages:
                 self.out_ocr_txt += page.extract_text()
         except Exception as e:
             print('> Error Code 701',e)
     def read_word_file(self,file_path):
+        import docx
         doc = docx.Document(file_path)
         text = []
         for paragraph in doc.paragraphs:
@@ -5772,6 +5311,7 @@ class Worker_Ocr(QThread):
         return '\n'.join(text)
 
 class FileDropLabel(QLabel):
+    """支持拖拽文件的 QLabel，用于接收图片/文档拖入。"""
     def __init__(self,label_txt):
         super().__init__()
         self.setAcceptDrops(True)  # 设置控件接受拖放事件
@@ -5841,56 +5381,43 @@ class FileDropLabel(QLabel):
         #     img_w = img_w/img_rate
         result = img.scaled(int(img_w),int(img_h),Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
         self.setPixmap(QPixmap.fromImage(result))
-class SwitchBtn_1(QWidget):
+class SwitchBtn(QWidget):
+    """通用开关按钮：左上角三个开关（联想/撰写阅读/自动补全）共用。"""
     checkedChanged = pyqtSignal(bool)
     status_sig = pyqtSignal()
-    def __init__(self, parent=None):
+    def __init__(self, text_off='联想', text_on='关闭', checked=False, parent=None):
         super().__init__(parent)
-        self.edge = QColor(0, 0, 0)  # 边框颜色
-        self.checked = False
-        self.bgColorOff = QColor(255, 255, 255)  # 滑动条颜色
+        self.edge = QColor(0, 0, 0)
+        self.checked = checked
+        self.bgColorOff = QColor(255, 255, 255)
         self.bgColorOn = QColor(255, 255, 255)
-        
-        self.sliderColorOff = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(self.width() / 6),int(self.height() / 6))
-        # 滑块颜色
-        self.sliderColorOff.setColorAt(1, QColor('#e55f00')) # 开启状态
-        # self.sliderColorOff.setColorAt(0.8, QColor(50, 100, 0))
-        self.sliderColorOn = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(3 * self.width() / 4), int(self.height() / 2))
-        self.sliderColorOn.setColorAt(1, QColor('#19232d')) # 关闭状态
-        # self.sliderColorOn.setColorAt(0.8, QColor(255, 0, 0))
-        self.textColorOff = QColor(0, 0, 0)  # 文本颜色
+        self.sliderColorOff = QRadialGradient(int(self.width()/2), int(self.height()/2), int(self.width()/2), int(self.width()/6), int(self.height()/6))
+        self.sliderColorOff.setColorAt(1, QColor('#e55f00'))
+        self.sliderColorOn = QRadialGradient(int(self.width()/2), int(self.height()/2), int(self.width()/2), int(3*self.width()/4), int(self.height()/2))
+        self.sliderColorOn.setColorAt(1, QColor('#19232d'))
+        self.textColorOff = QColor(0, 0, 0)
         self.textColorOn = QColor(0, 0, 0)
-        self.textOff = "联想"  # 初始文本
-        self.textOn = "关闭"
-        self.space = 2
+        self.textOff = text_off
+        self.textOn = text_on
+        self.space = 1
         self.rectRadius = 5
         self.step = self.width() / 50
-        self.startX = 0
-        self.endX = 0
-        self.timer = QTimer(self)  # 初始化一个定时器
-        self.timer.timeout.connect(self.updateValue)  # 计时结束调用operate()方法
+        self.startX = self.width() - self.height() if checked else 0
+        self.endX = self.startX
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.updateValue)
         self.status_sig.connect(self.auto_step)
-        # self.timer.start(5)  # 设置计时间隔并启动
     def isChecked(self):
         return self.checked
     def to_open(self):
-        # 打开状态
         self.checked = True
-        # self.auto_step()
         self.status_sig.emit()
     def to_close(self):
-        # 关闭状态
         self.checked = False
-        # self.auto_step()
         self.status_sig.emit()
     def auto_step(self):
-        # 每次移动的步长为宽度的50分之一
         self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
+        self.endX = self.width() - self.height() if self.checked else 0
         self.timer.start(5)
     def setInitText(self, text):
         self.textOff = text
@@ -5899,46 +5426,32 @@ class SwitchBtn_1(QWidget):
     def updateValue(self):
         if self.checked:
             if self.startX < self.endX:
-                self.startX = self.startX + self.step
+                self.startX += self.step
             else:
                 self.startX = self.endX
                 self.timer.stop()
         else:
             if self.startX > self.endX:
-                self.startX = self.startX - self.step
+                self.startX -= self.step
             else:
                 self.startX = self.endX
                 self.timer.stop()
         self.update()
     def mousePressEvent(self, event):
-        global model_type
         self.checked = not self.checked
-        # 发射信号
         self.checkedChanged.emit(self.checked)
-
-        # 每次移动的步长为宽度的50分之一
         self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            model_type = '关'
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
-            model_type = '联想'
+        self.endX = self.width() - self.height() if self.checked else 0
         self.timer.start(5)
     def mouseMoveEvent(self, event):
         pass
     def paintEvent(self, evt):
         try:
-            # 绘制准备工作, 启用反锯齿
             painter = QPainter()
             painter.begin(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            # 绘制背景
             self.drawBg(evt, painter)
-            # 绘制滑块
             self.drawSlider(evt, painter)
-            # 绘制文字
             self.drawText(evt, painter)
             painter.end()
         except:
@@ -5947,338 +5460,50 @@ class SwitchBtn_1(QWidget):
         painter.save()
         if self.checked:
             painter.setPen(self.textColorOn)
-            painter.drawText(int(self.space * 4), 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter,self.textOn)
+            painter.drawText(int(self.space*4), 0, int(self.width()/2+self.space*2), self.height(), Qt.AlignCenter, self.textOn)
         else:
             painter.setPen(self.textColorOff)
-            painter.drawText(int(self.width() / 2), 0, int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter,self.textOff)
+            painter.drawText(int(self.width()/2), 0, int(self.width()/2-self.space), self.height(), Qt.AlignCenter, self.textOff)
         painter.restore()
     def drawBg(self, event, painter):
         painter.save()
         painter.setPen(self.edge)
-        if self.checked:
-            painter.setBrush(self.bgColorOn)
-        else:
-            painter.setBrush(self.bgColorOff)
+        painter.setBrush(self.bgColorOn if self.checked else self.bgColorOff)
         rect = QRect(0, 0, self.width(), self.height())
-        # 半径为高度的一半
         radius = rect.height() / 2
-        # 圆的宽度为高度
         circleWidth = rect.height()
         path = QPainterPath()
         path.moveTo(radius, rect.left())
         path.arcTo(QRectF(rect.left(), rect.top(), circleWidth, circleWidth), 90, 180)
-        path.lineTo(rect.width() - radius, rect.height())
-        path.arcTo(QRectF(rect.width() - rect.height(), rect.top(), circleWidth, circleWidth), 270, 180)
+        path.lineTo(rect.width()-radius, rect.height())
+        path.arcTo(QRectF(rect.width()-rect.height(), rect.top(), circleWidth, circleWidth), 270, 180)
         path.lineTo(radius, rect.top())
         painter.drawPath(path)
         painter.restore()
     def drawSlider(self, event, painter):
         painter.save()
-        if self.checked:
-            painter.setBrush(self.sliderColorOn)
-        else:
-            painter.setBrush(self.sliderColorOff)
+        painter.setBrush(self.sliderColorOn if self.checked else self.sliderColorOff)
         rect = QRect(0, 0, self.width(), self.height())
-        sliderWidth = int(rect.height() - self.space * 4)
-        sliderRect = QRect(int(self.startX + self.space * 2), self.space * 2, sliderWidth, sliderWidth)
-        painter.drawEllipse(sliderRect)
-        painter.restore()
-class SwitchBtn_2(QWidget):
-    checkedChanged = pyqtSignal(bool)
-    status_sig = pyqtSignal()
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.edge = QColor(0, 0, 0)  # 边框颜色
-        self.checked = False
-        self.bgColorOff = QColor(255, 255, 255)  # 滑动条颜色
-        self.bgColorOn = QColor(255, 255, 255)
-       
-        self.sliderColorOff = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(self.width() / 6),int(self.height() / 6))
-        # 滑块颜色
-        self.sliderColorOff.setColorAt(1, QColor('#e55f00')) # 开启状态
-        # self.sliderColorOff.setColorAt(0.8, QColor(50, 100, 0))
-        self.sliderColorOn = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(3 * self.width() / 4), int(self.height() / 2))
-        self.sliderColorOn.setColorAt(1, QColor('#19232d')) # 关闭状态
-        # self.sliderColorOn.setColorAt(0.8, QColor(255, 0, 0))
-        self.textColorOff = QColor(0, 0, 0)  # 文本颜色
-        self.textColorOn = QColor(0, 0, 0)
-        self.textOff = "撰写"  # 初始文本
-        self.textOn = "阅读"
-        self.space = 2
-        self.rectRadius = 5
-        self.step = self.width() / 50
-        self.startX = 0
-        self.endX = 0
-        self.timer = QTimer(self)  # 初始化一个定时器
-        self.timer.timeout.connect(self.updateValue)  # 计时结束调用operate()方法
-        self.status_sig.connect(self.auto_step)
-        # self.timer.start(5)  # 设置计时间隔并启动
-    def isChecked(self):
-        return self.checked
-    def to_open(self):
-        # 打开状态
-        self.checked = True
-        # self.auto_step()
-        self.status_sig.emit()
-    def to_close(self):
-        # 关闭状态
-        self.checked = False
-        # self.auto_step()
-        self.status_sig.emit()
-    def auto_step(self):
-        # 每次移动的步长为宽度的50分之一
-        self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
-        self.timer.start(5)
-    def setInitText(self, text):
-        self.textOff = text
-    def setSecondText(self, text):
-        self.textOn = text
-    def updateValue(self):
-        if self.checked:
-            if self.startX < self.endX:
-                self.startX = self.startX + self.step
-            else:
-                self.startX = self.endX
-                self.timer.stop()
-        else:
-            if self.startX > self.endX:
-                self.startX = self.startX - self.step
-            else:
-                self.startX = self.endX
-                self.timer.stop()
-        self.update()
-    def mousePressEvent(self, event):
-        global write_type
-        self.checked = not self.checked
-        # 发射信号
-        self.checkedChanged.emit(self.checked)
-
-        # 每次移动的步长为宽度的50分之一
-        self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            write_type = '阅读'
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
-            write_type = '撰写'
-        self.timer.start(5)
-    def mouseMoveEvent(self, event):
-        pass
-    def paintEvent(self, evt):
-        try:
-            # 绘制准备工作, 启用反锯齿
-            painter = QPainter()
-            painter.begin(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            # 绘制背景
-            self.drawBg(evt, painter)
-            # 绘制滑块
-            self.drawSlider(evt, painter)
-            # 绘制文字
-            self.drawText(evt, painter)
-            painter.end()
-        except:
-            pass
-    def drawText(self, event, painter):
-        painter.save()
-        if self.checked:
-            painter.setPen(self.textColorOn)
-            painter.drawText(self.space * 4, 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter,self.textOn)
-        else:
-            painter.setPen(self.textColorOff)
-            painter.drawText(int(self.width() / 2), 0, int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter,self.textOff)
-        painter.restore()
-    def drawBg(self, event, painter):
-        painter.save()
-        painter.setPen(self.edge)
-        if self.checked:
-            painter.setBrush(self.bgColorOn)
-        else:
-            painter.setBrush(self.bgColorOff)
-        rect = QRect(0, 0, self.width(), self.height())
-        # 半径为高度的一半
-        radius = rect.height() / 2
-        # 圆的宽度为高度
-        circleWidth = rect.height()
-        path = QPainterPath()
-        path.moveTo(radius, rect.left())
-        path.arcTo(QRectF(rect.left(), rect.top(), circleWidth, circleWidth), 90, 180)
-        path.lineTo(rect.width() - radius, rect.height())
-        path.arcTo(QRectF(rect.width() - rect.height(), rect.top(), circleWidth, circleWidth), 270, 180)
-        path.lineTo(radius, rect.top())
-        painter.drawPath(path)
-        painter.restore()
-    def drawSlider(self, event, painter):
-        painter.save()
-        if self.checked:
-            painter.setBrush(self.sliderColorOn)
-        else:
-            painter.setBrush(self.sliderColorOff)
-        rect = QRect(0, 0, self.width(), self.height())
-        sliderWidth = int(rect.height() - self.space * 4)
-        sliderRect = QRect(int(self.startX + self.space * 2), self.space * 2, sliderWidth, sliderWidth)
-        painter.drawEllipse(sliderRect)
-        painter.restore()
-
-class SwitchBtn_4(QWidget): # 自动补全
-    checkedChanged = pyqtSignal(bool)
-    status_sig = pyqtSignal()
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.edge = QColor(0, 0, 0)  # 边框颜色
-        self.checked = True
-        self.bgColorOff = QColor(255, 255, 255)  # 滑动条颜色
-        self.bgColorOn = QColor(255, 255, 255)
-        self.sliderColorOff = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(self.width() / 6),int(self.height() / 6))
-        # 滑块颜色
-        self.sliderColorOff.setColorAt(1, QColor('#e55f00')) # 开启状态
-        self.sliderColorOn = QRadialGradient(int(self.width() / 2), int(self.height() / 2), int(self.width() / 2), int(3 * self.width() / 4), int(self.height() / 2))
-        self.sliderColorOn.setColorAt(1, QColor('#19232d')) # 关闭状态
-        self.textColorOff = QColor(0, 0, 0)  # 文本颜色
-        self.textColorOn = QColor(0, 0, 0)
-        self.textOff = "补全"  # 初始文本
-        self.textOn = "关闭"
-        self.space = 2
-        self.rectRadius = 5
-        self.step = self.width() / 50
-        self.startX = self.width() / 20 # 初始位置
-        self.endX = 0
-        self.timer = QTimer(self)  # 初始化一个定时器
-        self.timer.timeout.connect(self.updateValue)  # 计时结束调用operate()方法
-        self.status_sig.connect(self.auto_step)
-        # self.timer.start(5)  # 设置计时间隔并启动
-    def isChecked(self):
-        return self.checked
-    def to_open(self):
-        # 打开状态
-        self.checked = True
-        # self.auto_step()
-        self.status_sig.emit()
-    def to_close(self):
-        # 关闭状态
-        self.checked = False
-        # self.auto_step()
-        self.status_sig.emit()
-    def auto_step(self):
-        # 每次移动的步长为宽度的50分之一
-        self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
-        self.timer.start(5)
-    def setInitText(self, text):
-        self.textOff = text
-    def setSecondText(self, text):
-        self.textOn = text
-    def updateValue(self):
-        if self.checked:
-            if self.startX < self.endX:
-                self.startX = self.startX + self.step
-            else:
-                self.startX = self.endX
-                self.timer.stop()
-        else:
-            if self.startX > self.endX:
-                self.startX = self.startX - self.step
-            else:
-                self.startX = self.endX
-                self.timer.stop()
-        self.update()
-    def mousePressEvent(self, event):
-        global write_auto
-        self.checked = not self.checked
-        # 发射信号
-        self.checkedChanged.emit(self.checked)
-
-        # 每次移动的步长为宽度的50分之一
-        self.step = self.width() / 40
-        # 状态切换改变后自动计算终点坐标
-        if self.checked:
-            write_auto = '关闭'
-            self.endX = self.width() - self.height()
-        else:
-            self.endX = 0
-            write_auto = '补全'
-        self.timer.start(5)
-    def mouseMoveEvent(self, event):
-        pass
-    def paintEvent(self, evt):
-        try:
-            # 绘制准备工作, 启用反锯齿
-            painter = QPainter()
-            painter.begin(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            # 绘制背景
-            self.drawBg(evt, painter)
-            # 绘制滑块
-            self.drawSlider(evt, painter)
-            # 绘制文字
-            self.drawText(evt, painter)
-            painter.end()
-        except:
-            pass
-    def drawText(self, event, painter):
-        painter.save()
-        if self.checked:
-            painter.setPen(self.textColorOn)
-            painter.drawText(int(self.space * 4), 0, int(self.width() / 2 + self.space * 2), self.height(), Qt.AlignCenter,self.textOn)
-        else:
-            painter.setPen(self.textColorOff)
-            painter.drawText(int(self.width() / 2), 0,int(self.width() / 2 - self.space), self.height(), Qt.AlignCenter,self.textOff)
-        painter.restore()
-    def drawBg(self, event, painter):
-        painter.save()
-        painter.setPen(self.edge)
-        if self.checked:
-            painter.setBrush(self.bgColorOn)
-        else:
-            painter.setBrush(self.bgColorOff)
-        rect = QRect(0, 0, self.width(), self.height())
-        # 半径为高度的一半
-        radius = rect.height() / 2
-        # 圆的宽度为高度
-        circleWidth = rect.height()
-        path = QPainterPath()
-        path.moveTo(radius, rect.left())
-        path.arcTo(QRectF(rect.left(), rect.top(), circleWidth, circleWidth), 90, 180)
-        path.lineTo(rect.width() - radius, rect.height())
-        path.arcTo(QRectF(rect.width() - rect.height(), rect.top(), circleWidth, circleWidth), 270, 180)
-        path.lineTo(radius, rect.top())
-        painter.drawPath(path)
-        painter.restore()
-    def drawSlider(self, event, painter):
-        painter.save()
-        if self.checked:
-            painter.setBrush(self.sliderColorOn)
-        else:
-            painter.setBrush(self.sliderColorOff)
-        rect = QRect(0, 0, self.width(), self.height())
-        sliderWidth = int(rect.height() - self.space * 4)
-        sliderRect = QRect(int(self.startX + self.space * 2), int(self.space * 2), sliderWidth, sliderWidth)
+        sliderWidth = int(rect.height() - self.space*4)
+        sliderRect = QRect(int(self.startX+self.space*2), int(self.space*2), sliderWidth, sliderWidth)
         painter.drawEllipse(sliderRect)
         painter.restore()
 
 class Label_Symbol(QLabel):
+    """特殊符号面板中的单个符号按钮，点击插入到当前编辑器光标处。"""
     def __init__(self,active_textcomponent,txt):
         super().__init__()
-        global_active_textcomponent = active_textcomponent
+        self.active_textcomponent = active_textcomponent
         self.setText(txt)
         self.mousePressEvent = self.insert_symbol
 
     def insert_symbol(self,event):
-        cursor = global_active_textcomponent.textCursor()
+        cursor = self.active_textcomponent.textCursor()
         lb_txt = self.text()
         cursor.insertHtml(lb_txt)
         
 class QWidget_Notop(QWidget):
+    """无边框置顶可拖拽小窗口基类，用于各类弹出面板。"""
     def __init__(self,title):
         super().__init__()
         self.dragging = False
@@ -6302,6 +5527,7 @@ class QWidget_Notop(QWidget):
             self.old_pos = event.globalPos()
 
 class OcrDropTextEdit(QTextEdit):
+    """支持拖拽文件并触发 OCR 的 QTextEdit。"""
     # 定义一个信号
     sendmsg = pyqtSignal(object)
     def __init__(self):
@@ -6351,51 +5577,117 @@ class OcrDropTextEdit(QTextEdit):
     def update_text(self,in_txt):
         self.insertPlainText('\n' + in_txt)
 
+class LineNumPaint(QWidget):
+    """行号绘制组件，与 QTextEditWithLineNum 配合显示左侧行号栏。"""
+    def __init__(self, q_edit):
+        super().__init__(q_edit)
+        self.q_edit_line_num: QTextEditWithLineNum = q_edit
+
+    def sizeHint(self):
+        return QSize(self.q_edit_line_num.lineNumberAreaWidth(), 0)
+
+    def paintEvent(self, event):
+        """ 把原来QTextEditWithLineNum.lineNumberAreaPaintEvent全部移到这里，这才是行号控件真正的paintEvent """
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), QColor("#19232d"))
+        te = self.q_edit_line_num
+        lh = te.line_height
+        first_visible_block_number = te.cursorForPosition(QPoint(0, 1)).blockNumber()
+        blockNumber = first_visible_block_number
+        block = te.document().findBlockByNumber(blockNumber)
+        top = 3
+        if blockNumber == 0:
+            additional_margin = int(te.document().documentMargin() - te.verticalScrollBar().sliderPosition() - 1)
+        else:
+            prev_block = te.document().findBlockByNumber(blockNumber - 1)
+            additional_margin = int(te.document().documentLayout().blockBoundingRect(prev_block).bottom()) - te.verticalScrollBar().sliderPosition()
+        top += additional_margin
+        bottom = top + int(te.document().documentLayout().blockBoundingRect(block).height())
+        last_block_number = te.cursorForPosition(QPoint(0, te.height() - 1)).blockNumber()
+        height = te.fontMetrics().height()
+        while block.isValid() and (top <= event.rect().bottom()) and blockNumber <= last_block_number:
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(blockNumber + 1)
+                if number != '1':
+                    if lh == 0:
+                        pass
+                    elif lh == 0.2:
+                        height += 1.8
+                    elif lh == 0.5:
+                        height += 5.6
+                    elif lh == 1.0:
+                        height += 9.6
+                    elif lh == 1.5:
+                        height += 15.5
+                    elif lh == 2.0:
+                        height += 19.5
+                    elif lh == 2.5:
+                        height += 25.0
+                    elif lh == 3.0:
+                        height += 31
+                    elif lh == 3.5:
+                        height += 35.5
+                    elif lh == 4.0:
+                        height += 39.5
+                painter.setPen(QColor('#8c9196'))
+                painter.drawText(0, int(top), int(te.lineNumberAreaWidth()), int(height), Qt.AlignCenter, number)
+            block = block.next()
+            top = bottom
+            bottom = top + int(te.document().documentLayout().blockBoundingRect(block).height())
+            blockNumber += 1
+
 class QTextEditWithLineNum(QTextEdit):
+    """带左侧行号栏的多行文本编辑器，是 Fenrir 的核心编辑组件。"""
     sendmsg = pyqtSignal(object)
     def __init__(self, parent=None):
         super().__init__(parent)
-        
         self.left_margin = 0
         self.line_draw_height = 2
-        self.max_width = 18
+        self.line_height = 0.5
+        self.max_width = 20
         self.min_width = 8
-        self.dark_color = QColor("#FB8073") # 长线条颜色
-        self.light_color = QColor("#8c9196") # 短线条颜色
-        # 光标在viewport上的Y坐标
+        self.dark_color = QColor("#FB8073")  # 长线条颜色
+        self.light_color = QColor("#8c9196")  # 短线条颜色
+        # 说明书分段标题关键词集合
+        self.section_titles = {"技术领域", "背景技术", "发明内容", "实用新型内容", "附图说明", "具体实施方式","本发明的有益效果：","本实用新型的有益效果：","附图标记说明：","实施例1","实施例2","实施例3"}
         self.cursor_vp_y = 0.0
 
-        # 动画间隔100ms持续播放
+        # wave动画参数
         self.wave_timer = QTimer(self)
-        self.wave_timer.setInterval(80)
+        self.wave_timer.setInterval(50)
         self.wave_timer.timeout.connect(self.on_wave_tick)
-        self.wave_phase = 0
-        # 18 → 8 递减8 8 →18递增，总步数：18-8 = 10，往返一轮20步
-        self.phase_cycle_len = 20
         self.wave_timer.start()
+        self.wave_phase = 0.0
+        self.phase_cycle_len = 90.0
 
         self.verticalScrollBar().valueChanged.connect(self.update)
         self.cursorPositionChanged.connect(self.update_cursor_doc_y)
         self.textChanged.connect(self.update_cursor_doc_y)
-        
-        shortcut_txt_1 = "AI功能快捷键：\nAlt+Q：AI填充\nAlt+W：AI续写\nAlt+E：AI润色\nAlt+R：概念查询\nAlt+T：文本翻译\n"
+
         shortcut_txt_2 = "模板快捷键：\nAlt+1：OA答复\nAlt+2：说明书\nAlt+3：权利要求书\nAlt+4：复审请求\nAlt+5：无效宣告请求\nAlt+6：AI撰写说明书\n"
         shortcut_txt_3 = "批量文本快捷键：\nCtrl+1：A => A1\nCtrl+2：A => A(1)\nCtrl+3：1 => A1\nCtrl+4：1 => A(1)\nCtrl+5：A1/(1) => A\nCtrl+6：A1 => A(1)\nCtrl+7：A(1) => A1\nCtrl+8：合并附图标记\nCtrl+9：提取发明内容\n"
         shortcut_txt_4 = "Ctrl+Q：提取附图标记\nCtrl+W：统一单位\nCtrl+E：统一元素符号\nCtrl+R：删除多余回车\nCtrl+T：删除空格\nCtrl+J：删除段号\nCtrl+G：增加段号\nCtrl+F：全部替换\n\nCtrl+~：自定义文本联想\nCtrl+Enter：自动补充序号/从权"
-        self.setPlaceholderText(f'{shortcut_txt_1}\n{shortcut_txt_2}\n{shortcut_txt_3}\n{shortcut_txt_4}')
+        self.setPlaceholderText(f'{shortcut_txt_2}\n{shortcut_txt_3}\n{shortcut_txt_4}')
         self.setFontPointSize(12)
         self.setUndoRedoEnabled(True)
-        # self.setLineWrapMode(QTextEdit.NoWrap)  # 不自动换行
+
+        # =========行号控件初始化 修复重点 =========
         self.lineNumberArea = LineNumPaint(self)
+        self.document().blockCountChanged.connect(self.update_line_num_width)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.verticalScrollBar().valueChanged.connect(self.lineNumberArea.update)
+        self.update_line_num_width()
+
         self.setAcceptDrops(True)
         self.strPathFile = ""
-        self.document().blockCountChanged.connect(self.update_line_num_width)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # 隐藏垂直滚动条
-        self.verticalScrollBar().valueChanged.connect(self.lineNumberArea.update)
-        # self.textChanged.connect(self.lineNumberArea.update)
-        # self.cursorPositionChanged.connect(self.lineNumberArea.update)
-        self.update_line_num_width()
         self.counter = 0
+
+    def viewportEvent(self, event: QEvent):
+        """标准QTextEdit行号实现：视口变化更新行号控件几何"""
+        result = super().viewportEvent(event)
+        cr = self.contentsRect()
+        self.lineNumberArea.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
+        return result
 
     def update_cursor_doc_y(self):
         cursor = self.textCursor()
@@ -6404,26 +5696,20 @@ class QTextEditWithLineNum(QTextEdit):
         self.update()
 
     def on_wave_tick(self):
-        self.wave_phase = (self.wave_phase + 1) % self.phase_cycle_len
-        # 【关键】定时器触发动画帧，强制重绘viewport，持续刷新动画
+        self.wave_phase = (self.wave_phase + 1.0) % self.phase_cycle_len
         self.viewport().update()
 
-    def get_wave_width(self, base_width, phase_offset):
-        total_phase = (self.wave_phase + phase_offset) % self.phase_cycle_len
-        # base_width<= 12：8~12往返动画
-        if base_width <= 8:
-            if total_phase <= 9:
-                w = 13 - total_phase * (2 / 9)
-            else:
-                w = 8 + (total_phase - 10) * (2 / 9)
-            return w
-        else:
-        # base_width >= 12 的线条参与 8~18循环
-            if total_phase <= 9:
-                w = 18 - total_phase
-            else:
-                w = 9 + (total_phase - 10)
-            return w
+    def get_wave_width(self, diff, base_width):
+        import math
+        if base_width < self.min_width:
+            base_width = self.min_width
+        total_phase = (self.wave_phase + diff) % self.phase_cycle_len
+        ratio = total_phase / self.phase_cycle_len
+        pulse = 7.0 * math.sin(2 * math.pi * ratio)
+        final_w = base_width + pulse
+        return max(self.min_width, min(self.max_width, final_w))
+            
+
     def paintEvent(self, event):
         super().paintEvent(event)
         vp = self.viewport()
@@ -6432,45 +5718,64 @@ class QTextEditWithLineNum(QTextEdit):
             return
         painter.setRenderHint(QPainter.Antialiasing, False)
         vp_rect = vp.rect()
-        line_spacing = 10  # 文本行间距，用于生成背景线条
-
+        line_spacing = 9
         cursor_vp_y = self.cursor_doc_y - self.verticalScrollBar().value()
         focus_line_idx = round(cursor_vp_y / line_spacing)
-
-        # 遍历视口内所有行，生成等间隔横线
         y = 0
         end_y = vp_rect.height()
+        first_block = self.cursorForPosition(QPoint(0, 0)).block()
+        current_block = first_block
+
+        # 标记：当前block是否已经绘制过标题特效（一个文档block只允许一次标题样式线条）
+        block_has_drawn_title_effect = False
+
         while y <= end_y:
             line_idx = round(y / line_spacing)
             diff = abs(line_idx - focus_line_idx)
+            block_text = current_block.text().strip()
+            is_title_row = any(block_text == sep for sep in self.section_titles)
 
-            base_width = self.max_width - diff
-            if base_width < self.min_width:
-                base_width = self.min_width
-
-            line_w = self.get_wave_width(base_width, phase_offset=diff)
-
-            if abs(y - cursor_vp_y) < (line_spacing / 2):
+            # 仅：是标题block，并且本block还没有输出过标题特效 → 使用标题样式
+            if is_title_row and (not block_has_drawn_title_effect):
+                base_width = self.max_width - diff
                 pen = QPen(self.dark_color, self.line_draw_height)
+                block_has_drawn_title_effect = True
             else:
-                pen = QPen(self.light_color, self.line_draw_height)
+                # 普通行 / 标题block的剩余屏幕行：完全沿用原始逻辑
+                base_width = self.max_width - diff
+                if base_width < self.min_width:
+                    base_width = self.min_width
+                if abs(y - cursor_vp_y) < (line_spacing / 2):
+                    pen = QPen(self.dark_color, self.line_draw_height)
+                else:
+                    pen = QPen(self.light_color, self.line_draw_height)
+
+            line_w = self.get_wave_width(diff, base_width)
 
             pen.setCapStyle(Qt.FlatCap)
             painter.setPen(pen)
-
             x_start = self.width() - 20
             x_end = x_start - line_w
             painter.drawLine(QPointF(x_start, y), QPointF(x_end, y))
 
             y += line_spacing
-            
+
+            # 判断：当前像素y已经超出本block的屏幕范围，则切换下一个block，并重置标记
+            block_rect = self.document().documentLayout().blockBoundingRect(current_block)
+            block_screen_bottom = block_rect.bottom() - self.verticalScrollBar().value()
+            if y >= block_screen_bottom:
+                current_block = current_block.next()
+                block_has_drawn_title_effect = False  # 新block进来，重置标记
+
         painter.end()
+
     def lineNumberAreaWidth(self):
         block_count = self.document().blockCount()
         max_value = max(1, block_count)
         d_count = len(str(max_value))
         _width = self.fontMetrics().width('9') * d_count + 5
-        return 15 #_width
+        return 15
+
     def update_line_num_width(self):
         self.setViewportMargins(self.lineNumberAreaWidth() + 5, 0, 0, 0)
 
@@ -6479,9 +5784,11 @@ class QTextEditWithLineNum(QTextEdit):
             event.accept()
         else:
             event.ignore()
+
     def dropEvent(self, event):
         self.strPathFile = event.mimeData().text().replace('file:///', '')
         self.drop_start_work()
+
     def drop_start_work(self):
         if self.strPathFile.endswith('.jpg') or self.strPathFile.endswith('.png') or self.strPathFile.endswith('.bmp') or self.strPathFile.endswith('.jpeg') or self.strPathFile.endswith('.gif'):
             try:
@@ -6496,7 +5803,6 @@ class QTextEditWithLineNum(QTextEdit):
                     height = 400
             except Exception as e:
                 print(e)
-                # 将图片转换为HTML格式，并将其插入到TextEdit中
             cursor = self.textCursor()
             html = f"<img src=\"{self.strPathFile}\" alt=\"{os.path.basename(self.strPathFile)}\" width=\"{width}\" height=\"{height}\" />"
             cursor.insertHtml(html)
@@ -6504,100 +5810,23 @@ class QTextEditWithLineNum(QTextEdit):
             self.ocr_thread = Worker_Ocr(self.strPathFile)
             self.ocr_thread.progress.connect(self.update_text)
             self.ocr_thread.start()
+
     def update_text(self,in_txt):
         self.insertPlainText('\n' + in_txt)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        cr = self.contentsRect()
-        self.lineNumberArea.setGeometry(QRect(cr.left(), cr.top(), self.lineNumberAreaWidth(), cr.height()))
-    def lineNumberAreaPaintEvent(self, event):
-        global line_height
-        painter = QPainter(self.lineNumberArea)
-        painter.fillRect(event.rect(), QColor("#19232d"))
-        # 获取首个可见文本块
-        first_visible_block_number = self.cursorForPosition(QPoint(0, 1)).blockNumber()
-        # 从首个文本块开始处理
-        blockNumber = first_visible_block_number
-        block = self.document().findBlockByNumber(blockNumber)
-        top = 3 #self.viewport().geometry().top()
-        if blockNumber == 0:
-            additional_margin = int(self.document().documentMargin() - self.verticalScrollBar().sliderPosition() - 1)
-        else:
-            prev_block = self.document().findBlockByNumber(blockNumber - 1)
-            additional_margin = int(self.document().documentLayout().blockBoundingRect(prev_block).bottom()) - self.verticalScrollBar().sliderPosition()
-        top += additional_margin
-        bottom = top + int(self.document().documentLayout().blockBoundingRect(block).height())
-        last_block_number = self.cursorForPosition(QPoint(0, self.height() - 1)).blockNumber()
-        height = self.fontMetrics().height()
-        while block.isValid() and (top <= event.rect().bottom()) and blockNumber <= last_block_number:
-            if block.isVisible() and bottom >= event.rect().top():
-                number = str(blockNumber + 1)
-                if number != '1':
-                    # top +=  int((line_height + 1)*1)
-                    if line_height == 0:
-                        pass
-                    elif line_height == 0.2:
-                        height += 1.8
-                    elif line_height == 0.5:
-                        height += 5.6
-                    elif line_height == 1.0:
-                        height += 9.6
-                    elif line_height == 1.5:
-                        height += 15.5
-                    elif line_height == 2.0:
-                        height += 19.5
-                    elif line_height == 2.5:
-                        height += 25.0
-                    elif line_height == 3.0:
-                        height += 31
-                    elif line_height == 3.5:
-                        height += 35.5
-                    elif line_height == 4.0:
-                        height += 39.5
-                painter.setPen(QColor('#8c9196'))
-                painter.drawText(0, int(top), int(self.lineNumberArea.width()), int(height), Qt.AlignCenter, number)
-            block = block.next()
-            top = bottom
-            bottom = top + int(self.document().documentLayout().blockBoundingRect(block).height())
-            blockNumber += 1
-    
-class LineNumPaint(QWidget):
-    def __init__(self, q_edit):
-        super().__init__(q_edit)
-        self.q_edit_line_num = q_edit
-    def sizeHint(self):
-        return QSize(self.q_edit_line_num.lineNumberAreaWidth(), 0)
-    def paintEvent(self, event):
-        self.q_edit_line_num.lineNumberAreaPaintEvent(event)
-
 
 version = '3.5.15'
-user = ''
-tab_count_array = []
-model_type = '联想'
-write_type = '撰写'
-write_auto = '关闭'
-global_active_textcomponent,global_active_figmark = '',''
-window_adjust = ''
-window_figeditor = ''
-window_login = ''
-window_main = ''
-rep_model = 0
 line_height = 0.5
-toggle_flag = 0 # 标记大小写转换
-expand_length = '200~400' # open('./data/expand_length.txt','r',encoding='utf-8').read()
-messages = []
-xinghuo_messages = []
-model_api = 'Doubao'
-deep_model = 'deepseek-chat'
 
 if __name__ == '__main__':
     ct = win32api.GetConsoleTitle()
     hd = win32gui.FindWindow(0, ct)
     win32gui.ShowWindow(hd, 0)
     app = QApplication(sys.argv)
-    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api='pyqt5'))#, palette=qdarkstyle.light.palette.LightPalette))
-    # window_start = Window_Start()
+    import qdarkstyle
+    app.setStyleSheet(qdarkstyle.load_stylesheet(qt_api='pyqt5'))
     window_main = MainWindow()
     window_main.show()
     app.exec_()
