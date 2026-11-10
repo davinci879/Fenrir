@@ -1,14 +1,9 @@
-PyQt5
-qtawesome
-openai
-webbrowser
-pdfplumber
-docx
-qdarkstyle
-requests
-json
-operator
-random
-win32api
-win32gui
-volcenginesdkarkruntime
+# Fenrir v3.5.15 运行依赖
+# 安装：pip install -r requirements.txt
+
+PyQt5>=5.15
+qtawesome>=1.2
+pywin32>=306; platform_system == "Windows"
+requests>=2.28
+Pillow>=9.0
+qdarkstyle>=3.2

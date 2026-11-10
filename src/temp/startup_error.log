@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "D:\sourcecode\FenrirV3.5\src\main.py", line 8252, in <module>
+    window_main = MainWindow()
+  File "D:\sourcecode\FenrirV3.5\src\main.py", line 394, in __init__
+    self.main_ui()
+    ~~~~~~~~~~~~^^
+  File "D:\sourcecode\FenrirV3.5\src\main.py", line 548, in main_ui
+    self.add_texteditors()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\sourcecode\FenrirV3.5\src\main.py", line 3645, in add_texteditors
+    self.show_cursor_menu()  # 右键菜单
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "D:\sourcecode\FenrirV3.5\src\main.py", line 4403, in show_cursor_menu
+    self.context_menu.setIconSize(QSize(16, 16))
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'QMenu' object has no attribute 'setIconSize'. Did you mean '.setBaseSize' instead of '.setIconSize'?
