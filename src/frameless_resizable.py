@@ -15,7 +15,8 @@
 * 移动靠鼠标事件：只在**非交互控件的空白区域**按下才启动拖动，不会抢走按钮
   点击、输入框光标、表格选择、符号格悬停。
 * 磁吸跟随：浮窗吸附在主窗口边缘后，主窗口移动时浮窗同步跟随（在主窗口上
-  装事件过滤器监听 Move，按吸附轴平移同样距离）；用户把浮窗拖离吸附带即脱附。
+  装事件过滤器监听 Move，按吸附轴平移同样距离）；主窗口调整高度时，吸附在
+  左右缘的浮窗顶边对齐主窗口、高度同步拉齐；用户把浮窗拖离吸附带即脱附。
 * PyQt5 的 ``nativeEvent`` 必须返回 ``(bool, int)`` 二元组；返回裸 ``int`` 会在
   每次命中测试时抛 ``TypeError``，密集的鼠标消息会把界面拖成假死。
 * 子类可覆盖 ``_drag_zone_ok()`` 限制拖动区域、``_is_drag_handle()`` 补充
@@ -70,10 +71,14 @@ class FramelessResizableMixin:
             top.installEventFilter(self)
 
     def eventFilter(self, obj, ev):
-        """主窗口移动时，已吸附（或处于吸附带内）的浮窗跟随同样的位移。"""
-        if (obj is self._snap_watch and ev.type() == QEvent.Move
-                and self.isVisible() and not self._dragging):
-            self._follow_target(ev.oldPos(), ev.pos())
+        """主窗口移动 / 缩放时，已吸附（或处于吸附带内）的浮窗跟随。"""
+        if (obj is self._snap_watch and self.isVisible() and not self._dragging):
+            t = ev.type()
+            if t == QEvent.Move:
+                self._follow_target(ev.oldPos(), ev.pos())
+            elif t == QEvent.Resize:
+                # 侧贴边的浮窗在主窗口高度变化时同步拉齐（顶边对齐）
+                self._align_height_to_target()
         return super().eventFilter(obj, ev)
 
     def _follow_target(self, old_pos, new_pos):
@@ -103,6 +108,34 @@ class FramelessResizableMixin:
         if follow_x or follow_y:
             self.move(g.left() + (dx if follow_x else 0),
                       g.top() + (dy if follow_y else 0))
+
+    def _align_height_to_target(self):
+        """侧贴边（吸在主窗口左右缘）时：顶边对齐主窗口、高度与主窗口一致。
+
+        主窗口 Resize 事件与拖动吸附松手两处调用；只在水平吸附（_snap_axis_x）
+        时生效——上下贴边的浮窗宽度不在此逻辑内。惰性检测兼容升级前已吸附、
+        从未再拖动过的浮窗（_snap_axis_x 还是 None）。
+        """
+        ax, ay = self._snap_axis_x, self._snap_axis_y
+        if ax is None or ay is None:
+            ax, ay = self._detect_snap_axes()
+            self._snap_axis_x, self._snap_axis_y = ax, ay
+        if not ax:
+            return
+        target = self._snap_target_rect()
+        if target is None:
+            return
+        g = self.frameGeometry()
+        if g.top() == target.top() and g.height() == target.height():
+            return
+        # resize() 的参数是 geometry（客户区）尺寸；无边框窗口真机上
+        # frame == geometry，但离屏/特殊平台两者有差，用差值补偿避免
+        # 每次对齐都按 frame 宽高重复放大。
+        gm = self.geometry()
+        dh = g.height() - gm.height()
+        # 无边框窗口 move 以 frame 左上角为准，move/resize 即可精确对齐
+        self.move(g.left(), target.top())
+        self.resize(gm.width(), target.height() - dh)
 
     def _detect_snap_axes(self, target_rect=None):
         """按当前几何惰性判断是否处于吸附带内（兼容升级前已吸附的浮窗）。
@@ -203,7 +236,16 @@ class FramelessResizableMixin:
     def mouseReleaseEvent(self, event):
         self._dragging = False
         self._drag_offset = None
+        self._snap_release()
         super().mouseReleaseEvent(event)
+
+    def _snap_release(self):
+        """松手后的吸附收尾：侧贴边时把高度对齐主窗口。
+
+        子类可覆盖（例如尺寸要保留用户拖出来的大小的独立窗口）。
+        """
+        if self._snap_axis_x:
+            self._align_height_to_target()
 
     # ---------------- 靠近主窗口时吸附 ----------------
     def _snap_target_rect(self):
@@ -256,4 +298,5 @@ class FramelessResizableMixin:
         if widget is not None:
             widget.setCursor(Qt.SizeAllCursor)
             widget.setToolTip('拖动空白处移动窗口 · 拖动四边 / 四角缩放 · '
-                              '靠近主窗口边缘自动吸附，吸附后随主窗口移动')
+                              '靠近主窗口边缘自动吸附，吸附后随主窗口移动、'
+                              '缩放，侧贴边时高度自动对齐')

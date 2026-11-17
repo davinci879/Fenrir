@@ -57,10 +57,15 @@ QPushButton#DialogButton {
 }
 QPushButton#DialogButton:hover { background: #34507a; border-color: #6b95e0; }
 QPushButton#DialogPrimary {
-    background: #2f6bc4; border-color: #4a8ae8; color: #ffffff; font-weight: bold;
+    min-width: 88px; padding: 6px 14px; border: 1px solid #4a8ae8;
+    border-radius: 3px; background: #2f6bc4; color: #ffffff;
+    font-size: 12px; font-weight: bold;
 }
 QPushButton#DialogPrimary:hover { background: #3a7fdd; }
-QPushButton#DialogDanger { background: #9d3b30; border-color: #c35a4b; color: #ffffff; }
+QPushButton#DialogDanger {
+    min-width: 88px; padding: 6px 14px; border: 1px solid #c35a4b;
+    border-radius: 3px; background: #9d3b30; color: #ffffff; font-size: 12px;
+}
 QPushButton#DialogDanger:hover { background: #bb483a; }
 QDialog#FenrirDialog QLineEdit, QDialog#FenrirDialog QComboBox,
 QDialog#FenrirDialog QTextEdit, QDialog#FenrirDialog QSpinBox {
@@ -86,6 +91,14 @@ QDialog#FenrirDialog QTabBar::tab {
 QDialog#FenrirDialog QTabBar::tab:selected { color: #ffffff; border-bottom: 2px solid #4a8ae8; }
 QLabel#StatValue { color: #ffffff; font-size: 12px; font-weight: bold; }
 QLabel#StatLabel { color: #a9b7c4; font-size: 12px; }
+/* 分栏字数：比主项轻一档（次级信息），色条由段色决定 */
+QLabel#StatValueSub { color: #dbe7f3; font-size: 12px; }
+QLabel#StatLabelSub { color: #93a4b4; font-size: 12px; }
+QToolButton#StatToggle {
+    background: transparent; border: none; color: #7fb0f0;
+    font-size: 11px; padding: 2px 0px; text-align: left;
+}
+QToolButton#StatToggle:hover { color: #a9cdf5; }
 QLabel#DialogHint { background: transparent; color: #8fa0b0; font-size: 11px; }
 QLabel#DialogResult { background: transparent; color: #7fc4ff; font-size: 12px; }
 """
@@ -161,11 +174,20 @@ class _TitleBar(QWidget):
 
     def mouseMoveEvent(self, e):
         if self._drag_pos is not None and e.buttons() & Qt.LeftButton:
-            self._dialog.move(e.globalPos() - self._drag_pos)
+            pos = e.globalPos() - self._drag_pos
+            # 独立窗口（收藏夹等）混入了 FramelessResizableMixin：
+            # 拖标题栏也走同一套吸附逻辑，靠近主窗口边缘自动贴齐
+            snap = getattr(self._dialog, '_snap_pos', None)
+            if callable(snap):
+                pos = snap(pos)
+            self._dialog.move(pos)
             e.accept()
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        done = getattr(self._dialog, '_snap_release', None)
+        if callable(done):
+            done()
 
 
 _BADGES = {
@@ -334,8 +356,24 @@ def collect_text_stats(text, selection=''):
 
 
 class WordCountDialog(FenrirDialog):
-    def __init__(self, parent, stats):
+    """字数统计。
+
+    sections = [(段名, 字数, 段色), ...] 时，在「字数」与「选中字数」之间
+    插入一组「分栏字数」（权利要求书 / 说明书 / 说明书摘要）。这一组可以
+    收起：点标题行折叠成一行，收起状态记进 QSettings，下次打开沿用。
+    """
+
+    SECTIONS_KEY = 'WordCount/sections_open'
+
+    def __init__(self, parent, stats, sections=None):
         super().__init__(parent, title='字数统计', kind='info', width=400)
+        self._settings = QSettings('Fenrir', 'FenrirV3.5')
+        self._section_toggle = None
+        self._section_form = None
+        self._section_rows = []
+        self._section_row = 0
+        self._sections_open = True
+        self._sections_attached = False
         group = QGroupBox('统计信息')
         form = QFormLayout(group)
         form.setLabelAlignment(Qt.AlignRight)
@@ -346,15 +384,111 @@ class WordCountDialog(FenrirDialog):
         for key in order:
             value = QLabel(f'{stats.get(key, 0):,}')
             value.setObjectName('StatValue')
-            value.setAlignment(Qt.AlignRight)
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             label = QLabel(key + '：')
             label.setObjectName('StatLabel')
             form.addRow(label, value)
+            # 三段字数紧跟在「字数」后面：先看总数、再看各段怎么分
+            if key == '字数' and sections:
+                self._add_sections(form, group, sections)
         self.add_content(group)
-        tip = QLabel('提示：单击状态栏的「字数」可随时打开此窗口。')
+        tip = QLabel('提示：单击状态栏的「字数」可随时打开此窗口；「分栏字数」'
+                     '是三段正文各自的字数（不含段名），点标题行可收起 / 展开。')
         tip.setObjectName('DialogHint')
+        tip.setWordWrap(True)
         self.add_content(tip)
         self.add_button('关闭', QDialog.Accepted, primary=True)
+        if self._section_toggle is not None:
+            saved = self._settings.value(self.SECTIONS_KEY, '1')
+            self._set_sections_open(str(saved) not in ('0', 'false', 'False'),
+                                    persist=False)
+
+    # ---------- 分栏字数 ----------
+    def _add_sections(self, form, parent, sections):
+        btn = QToolButton(parent)
+        btn.setObjectName('StatToggle')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        btn.setAutoRaise(True)
+        btn.clicked.connect(lambda: self._set_sections_open(
+            not self._sections_open))
+        form.addRow(btn)
+        self._section_toggle = btn
+        self._section_form = form
+        self._section_row = form.rowCount()   # 三行插在这个位置（标题行之后）
+        self._sections_attached = False
+
+        for label, count, color in sections:
+            row = QWidget(parent)
+            row.setObjectName('StatRowSub')
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+            lay.addStretch(1)          # 和上面的标签一样右对齐
+            chip = QLabel(row)
+            chip.setFixedSize(3, 12)
+            chip.setStyleSheet(
+                'background: %s; border: none; border-radius: 1px;'
+                % (color or '#5b6d80'))
+            name = QLabel(label + '：', row)
+            name.setObjectName('StatLabelSub')
+            lay.addWidget(chip)
+            lay.addWidget(name)
+            value = QLabel(f'{int(count or 0):,}', parent)
+            value.setObjectName('StatValueSub')
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            self._section_rows.append((row, value))
+
+    def _attach_sections(self, on):
+        """把三行塞进 / 抽出表单。
+
+        只 setVisible 是不够的：QFormLayout 仍会为隐藏行留出行距，收起后
+        标题与「选中字数」之间会空出一截。整行抽走才是真的收干净。
+        """
+        if on == self._sections_attached:
+            return
+        form = self._section_form
+        if on:
+            for i, (row, value) in enumerate(self._section_rows):
+                form.insertRow(self._section_row + i, row, value)
+                row.show()
+                value.show()
+        else:
+            # takeRow 只把整行摘下来，控件留着；removeRow 会把控件一起删掉
+            for row, value in self._section_rows:
+                form.takeRow(self._section_row)
+                row.hide()
+                value.hide()
+        self._sections_attached = bool(on)
+
+    def _set_sections_open(self, on, persist=True):
+        self._sections_open = bool(on)
+        btn = self._section_toggle
+        if btn is not None:
+            btn.setText('▾  分栏字数' if on else '▸  分栏字数（已收起）')
+            btn.setToolTip('点击收起三段字数' if on else '点击展开三段字数')
+        self._attach_sections(self._sections_open)
+        if persist:
+            self._settings.setValue(self.SECTIONS_KEY,
+                                    '1' if self._sections_open else '0')
+        self._fit()
+
+    def _fit(self):
+        """收起 / 展开后按新内容重算高度（窗口是无边框的，不会自己缩）。
+
+        刚 hide 掉那几行时，QGroupBox 自己的布局要等下一轮 LayoutRequest
+        才算完（实测约 30ms），当帧 adjustSize 拿到的是旧 sizeHint，只会
+        「不涨也不缩」；所以隔一拍再算。
+        """
+        self._fit_now()
+        QTimer.singleShot(40, self._fit_now)
+
+    def _fit_now(self):
+        try:
+            self.layout().activate()
+            self.adjustSize()
+        except Exception:
+            pass
 
 
 class SaveAsDialog(FenrirDialog):
@@ -590,7 +724,12 @@ class FindReplaceDialog(FenrirDialog):
         self.batch_left = QTextEdit()
         self.batch_left.setPlaceholderText('替换前（每行一个）')
         self.batch_right = QTextEdit()
-        self.batch_right.setPlaceholderText('替换后（每行一个）')
+        self.batch_right.setPlaceholderText('替换后（每行一个，留空表示删除）')
+        batch_hint = QLabel('左右两栏逐行一一对应；右栏某行留空＝删除对应内容，'
+                           '右栏全部留空＝删除全部。整批替换可用 Ctrl+Z 一次撤销。')
+        batch_hint.setObjectName('DialogResult')
+        batch_hint.setWordWrap(True)
+        bl.addWidget(batch_hint)
         brow = QHBoxLayout()
         brow.setSpacing(6)
         brow.addWidget(self.batch_left, 1)
@@ -598,9 +737,11 @@ class FindReplaceDialog(FenrirDialog):
         bl.addLayout(brow)
         brow2 = QHBoxLayout()
         brow2.setSpacing(6)
-        b_batch = QPushButton('执行批量替换')
+        b_batch = QPushButton('批量替换')
         b_batch.setObjectName('DialogPrimary')
         brow2.addWidget(b_batch)
+        self.chk_batch_case = QCheckBox('区分大小写')
+        brow2.addWidget(self.chk_batch_case)
         brow2.addStretch(1)
         bl.addLayout(brow2)
         bl.addStretch(1)
@@ -662,6 +803,18 @@ class FindReplaceDialog(FenrirDialog):
         if words:
             f |= QTextDocument.FindWholeWords
         return f
+
+    def _current_needle(self):
+        """当前页签对应的「查找内容」：替换页用 edit_find2，其余用 edit_find。
+
+        之前 replace_all 固定读取 edit_find.text()，而用户打开对话框时选中的
+        文本只预填到 edit_find（查找页），替换页的 edit_find2 为空。于是用户在
+        替换页看到空的查找框，只填「替换为」就点全部替换，实际却把整段预填文本
+        当查找词全部替换掉，导致正文消失。改为「所见即所用」可彻底消除该错位。
+        """
+        if self._tabs.currentIndex() == 1:
+            return self.edit_find2.text()
+        return self.edit_find.text()
 
     def _find(self, ed, text, start_cursor, backward=False):
         flags = self._flags(backward, self.chk_case.isChecked(),
@@ -745,7 +898,7 @@ class FindReplaceDialog(FenrirDialog):
 
     def replace_one(self):
         ed = self._editor_now()
-        text = self.edit_find.text()
+        text = self._current_needle()
         if ed is None or not text:
             return
         cur = ed.textCursor()
@@ -759,8 +912,11 @@ class FindReplaceDialog(FenrirDialog):
 
     def replace_all(self):
         ed = self._editor_now()
-        text = self.edit_find.text()
-        if ed is None or not text:
+        text = self._current_needle()
+        if ed is None:
+            return
+        if not text:
+            self.result.setText('请输入要查找的内容')
             return
         flags = self._flags(case=self.chk_case.isChecked(),
                             words=self.chk_words.isChecked())
@@ -778,31 +934,70 @@ class FindReplaceDialog(FenrirDialog):
         self.result.setText('已替换 %d 处' % n)
 
     def batch_replace_all(self):
-        """批量替换：左右两栏每行一对，逐对替换全文。"""
+        """批量替换：左右两栏逐行一一对应，用文档游标逐处替换全文。
+
+        旧实现直接在 toHtml() 的源码上做 str.replace，标签、属性、实体里的
+        字符也会被当成正文替换。一旦替换 '>'、'/'、'<' 等结构字符，HTML
+        被破坏，setHtml() 解析后整篇正文变空；setHtml() 还会清空文档资源，
+        内嵌图片一并丢失。现在只通过 QTextDocument.find + QTextCursor.
+        insertText 改正文，格式 / 图片 / 表格全部保留，且整批只算一次撤销。
+        """
         ed = self._editor_now()
         if ed is None:
             return
-        import re as _re
-        before = [s for s in self.batch_left.toPlainText().strip().split('\n') if s.strip()]
-        after = [s for s in self.batch_right.toPlainText().strip().split('\n') if s.strip()]
-        if not before or not after:
-            self.result.setText('请在左右两栏分别填写替换前/替换后内容')
+        before = self.batch_left.toPlainText().split('\n')
+        after = self.batch_right.toPlainText().split('\n')
+        # 左栏末尾空行不是有效规则，丢掉；右栏末尾多余的空行只裁到与左栏
+        # 对齐为止，中间空行必须保留（右栏某行留空＝删除对应内容）。
+        while before and before[-1] == '':
+            before.pop()
+        while len(after) > len(before) and after[-1] == '':
+            after.pop()
+        if not before:
+            self.result.setText('请在左栏填写替换前内容')
             return
-        if len(before) != len(after):
+        if not any(after):
+            # 右栏整体留空 = 把左栏每个词都删掉（常见的「批量删除」用法）
+            after = [''] * len(before)
+        elif len(before) != len(after):
             self.result.setText('行数不一致：左栏 %d 行，右栏 %d 行' % (len(before), len(after)))
             return
-        ed.textCursor().beginEditBlock()
-        html = ed.toHtml()
+        pairs = []
+        for i, (b, a) in enumerate(zip(before, after), 1):
+            b, a = b.rstrip('\r'), a.rstrip('\r')
+            if not b:
+                self.result.setText('第 %d 行的「替换前」不能为空' % i)
+                return
+            if b != a:                       # 相同内容跳过，避免无意义扫描
+                pairs.append((b, a))
+        if not pairs:
+            self.result.setText('没有需要替换的内容')
+            return
+        flags = self._flags(case=self.chk_batch_case.isChecked())
+        doc = ed.document()
+        cur = QTextCursor(doc)
+        cur.beginEditBlock()
         total = 0
-        for b, a in zip(before, after):
-            cnt = html.count(b)
-            if cnt:
-                html = html.replace(b, a)
-                total += cnt
-        ed.setHtml(html)
-        ed.textCursor().endEditBlock()
+        try:
+            for b, a in pairs:
+                c = QTextCursor(doc)
+                c.movePosition(QTextCursor.Start)
+                n = 0
+                while n < 5000:              # 单条规则上限，防异常输入卡死
+                    c = doc.find(b, c, flags)
+                    if c.isNull():
+                        break
+                    c.insertText(a)
+                    n += 1
+                total += n
+        finally:
+            cur.endEditBlock()
         self.clear_highlight()
-        self.result.setText('批量完成：共替换 %d 处' % total)
+        deleted = sum(1 for _, a in pairs if not a)
+        msg = '批量完成：%d 组规则，共替换 %d 处' % (len(pairs), total)
+        if deleted:
+            msg += '（其中 %d 组为删除）' % deleted
+        self.result.setText(msg)
 
     def hideEvent(self, e):
         self.clear_highlight()
@@ -851,6 +1046,10 @@ class WordStatusBar(QStatusBar):
         self.setSizeGripEnabled(False)
         self.setFixedHeight(27)
         self._overwrite = False
+        # 保存态缓存：文档的 modificationChanged / textChanged 在一次输入里
+        # 会连发几十次，状态没变就不必反复 setText + unpolish/polish（后者
+        # 会触发 QStyle 重算，是打字时无谓的主线程开销）。
+        self._saved = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(lambda: self.lbl_msg.setText('就绪'))
@@ -1101,6 +1300,10 @@ class WordStatusBar(QStatusBar):
         self.btn_words.setText(text)
 
     def set_saved(self, saved):
+        saved = bool(saved)
+        if self._saved == saved:
+            return
+        self._saved = saved
         self.lbl_saved.setText('已保存' if saved else '● 未保存')
         self.lbl_saved.setObjectName('StatusSaved' if saved else 'StatusDirty')
         self.lbl_saved.style().unpolish(self.lbl_saved)

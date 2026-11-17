@@ -18,13 +18,96 @@
 任何异常都会静默回落到 qtawesome 原始图标，绝不影响程序启动。
 """
 
-from PyQt5.QtCore import Qt, QPointF, QSize
+import hashlib
+import os
+import pickle
+import sys
+
+from PyQt5.QtCore import (Qt, QPointF, QSize, QByteArray, QBuffer,
+                          QIODevice, QTimer)
 from PyQt5.QtGui import (QBrush, QColor, QIcon, QImage, QLinearGradient,
                          QPainter, QPixmap, QRadialGradient)
 
 # 常用请求尺寸：功能区小按钮 15px、大按钮 26px、窗口图标更大。
 _SIZES = (16, 26, 64, 128)
 _CACHE = {}
+
+# ---- 跨进程磁盘缓存 -----------------------------------------------------
+# 72 个图标 × 4 尺寸 × 2 状态 = 576 张 QPixmap，qtawesome 每生成一张都要
+# 用字体重新栅格化一次（实测启动约 2.6s）。生成的位图与机器无关，缓存到
+# data/ 下后，下次启动只需解码 PNG（约 0.1s）。签名用本文件源码 + 配色表
+# + qtawesome 版本的 md5：任何影响外观的改动都会让旧缓存自动失效。
+_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'data', '.icon3d_cache.bin')
+_DISK = None            # None = 尚未读盘
+_FLUSH_PENDING = False
+
+
+def _signature():
+    try:
+        with open(__file__, 'rb') as f:
+            src = f.read()
+    except Exception:
+        src = b''
+    _q = sys.modules.get('qtawesome')
+    ver = getattr(_q, '__version__', '') if _q is not None else ''
+    tail = repr((_SIZES, _COLOR_RULES, _DEFAULT_COLOR, _DISABLED, ver)).encode()
+    return hashlib.md5(src + tail).hexdigest()
+
+
+def _disk_cache():
+    global _DISK
+    if _DISK is None:
+        _DISK = {}
+        try:
+            with open(_CACHE_PATH, 'rb') as f:
+                sig, payload = f.read().split(b'\n', 1)
+            if sig.decode('ascii') == _signature():
+                obj = pickle.loads(payload)
+                if isinstance(obj, dict):
+                    _DISK = obj
+        except Exception:
+            _DISK = {}
+    return _DISK
+
+
+def flush_icon_cache():
+    """把本次新渲染的图标一次性落盘（由延迟定时器调用，也可手动调用）。"""
+    global _FLUSH_PENDING
+    _FLUSH_PENDING = False
+    disk = _DISK
+    if not disk:
+        return
+    try:
+        os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+        blob = _signature().encode('ascii') + b'\n' + pickle.dumps(disk, protocol=4)
+        tmp = _CACHE_PATH + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(blob)
+        os.replace(tmp, _CACHE_PATH)
+    except Exception:
+        pass
+
+
+def _schedule_flush():
+    global _FLUSH_PENDING
+    if _FLUSH_PENDING:
+        return
+    _FLUSH_PENDING = True
+    try:
+        QTimer.singleShot(2500, flush_icon_cache)
+    except Exception:
+        _FLUSH_PENDING = False
+
+
+def _png_bytes(pm):
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    pm.save(buf, 'PNG')
+    buf.close()
+    return bytes(ba)
 
 # 语义配色：靠前的规则优先。只取图标名的最后一段做匹配（如 'mdi6.plus' → 'plus'）。
 _COLOR_RULES = (
@@ -193,23 +276,49 @@ def _render(raw_pm, n, shades, neutral=False, disabled=False):
 
 
 def build(raw_icon, name, explicit=None):
-    """把 qtawesome 的 QIcon 包装成 3D QIcon；失败时返回原图标。"""
+    """把 qtawesome 的 QIcon 包装成 3D QIcon；失败时返回原图标。
+
+    命中磁盘缓存时直接解码 PNG 组回 QIcon，跳过全部字体栅格化；
+    未命中才走原来的合成路径，并把结果排进延迟写盘。
+    """
     key = (str(name), str(explicit) if explicit is not None else None)
     cached = _CACHE.get(key)
     if cached is not None:
         return cached
+    disk = _disk_cache()
+    hit = disk.get(key)
+    if hit is not None:
+        try:
+            out = QIcon()
+            for n, mode, state, png in hit:
+                pm = QPixmap()
+                if not pm.loadFromData(QByteArray(png), 'PNG') or pm.isNull():
+                    raise ValueError('bad pixmap')
+                out.addPixmap(pm, QIcon.Mode(mode), QIcon.State(state))
+            if not out.isNull():
+                _CACHE[key] = out
+                return out
+        except Exception:
+            pass                     # 缓存损坏 → 回落到正常渲染并覆写
     top, mid, bottom, neutral = _semantic_color(name, explicit)
     shades = (top, mid, bottom)
     out = QIcon()
+    frames = []
+    _off = QIcon.Off
     for n in _SIZES:
-        src = raw_icon.pixmap(QSize(n, n), QIcon.Normal, QIcon.Off)
+        src = raw_icon.pixmap(QSize(n, n), QIcon.Normal, _off)
         if src.isNull():
             return raw_icon
-        out.addPixmap(_render(src, n, shades, neutral), QIcon.Normal, QIcon.Off)
+        normal = _render(src, n, shades, neutral)
         # 主动提供禁用态，避免 QStyle 差异导致禁用按钮仍显示鲜艳图标
-        out.addPixmap(_render(src, n, None, neutral, disabled=True),
-                      QIcon.Disabled, QIcon.Off)
+        disabled = _render(src, n, None, neutral, disabled=True)
+        out.addPixmap(normal, QIcon.Normal, _off)
+        out.addPixmap(disabled, QIcon.Disabled, _off)
+        frames.append((n, int(QIcon.Normal), int(_off), _png_bytes(normal)))
+        frames.append((n, int(QIcon.Disabled), int(_off), _png_bytes(disabled)))
+    disk[key] = frames
     _CACHE[key] = out
+    _schedule_flush()
     return out
 
 

@@ -10,8 +10,19 @@ from PyQt5.QtWidgets import (QCheckBox, QDialog, QFormLayout, QGridLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QSpinBox, QVBoxLayout, QWidget)
 
-import ai_check
 import word_features as wf
+
+# ai_check 会连带 import requests（~690ms）。这个对话框只在用户点开
+# 「工具 → 服务」时才构造，没必要让主程序启动就付这笔开销。
+ai_check = None
+
+
+def _ai():
+    global ai_check
+    if ai_check is None:
+        import ai_check as _mod
+        ai_check = _mod
+    return ai_check
 
 
 class AISettingsDialog(wf.FenrirDialog):
@@ -22,7 +33,7 @@ class AISettingsDialog(wf.FenrirDialog):
             detail='密钥仅保存在本机 data/settings.json；校验时正文会分片发送到该接口。'
                    '开启快速模式后单次通常只需数秒。',
             kind='info', width=620)
-        self._cfg = ai_check.load_config()
+        self._cfg = _ai().load_config()
         cfg = self._cfg
         self._worker = None
 
@@ -59,7 +70,7 @@ class AISettingsDialog(wf.FenrirDialog):
         fl.addRow('Endpoint ID', self.ed_endpoint)
 
         self.ed_base = QLineEdit(str(cfg['base_url']))
-        self.ed_base.setPlaceholderText(ai_check.BASE_URL_DEFAULT)
+        self.ed_base.setPlaceholderText(_ai().BASE_URL_DEFAULT)
         fl.addRow('接口地址', self.ed_base)
 
         # 四个数字框排成 2×2：单行塞四个会把「单批上限」「6000 字」挤到截断。
@@ -105,7 +116,7 @@ class AISettingsDialog(wf.FenrirDialog):
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(14)
         self.scope_boxes = {}
-        for key, label in ai_check.SCOPE_LABELS:
+        for key, label in _ai().SCOPE_LABELS:
             cb = QCheckBox(label)
             cb.setChecked(bool(cfg['scope'].get(key, True)))
             self.scope_boxes[key] = cb
@@ -159,7 +170,7 @@ class AISettingsDialog(wf.FenrirDialog):
             cb.setChecked(bool(cfg['scope'].get(key, True)))
 
     def _reset_defaults(self):
-        self._fill(ai_check.DEFAULT_CONFIG)
+        self._fill(_ai().DEFAULT_CONFIG)
         self._set_status('已恢复默认设置，点「保存」后生效', '#8fd0ff')
 
     def collect(self):
@@ -186,17 +197,17 @@ class AISettingsDialog(wf.FenrirDialog):
 
     def _on_test(self):
         cfg = self.collect()
-        miss = ai_check.missing_fields(cfg)
+        miss = _ai().missing_fields(cfg)
         if miss:
             self._set_status('请先填写：' + '、'.join(miss), '#f0a05a')
             return
-        if ai_check.Worker is None:
+        if _ai().Worker is None:
             self._set_status('当前环境不支持后台线程', '#f0a05a')
             return
         self._set_status('正在连接火山方舟…', '#8fd0ff')
         self._test_btn.setEnabled(False)
-        self._worker = ai_check.Worker(
-            lambda: ai_check.test_connection(cfg), self)
+        self._worker = _ai().Worker(
+            lambda: _ai().test_connection(cfg), self)
         self._worker.finished_with.connect(self._on_test_done)
         self._worker.start()
 
@@ -213,7 +224,7 @@ class AISettingsDialog(wf.FenrirDialog):
     def done(self, code):
         if code == QDialog.Accepted:
             try:
-                ai_check.save_config(self.collect())
+                _ai().save_config(self.collect())
             except Exception as e:
                 self._set_status('保存失败：%s' % e, '#f0a05a')
                 return

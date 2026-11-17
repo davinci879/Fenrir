@@ -21,6 +21,7 @@ import io
 import os
 import json
 import base64
+import html
 import struct
 import threading
 import uuid
@@ -33,7 +34,8 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, quote
 import xml.etree.ElementTree as ET
-from PIL import Image, ImageDraw
+from lxml import etree as _LXET
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # design_adjust_service.py 位于 src/，项目根目录是其父目录
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -846,6 +848,14 @@ INDEX_HTML = r'''<!DOCTYPE html>
     padding:0 7px;border-radius:7px;background:rgba(77,141,255,.15);border:1px solid rgba(77,141,255,.25);
     color:var(--neon);font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;flex:none}
 
+  /* 拖拽导入附图：悬停高亮 + 半透明覆盖提示（pointer-events:none 不干扰 drop） */
+  .figDrop{transition:border-color .15s,box-shadow .15s}
+  .figDrop.dragover{border-color:var(--neon);box-shadow:0 0 0 3px rgba(77,141,255,.18)}
+  .figDrop.dragover::after{content:'松开鼠标即可导入图片';position:absolute;inset:0;
+    display:flex;align-items:center;justify-content:center;border-radius:var(--r);
+    background:rgba(10,18,32,.80);color:var(--neon);font-size:15px;font-weight:650;
+    letter-spacing:.5px;pointer-events:none;z-index:5}
+
   .row{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end}
   .field{display:flex;flex-direction:column;gap:6px;min-width:0}
   label{font-size:12px;color:var(--muted);letter-spacing:.2px}
@@ -896,6 +906,31 @@ INDEX_HTML = r'''<!DOCTYPE html>
   button:disabled{opacity:.42;cursor:not-allowed;filter:grayscale(.35)}
   button:focus-visible{outline:2px solid rgba(77,141,255,.7);outline-offset:2px}
 
+  /* ---------- 「生成」区按钮：主操作 / 另存 PDF / 重置，三者分组 ---------- */
+  .zxGenRow{gap:12px;align-items:center}
+  .zxGenRow button{display:inline-flex;align-items:center;gap:7px}
+  .zxGenRow .zxIco{display:inline-flex;align-items:center;opacity:.95;flex:none}
+  .zxGenRow .zxIco svg{width:13px;height:13px;display:block}
+  /* 分组竖分隔线：两端淡出，替两边留出呼吸空间 */
+  .zxGenSep{flex:none;align-self:center;width:1px;height:26px;margin:0 3px;
+    background:linear-gradient(180deg,transparent,rgba(138,156,184,.6),transparent)}
+  /* 打印：走「导出/输出」的青绿色系，与蓝色主操作明确区分 */
+  button.zxOut{background:linear-gradient(180deg,rgba(37,217,138,.16),rgba(37,217,138,.08));
+    border:1px solid rgba(37,217,138,.42);color:#5fe3a6;
+    box-shadow:0 1px 2px rgba(0,0,0,.3),0 7px 18px -12px rgba(37,217,138,.9)}
+  button.zxOut:hover:not(:disabled){background:linear-gradient(180deg,rgba(37,217,138,.26),rgba(37,217,138,.14));
+    border-color:rgba(37,217,138,.66);color:#8bf2c4}
+  /* 重置：危险操作，靠右单独成组 + 红色描边 */
+  button.zxDanger{margin-left:auto;background:transparent;border:1px solid rgba(255,107,107,.34);
+    color:#f19191;box-shadow:none}
+  button.zxDanger:hover:not(:disabled){background:rgba(255,107,107,.13);
+    border-color:rgba(255,107,107,.62);color:#ffabab}
+  /* 极窄屏换行后不再硬推右侧，避免顶出一个孤零零的按钮 */
+  @media (max-width:620px){
+    button.zxDanger{margin-left:0}
+    .zxGenSep{display:none}
+  }
+
   .hint{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.7}
   .hint b{color:var(--text);font-weight:600}
   .note{font-size:12.5px;color:var(--text);border:1px solid var(--line);border-left:3px solid var(--neon);
@@ -906,6 +941,12 @@ INDEX_HTML = r'''<!DOCTYPE html>
   .msg.warn{display:block;background:rgba(243,178,60,.1);color:#ffd479;border-color:rgba(243,178,60,.32)}
   .msg.err{display:block;background:rgba(242,89,111,.1);color:#ff9dab;border-color:rgba(242,89,111,.38)}
   .msg.ok{display:block;background:rgba(61,220,151,.1);color:#7cf0c4;border-color:rgba(61,220,151,.32)}
+  /* 导入提示贴在文件选择框下，紧凑一行，避免撑高工具栏造成布局跳动 */
+  #figImportMsg{font-size:11.5px;padding:2px 4px;margin-top:2px;line-height:1.35;
+    border:none;border-radius:0;background:transparent}
+  #figImportMsg.warn{color:#ffd479}
+  #figImportMsg.err{color:#ff9dab}
+  #figImportMsg.ok{color:#7cf0c4}
 
   /* ---------- 视图卡片 ---------- */
   .views{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
@@ -962,6 +1003,23 @@ INDEX_HTML = r'''<!DOCTYPE html>
   .zxGroupTitle{display:flex;align-items:center;gap:9px;color:var(--text);font-size:12.5px;
     font-weight:650;letter-spacing:.2px;margin-bottom:11px}
   .zxGroupTitle:before{content:"";width:3px;height:13px;border-radius:2px;background:var(--neon);flex:none}
+  /* 「用当前文档信息替代」：卡片标题右侧的按钮 + 来源提示 */
+  .zxPartyBtn{margin-left:auto;flex:none;font-size:12px;font-weight:600;padding:5px 11px;
+    border-radius:7px;letter-spacing:.2px}
+  .zxPartySrc{margin-left:auto;font-size:11.5px;font-weight:400;color:var(--muted);
+    letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+  .zxPartySrc+.zxPartyBtn{margin-left:10px}
+  .zxMore{font-size:12px;color:var(--muted);line-height:1.75;margin-top:9px}
+  .zxMore b{color:var(--text);font-weight:600}
+  /* 正文区（专利名称 / 说明书 / 摘要 / 权利要求） */
+  .zxDocNote{margin-left:auto;font-size:11.5px;font-weight:400;color:var(--muted);letter-spacing:0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
+  .zxDocCnt{margin-left:8px;font-size:11px;font-weight:400;color:var(--muted);letter-spacing:0;
+    font-variant-numeric:tabular-nums}
+  .zxDocGrid{display:grid;grid-template-columns:1fr 1fr;gap:12px 14px;margin-top:12px}
+  .zxDocGrid .zxDocWide{grid-column:1/-1}
+  .zxText{width:100%;resize:vertical;line-height:1.75;font-size:12.5px;min-height:96px}
+  .zxText.filled{border-color:rgba(77,141,255,.42)}
   .zxFileRow{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:12px;
     border-bottom:1px solid var(--line);flex-wrap:wrap}
   .zxFileRow:last-child{border-bottom:none}
@@ -997,6 +1055,27 @@ INDEX_HTML = r'''<!DOCTYPE html>
   .zxInvRow .idx{color:var(--neon2);min-width:22px;text-align:center;font-size:12px;
     font-variant-numeric:tabular-nums}
   #zxDetail input[type=text]{width:100%}
+  /* 批量粘贴（申请人 / 发明人） */
+  .zxBatch{margin-top:12px;border:1px dashed var(--line);border-radius:10px;padding:9px 12px;
+    background:rgba(255,255,255,.012)}
+  .zxBatchHead{cursor:pointer;user-select:none}
+  .zxBatchToggle{color:var(--neon2);font-size:12.5px;font-weight:600}
+  .zxBatchBody{margin-top:9px}
+  .zxBatch .zxText{margin-bottom:8px}
+  .zxBatchFoot{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .zxBatchHint{font-size:12px;color:var(--muted)}
+  .zxBatchHint b{color:var(--text);font-weight:600}
+  .zxBatchHint.err{color:#ff9a9a}
+  .zxBatchHint.ok{color:#5ee0ab}
+  /* 分隔符设置（申请人 / 发明人 共用） */
+  .zxSepChips{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+  .zxSepChips button{font-size:12px;padding:5px 11px;border-radius:7px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--muted);cursor:pointer;transition:all .12s;font-family:inherit}
+  .zxSepChips button:hover{color:var(--text);border-color:var(--neon)}
+  .zxSepChips button.on{color:#06121f;background:var(--neon);border-color:var(--neon);font-weight:600}
+  .zxSepCustom{margin-top:9px;min-width:240px}
+  .zxSepPreview{margin-top:8px;font-size:11.5px;color:var(--muted);line-height:1.7}
+  .zxSepPreview b{color:var(--neon2);font-weight:600}
   .zxLayout{display:block}
   .zxMain{min-width:0}
 
@@ -1030,6 +1109,8 @@ INDEX_HTML = r'''<!DOCTYPE html>
   .zxImgCard .nm{font-size:10px;color:var(--muted);padding:5px 7px;word-break:break-all;
     border-top:1px solid var(--line);line-height:1.45;background:var(--panel2)}
   .zxImgCard .lim{font-size:10px;color:#6b7a92;padding:3px 7px;text-align:center;line-height:1.35}
+  .zxImgCard .ph{min-height:110px;display:flex;align-items:center;justify-content:center;
+    text-align:center;padding:12px 10px;font-size:11px;line-height:1.6;background:#f4f6fa;color:#5b667a}
   .zxImgCard button.ghost{border-radius:0;font-family:inherit;box-shadow:none;transform:none}
   .zxImgCard button.ghost:hover{background:rgba(77,141,255,.16)!important;color:var(--neon)!important}
   .zxImgCard .res{font-size:10px;color:var(--neon);padding:3px 7px 6px;text-align:center;
@@ -1060,6 +1141,12 @@ INDEX_HTML = r'''<!DOCTYPE html>
   .zxImgAdd:hover{border-color:var(--neon);color:var(--neon);background:rgba(77,141,255,.07)}
   .zxSubTitle{color:var(--neon2);font-size:11.5px;font-weight:600;letter-spacing:.3px;margin:14px 0 8px}
   .zxBins{padding:12px 14px;border-top:1px solid var(--line)}
+  /* 拖入替换：整行 / 整块高亮，并给出「松开就替换」的提示文字 */
+  .zxFileRow .dropTip{color:#63718a;font-size:11px;margin-left:auto;flex:none}
+  .zxFileRow.drop-on{border-color:var(--neon);background:rgba(77,141,255,.10)}
+  .zxFileRow.drop-on .dropTip{color:var(--neon)}
+  .zxBins.drop-on,.zxImgs.drop-on{background:rgba(77,141,255,.06);
+    box-shadow:inset 0 0 0 1px rgba(77,141,255,.45)}
   .zxNoImg{color:var(--muted);font-size:12.5px;padding:26px 8px;text-align:center;
     border:1px dashed var(--line);border-radius:10px}
   .zxImgModal{position:fixed;inset:0;background:rgba(4,6,12,.9);backdrop-filter:blur(6px);
@@ -1145,6 +1232,7 @@ INDEX_HTML = r'''<!DOCTYPE html>
     <button class="tab on" id="tabBtn1">调整外观图</button>
     <button class="tab" id="tabBtn2">附图标注</button>
     <button class="tab" id="tabBtn3">XML 修改</button>
+    <button class="tab" id="tabBtn5">公式截图</button>
     <button class="tab" id="tabBtn4">特征关系分析</button>
   </nav>
 </header>
@@ -1292,16 +1380,17 @@ INDEX_HTML = r'''<!DOCTYPE html>
 
 <div id="tab2" class="wrap" style="display:none">
 
-  <div class="card">
+  <div class="card figDrop" id="figDropCard">
     <h2><span class="step">1</span>导入附图并转为专利线条图</h2>
     <div class="row">
       <div class="field">
-        <label>导入图片（jpg / png / bmp，可多选）</label>
+        <label>导入图片（jpg / png / bmp，可多选，也可直接拖到此处）</label>
         <label class="filePick">
           <input type="file" id="figInput" accept=".png,.bmp,.jpg,.jpeg" multiple />
           <span class="filePickBtn">选择附图</span>
           <span class="filePickName">未选择图片</span>
         </label>
+        <span class="msg" id="figImportMsg"></span>
       </div>
       <div class="field">
         <label>线条图模式</label>
@@ -1327,7 +1416,7 @@ INDEX_HTML = r'''<!DOCTYPE html>
         <button id="figDownloadPsd">下载分层 PSD</button>
       </div>
     </div>
-    <div class="hint">线条图在浏览器本地生成：边缘检测模式（Sobel 算子）输出白底黑线的专利风格线条图；阈值模式把深色区域转为黑色块。阈值滑杆实时调整线条浓淡。</div>
+    <div class="hint">可直接把一张或多张图片拖进本卡片完成导入。线条图在浏览器本地生成：边缘检测模式（Sobel 算子）输出白底黑线的专利风格线条图；阈值模式把深色区域转为黑色块。阈值滑杆实时调整线条浓淡。</div>
   </div>
 
   <div class="card">
@@ -1350,6 +1439,10 @@ INDEX_HTML = r'''<!DOCTYPE html>
       <div class="field">
         <label>序号圆圈大小</label>
         <input type="number" id="balloonR" min="8" max="40" value="14" style="width:80px" />
+      </div>
+      <div class="field">
+        <label>箭头尺寸 (px，箭头样式)</label>
+        <input type="number" id="arrowSize" min="4" max="80" value="15" style="width:80px" />
       </div>
       <div class="field">
         <label>文字尺寸 (px)</label>
@@ -1407,10 +1500,53 @@ INDEX_HTML = r'''<!DOCTYPE html>
   </div>
 
   <div class="card" id="zxCards" style="display:none">
-    <h2><span class="step">2</span>常用信息（快捷表单）</h2>
+    <h2><span class="step">2</span>常用信息（快捷表单）
+      <span class="zxPartySrc" id="zxPartySrc"></span>
+      <button id="zxImportParty" class="ghost zxPartyBtn"
+        title="读取主界面「当前文档」的申请人 / 发明人 / 专利名称 / 说明书 / 摘要 / 权利要求，以及从收藏夹调用的委托书 JPG，直接替代本 ZIP 中的对应内容（申请人只覆盖非空项，空着的保留 XML 原值；委托书整组替换原扫描件，导入后仍可在下方逐项核对修改）">⤓ 导入所有信息</button>
+    </h2>
+    <div id="zxPartyMsg" class="msg"></div>
     <div class="zxGroup"><div class="zxGroupTitle">基本信息</div><div class="row" id="zxBase"></div></div>
-    <div class="zxGroup"><div class="zxGroupTitle">申请人（第一申请人）</div><div class="row" id="zxApp"></div></div>
-    <div class="zxGroup"><div class="zxGroupTitle" id="zxInvTitle">发明人</div><div id="zxInventors"></div></div>
+    <div class="zxGroup"><div class="zxGroupTitle">申请人（第一申请人）</div><div class="row" id="zxApp"></div><div id="zxAppMore" class="zxMore"></div>
+      <div class="zxBatch">
+        <div class="zxBatchHead"><span class="zxBatchToggle" id="zxAppBatchTgl">▸ 批量粘贴多个申请人</span></div>
+        <div class="zxBatchBody" id="zxAppBatchBody" style="display:none">
+          <textarea id="zxAppBatch" class="zxText" rows="3" placeholder="把多个申请人粘进来，用下方「批量分隔符」里选中的分隔符隔开，例如：张三、李四、王五（每行一个也可）。解析后写入第一申请人 + 其他申请人节点。"></textarea>
+          <div class="zxBatchFoot">
+            <button id="zxAppBatchBtn" class="ghost" type="button">解析并填入</button>
+            <span class="zxBatchHint" id="zxAppBatchMsg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="zxGroup" id="zxSepGroup">
+      <div class="zxGroupTitle">批量分隔符（申请人 / 发明人 共用）</div>
+      <div class="zxSepChips" id="zxSepChips">
+        <button type="button" data-sep="comma" class="on">逗号 ,</button>
+        <button type="button" data-sep="fcomma" class="on">全角逗号 ，</button>
+        <button type="button" data-sep="ideo" class="on">顿号 、</button>
+        <button type="button" data-sep="semicolon">分号 ;</button>
+        <button type="button" data-sep="fsemicolon">全角分号 ；</button>
+        <button type="button" data-sep="newline" class="on">换行</button>
+        <button type="button" data-sep="space">空格</button>
+        <button type="button" data-sep="tab">Tab</button>
+        <button type="button" data-sep="custom">自定义</button>
+      </div>
+      <input type="text" id="zxSepCustom" class="zxSepCustom" placeholder="自定义分隔符（可填多个字符，如 ；； 或 / ）" style="display:none" />
+      <div class="zxSepPreview" id="zxSepPreview"></div>
+    </div>
+    <div class="zxGroup"><div class="zxGroupTitle" id="zxInvTitle">发明人</div><div id="zxInventors"></div>
+      <div class="zxBatch">
+        <div class="zxBatchHead"><span class="zxBatchToggle" id="zxInvBatchTgl">▸ 批量粘贴多个发明人</span></div>
+        <div class="zxBatchBody" id="zxInvBatchBody" style="display:none">
+          <textarea id="zxInvBatch" class="zxText" rows="3" placeholder="把多个发明人粘进来，用上方「批量分隔符」里选中的分隔符隔开，例如：赵一、钱二、孙三（每行一个也可）。解析后第 1 人写入第一发明人，其余写入其他发明人。"></textarea>
+          <div class="zxBatchFoot">
+            <button id="zxInvBatchBtn" class="ghost" type="button">解析并填入</button>
+            <span class="zxBatchHint" id="zxInvBatchMsg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="zxGroup"><div class="zxGroupTitle">代理与委托</div><div class="row" id="zxAgent"></div><div id="zxAgents"></div><div class="row" id="zxDate"></div>
       <div id="zxPoaBox" style="display:none">
         <div class="zxSubTitle">委托书扫描件 / 图片（可替换、可增减）</div>
@@ -1419,7 +1555,36 @@ INDEX_HTML = r'''<!DOCTYPE html>
       </div>
     </div>
     <div class="zxGroup" id="zxOptGroup" style="display:none"><div class="zxGroupTitle">选项与声明（复选框）</div><div id="zxOptions"></div></div>
-    <div class="hint">快捷表单按标签自动匹配：同一信息在请求书/委托书/list.xml 等多处出现时会「同步修改 N 处」；未匹配到的字段留空并提示，可到下方「字段明细表」手动修改。省份/城市代码会显示为名称，保存时自动转回代码。</div>
+    <div class="zxGroup">
+      <div class="zxGroupTitle">专利名称 / 说明书 / 摘要 / 权利要求（正文）
+        <span class="zxDocNote" id="zxDocNote"></span>
+      </div>
+      <div class="row">
+        <div class="field" style="flex:1;min-width:260px">
+          <label>专利名称（标签名）<span class="zxDocCnt" id="zxTitleCnt"></span></label>
+          <input type="text" id="zxTitle" placeholder="识别自当前文档标签名，也可手填" />
+        </div>
+      </div>
+      <div class="zxDocGrid">
+        <div class="field">
+          <label>说明书摘要<span class="zxDocCnt" id="zxAbsCnt"></span></label>
+          <textarea id="zxDocAbs" class="zxText" rows="6"
+            placeholder="点上方「导入所有信息」自动填入，也可直接粘贴"></textarea>
+        </div>
+        <div class="field">
+          <label>权利要求书<span class="zxDocCnt" id="zxClmCnt"></span></label>
+          <textarea id="zxDocClm" class="zxText" rows="6"
+            placeholder="每行一条权利要求，保存时按顺序写入 100001.xml"></textarea>
+        </div>
+        <div class="field zxDocWide">
+          <label>说明书<span class="zxDocCnt" id="zxDscCnt"></span></label>
+          <textarea id="zxDocDsc" class="zxText" rows="12"
+            placeholder="保留「技术领域 / 背景技术 / 发明内容 / 附图说明 / 具体实施方式」小标题时按章节写入，没有小标题则按段落顺序写入"></textarea>
+        </div>
+      </div>
+      <div class="zxMore" id="zxDocMap"></div>
+    </div>
+    <div class="hint">快捷表单按标签自动匹配：同一信息在请求书/委托书/list.xml 等多处出现时会「同步修改 N 处」；未匹配到的字段留空并提示，可到下方「字段明细表」手动修改。省份/城市代码会显示为名称，保存时自动转回代码。<b>「导入所有信息」</b>读取主界面「当前文档」的申请人、发明人、专利名称与三段正文，以及从收藏夹调用的<b>委托书 JPG</b>（整组替换 100007 里的扫描件，原扫描件是 PDF 时自动转成 A4 PDF 同名替换）：<b>专利名称取当前文档的标签名</b>（不是正文首行），申请人只覆盖非空项（空着的保留 XML 原值），正文按段落/章节写入对应的 XML，导入后可在此逐段核对修改。</div>
   </div>
 
   <div class="card" id="zxTableCard" style="display:none">
@@ -1439,12 +1604,16 @@ INDEX_HTML = r'''<!DOCTYPE html>
 
   <div class="card" id="zxSaveCard" style="display:none">
     <h2><span class="step">4</span>生成</h2>
-    <div class="row">
+    <div class="row zxGenRow">
       <button id="zxSave">生成并下载修改后的 ZIP</button>
-      <button class="ghost" id="zxReset">重置全部修改</button>
+      <span class="zxGenSep" aria-hidden="true"></span>
+      <button class="zxOut" id="zxPdf"
+        title="按国知局打印稿样式排成一份 A4 PDF：请求书（110101 / 120101，含申请人、发明人、代理机构、声明勾选与申请文件清单）→ 说明书摘要 → 权利要求书 → 说明书 → 说明书附图。宋体 10.5pt、行距 1.5、代码+页码+版本页脚、说明书 [0001] 段号、附图一页三图，内容与当前修改一致"><span class="zxIco" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="13.5" width="12" height="8.5"/></svg></span>打印申请文件 PDF</button>
+      <button class="ghost zxDanger" id="zxReset">重置全部修改</button>
     </div>
     <div id="zxSaveMsg" class="msg"></div>
-    <div class="hint">只重写被修改的 XML 与替换的附件，其余文件按原始字节保留（含 DOCTYPE / xsl 样式表声明）；目录结构、内外层嵌套与文件名全部保持不变。</div>
+    <div id="zxPdfMsg" class="msg"></div>
+    <div class="hint">只重写被修改的 XML 与替换的附件，其余文件按原始字节保留（含 DOCTYPE / xsl 样式表声明）；目录结构、内外层嵌套与文件名全部保持不变。<b>「打印申请文件 PDF」</b>不会改动 ZIP，只按当前内容另出一份可直接打印/递交的 PDF，按递交顺序排：<b>请求书</b>（110101 / 120101，取自 ZIP 里的请求书 XML，含申请人、发明人、代理机构、各项声明勾选）→ 摘要 → 权利要求书 → 说明书 → 说明书附图；每份文档各自带页眉与「代码 / 页码 / 2023.03」页脚，请求书清单里的页数按本次实际排版回填。</div>
   </div>
     <datalist id="zxDivList"></datalist>
   </div><!-- /zxMain -->
@@ -1470,16 +1639,89 @@ INDEX_HTML = r'''<!DOCTYPE html>
     <div class="row" style="margin-bottom:8px;gap:8px;align-items:center">
       <button class="ghost" id="relReset">重置视角</button>
       <button class="ghost" id="relSpin">自动旋转：关</button>
-      <span style="color:#7d8fa3;font-size:12px">拖动气泡可移动节点 · 拖动空白旋转 · 滚轮缩放 · 单击节点查看关系详情 · 双击居中</span>
+      <button class="ghost" id="relTextBtn">关系文字：自动</button>
+      <button class="ghost" id="relSave">保存图片</button>
+      <span style="color:#7d8fa3;font-size:12px">拖动气泡可移动节点 · 拖动空白旋转 · 滚轮缩放 · 单击节点查看关系详情 · 双击居中 · 点右上图例只看某类关系</span>
     </div>
-    <div style="position:relative">
-      <canvas id="relCanvas" width="1200" height="680" style="width:100%;display:block;background:#0b1016;border-radius:8px;cursor:grab"></canvas>
+    <div id="relStage" style="position:relative;overflow:hidden;border-radius:8px">
+      <!-- 星空独立成层：比视口大一圈（留边 80px），视差用 CSS transform 平移（合成器完成，不重绘）；
+           闪烁与流星只重绘这一层，不牵动上层的节点与连线 -->
+      <canvas id="relSkyCv" width="1360" height="840" aria-hidden="true"
+              style="position:absolute;left:-6.6667%;top:-11.7647%;width:113.3333%;height:123.5294%;background:#04060c;pointer-events:none"></canvas>
+      <canvas id="relCanvas" width="1200" height="680" style="position:relative;width:100%;display:block;background:transparent;border-radius:8px;cursor:grab"></canvas>
       <div id="relLegend" style="position:absolute;right:14px;top:12px;font-size:12px;color:#9fb0c0;text-align:right;line-height:1.9;pointer-events:none"></div>
       <div id="relHover" style="position:absolute;left:14px;bottom:12px;font-size:12px;color:#cfe0f0"></div>
       <div id="relDetail" style="display:none;position:absolute;right:14px;bottom:12px;width:300px;max-height:64%;overflow:auto;background:rgba(10,16,22,0.93);border:1px solid #2b3b4c;border-radius:8px;padding:10px 12px"></div>
     </div>
   </div>
 </div><!-- /tab4 -->
+
+<div id="tab5" class="wrap" style="display:none">
+  <style>
+    #tab5 input[type=text]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 10px;font-size:13px}
+    #tab5 input[type=text]:focus{border-color:var(--accent,#3b82f6);outline:none}
+    #tab5 .dropzone.drag{outline:2px dashed var(--accent,#3b82f6);outline-offset:-6px;background:rgba(59,130,246,.06)}
+    #tab5 .fmPreview{background:#fbfbfa;color:#1a1a1a;border-radius:8px;padding:18px 20px;margin-top:12px;max-height:62vh;overflow:auto;line-height:1.9;font-size:14px}
+    #tab5 .fmPreview p{margin:0 0 10px}
+    #tab5 .fmInDoc{display:inline-block;vertical-align:middle;max-height:84px;max-width:240px;margin:0 3px;border:1px solid #e6e6e6;border-radius:4px;background:#fff;padding:2px 3px}
+    #tab5 .fmFormulaStrip{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin-top:6px}
+    #tab5 .fp-formula{display:inline-block;vertical-align:middle;background:#fff;border:1px solid #e3e3e3;border-radius:4px;padding:4px}
+    #tab5 .fp-formula img{max-height:54px;display:block}
+    #tab5 .fmEmpty{padding:28px;text-align:center;color:#8a94a6}
+    #tab5 .sub{font-size:12px;color:#6b7280;margin:14px 0 6px;font-weight:600}
+  </style>
+  <div class="card dropzone" id="fmDrop">
+    <h2><span class="step">1</span>选择 Word 文档</h2>
+    <div class="row">
+      <div class="field">
+        <label>或选择 / 拖入文件</label>
+        <label class="filePick">
+          <input type="file" id="fmFile" accept=".docx" />
+          <span class="filePickBtn">选择文档</span>
+          <span class="filePickName" id="fmFileName">未选择</span>
+        </label>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>图片格式</label>
+        <select id="fmFmt">
+          <option value="PNG">PNG</option>
+          <option value="JPG">JPG</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>自动裁切白边</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text)">
+          <input type="checkbox" id="fmCrop" checked /> 裁掉公式四周留白
+        </label>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="fmProcess">处理文档</button>
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button class="ghost" id="fmSaveAs" disabled>保存</button>
+      </div>
+    </div>
+    <div id="fmStatus" class="msg"></div>
+    <div class="hint">选择任意位置的 <b>.docx</b> → 自动识别公式 → 将每个公式<b>转为图片并替换到原文位置</b>：图片型公式直接提取；矢量公式（OMML）由内置数学排版引擎渲染为高清图片（花体、上下标、括号等按 Word 样式还原，本机无 Word/LibreOffice 也可用）。点「处理文档」后下方<b>预览整合文档</b>，再点「保存」下载替换后的新文档。支持把 .docx 直接拖到本卡片。</div>
+  </div>
+
+  <div class="card" id="fmResultCard" style="display:none">
+    <h2><span class="step">2</span>处理结果 · 文档预览</h2>
+    <div class="row" style="margin-bottom:12px;align-items:center">
+      <span class="badge" id="fmStats"></span>
+      <span style="flex:1"></span>
+    </div>
+    <div class="sub">整合文档预览（公式已替换为图片，按原位置内联）</div>
+    <div id="fmPreview" class="fmPreview"></div>
+    <div class="sub" id="fmStripSub" style="display:none">替换后的公式图片（共 <span id="fmStripN">0</span> 个）</div>
+    <div id="fmFormulaStrip" class="fmFormulaStrip"></div>
+  </div>
+</div><!-- /tab5 -->
+
 
 <script>
 "use strict";
@@ -1880,19 +2122,143 @@ function syncFilePick(id){
 
 /* ---------- 标签页切换 ---------- */
 function showTab(n){
-  for(let i=1;i<=4;i++){
+  for(let i=1;i<=5;i++){
     const el=$('tab'+i); if(el) el.style.display = n===i ? '' : 'none';
     const btn=$('tabBtn'+i); if(btn) btn.classList.toggle('on', n===i);
   }
   /* 把当前标签写进地址栏，刷新后仍停留在该标签 */
   try{ history.replaceState(null,'',location.pathname+'?tab='+n); }catch(e){}
   if(n===2 && fig && fig.work) redrawFig();
-  if(n===4 && relGraph.hasData) relDraw();
+  if(n===4 && relGraph.hasData){ relRender(); relSkyKick(); relAmbStart(); }
 }
 $('tabBtn1').addEventListener('click',()=>showTab(1));
 $('tabBtn2').addEventListener('click',()=>showTab(2));
 $('tabBtn3').addEventListener('click',()=>showTab(3));
+$('tabBtn5').addEventListener('click',()=>showTab(5));
 $('tabBtn4').addEventListener('click',()=>showTab(4));
+
+/* ---------- 标签页5：公式转图片（Word → 公式原位替换为图片 → 导出 .docx） ---------- */
+let fmDocB64 = '';
+let fmBaseName = 'document.docx';
+let fmImages = [];
+let fmDroppedFile = null;
+const fmFileEl = $('fmFile'), fmFileNameEl = $('fmFileName'),
+      fmFmtEl = $('fmFmt'), fmCropEl = $('fmCrop'), fmProcessEl = $('fmProcess'),
+      fmStatusEl = $('fmStatus'), fmResultCardEl = $('fmResultCard'),
+      fmStatsEl = $('fmStats'), fmPreviewEl = $('fmPreview'),
+      fmSaveAsEl = $('fmSaveAs');
+
+fmFileEl.addEventListener('change', () => {
+  fmDroppedFile = fmFileEl.files.length ? fmFileEl.files[0] : null;
+  fmFileNameEl.textContent = fmDroppedFile ? fmDroppedFile.name : '未选择';
+});
+
+/* 拖拽 .docx 到卡片：自动填入文件并提示 */
+(function(){
+  const dz = $('fmDrop');
+  if (!dz) return;
+  let depth = 0;
+  const hasDocx = e => {
+    const dt = e.dataTransfer; if (!dt) return false;
+    const types = dt.types ? [...dt.types] : [];
+    if (types.indexOf('Files') < 0) return false;
+    const f = dt.files && dt.files[0];
+    return !!f && /\.docx$/i.test(f.name || '');
+  };
+  dz.addEventListener('dragenter', e => { if (!hasDocx(e)) return; e.preventDefault(); depth++; dz.classList.add('drag'); });
+  dz.addEventListener('dragover', e => { if (!hasDocx(e)) return; e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', e => { depth = Math.max(0, depth - 1); if (!depth) dz.classList.remove('drag'); });
+  dz.addEventListener('drop', e => {
+    if (!hasDocx(e)) return;
+    e.preventDefault(); depth = 0; dz.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    fmDroppedFile = f;
+    fmFileNameEl.textContent = f.name; fmFileNameEl.classList.add('set');
+  });
+})();
+
+fmProcessEl.addEventListener('click', async () => {
+  const f = fmDroppedFile || fmFileEl.files[0];
+  if (!f) { fmStatusEl.textContent = '请先选择或拖入 .docx 文档'; fmStatusEl.style.color = '#ff8a8a'; return; }
+  fmStatusEl.textContent = '正在识别公式并转为图片（替换原位置）…'; fmStatusEl.style.color = '';
+  fmProcessEl.disabled = true;
+  fmSaveAsEl.disabled = true;
+  try {
+    let docx = null;
+    if (f) {
+      docx = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(',')[1] || '');
+        r.onerror = () => rej(r.error || new Error('读取失败'));
+        r.readAsDataURL(f);
+      });
+    }
+    const r = await fetch(API + '/api/formula_process', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({docx: docx || undefined, fmt: fmFmtEl.value, autocrop: fmCropEl.checked})
+    });
+    const data = await r.json();
+    if (data.error) { fmStatusEl.textContent = '失败：' + data.error; fmStatusEl.style.color = '#ff8a8a'; return; }
+    fmDocB64 = data.doc; fmImages = data.images || [];
+    fmBaseName = (f && f.name) || 'document.docx';
+    renderFormulaResult(data.report, data.preview);
+    fmResultCardEl.style.display = '';
+    fmSaveAsEl.disabled = false;
+    fmStatusEl.textContent = '处理完成，公式已转为图片并替换到原位置。'; fmStatusEl.style.color = '#7fe0a3';
+  } catch (e) {
+    fmStatusEl.textContent = '出错：' + e; fmStatusEl.style.color = '#ff8a8a';
+  } finally { fmProcessEl.disabled = false; }
+});
+
+function renderFormulaResult(report, previewHtml) {
+  fmStatsEl.textContent = '段落 ' + report.paragraphs + ' · 公式图片 ' + report.formulas
+    + ' · 矢量公式 ' + report.omml + ' · 共替换 ' + report.replaced;
+  // 主预览：整合文档（公式已内联替换）
+  if (previewHtml && previewHtml.trim()) {
+    fmPreviewEl.innerHTML = previewHtml;
+  } else {
+    fmPreviewEl.innerHTML = '<div class="fmEmpty">无法生成文档预览（仅显示公式图片）。</div>';
+  }
+  // 次预览：公式图片清单
+  const strip = $('fmFormulaStrip'), sub = $('fmStripSub');
+  strip.innerHTML = '';
+  if (fmImages.length) {
+    sub.style.display = ''; $('fmStripN').textContent = fmImages.length;
+    fmImages.forEach((b, i) => {
+      const span = document.createElement('span'); span.className = 'fp-formula';
+      const img = document.createElement('img');
+      img.src = b.thumb;
+      img.title = '#' + (i + 1) + ' ' + (b.kind === 'omml' ? '矢量公式(占位)' : '公式') + ' ' + b.w + '×' + b.h;
+      span.appendChild(img); strip.appendChild(span);
+    });
+  } else {
+    sub.style.display = 'none';
+  }
+}
+
+fmSaveAsEl.addEventListener('click', () => {
+  if (!fmDocB64) return;
+  let base = fmBaseName;
+  if (base.toLowerCase().endsWith('.docx')) base = base.slice(0, -5);
+  const blob = b64toBlob(fmDocB64, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = base + '_公式转图.docx';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  fmStatusEl.textContent = '已触发下载（请在浏览器中择位置保存）。'; fmStatusEl.style.color = '#7fe0a3';
+});
+
+function b64toBlob(b64, type) {
+  const bin = atob(b64); const len = bin.length;
+  const arr = new Uint8Array(len);
+  for (let i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], {type: type});
+}
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
 
 /* ---------- 标签页2：附图标注（多附图：每张图一个独立编辑区） ---------- */
 let fig=null;          // 当前编辑的附图页
@@ -1903,21 +2269,95 @@ function figMsg(t,type){
   if(fig && fig.msgEl){ fig.msgEl.textContent=t; fig.msgEl.className='msg '+(type||''); }
 }
 
-$('figInput').addEventListener('change',e=>{
-  const fs=[...(e.target.files||[])];
-  e.target.value='';
-  if(!fs.length) return;
-  let done=0;
+/* 导入附图：文件选择与拖拽共用同一条处理链。
+   只收图片，过滤掉拖进来的目录 / 无关文件；非图片全部忽略并提示。 */
+function figImportMsg(t,type){
+  // 首次导入时 fig 还是 null，figMsg 无处可写；这里给一个独立的提示位
+  const el=$('figImportMsg');
+  if(el){ el.textContent=t; el.className='msg '+(type||''); }
+}
+function importFigFiles(files){
+  const fs=[...files].filter(f=>/\.(jpe?g|png|bmp)$/i.test(f.name||'')
+                              || (f.type && f.type.indexOf('image/')===0));
+  if(!fs.length){
+    figMsg('未找到可导入的图片（支持 jpg / png / bmp）。','warn');
+    figImportMsg('未找到可导入的图片（支持 jpg / png / bmp）。','warn');
+    return;
+  }
+  figImportMsg('');
+  // 拖拽不经过 input.files，这里同步一次文件名显示
+  const nm=$('figInput').parentElement.querySelector('.filePickName');
+  if(nm){
+    nm.textContent = fs.length===1 ? fs[0].name : fs.length+' 张图片';
+    nm.classList.add('set');
+  }
+  let done=0, ok=0;
   for(const f of fs){
     const img=new Image();
     img.onload=()=>{
       addFigPage(f.name, img);
-      if(++done===fs.length) figMsg('已导入 '+fs.length+' 张附图，点击附图区域切换编辑。','ok');
+      ok++;
+      if(++done===fs.length){
+        const t='已导入 '+ok+' 张附图，点击附图区域切换编辑。';
+        figMsg(t,'ok'); figImportMsg(t,'ok');
+      }
     };
-    img.onerror=()=>{ done++; figMsg('图片加载失败：'+f.name,'err'); };
+    img.onerror=()=>{
+      done++;
+      const t='图片加载失败：'+f.name;
+      figMsg(t,'err'); figImportMsg(t,'err');
+    };
     img.src=URL.createObjectURL(f);
   }
+}
+
+$('figInput').addEventListener('change',e=>{
+  importFigFiles(e.target.files||[]);
+  e.target.value='';          // 允许重复选择同一文件
 });
+// 覆盖在控件上的 file input 会原生接收拖放并再触发一次 change；
+// 拦掉它的默认动作，所有拖放统一交给卡片的 drop 处理，避免重复导入。
+$('figInput').addEventListener('drop',e=>{ e.preventDefault(); });
+
+/* 拖拽导入：整张「导入附图」卡片都是放置区。depth 计数防止
+   鼠标掠过子元素时 dragenter/dragleave 反复触发导致高亮闪烁。 */
+(function(){
+  const card=$('figDropCard');
+  if(!card) return;
+  let depth=0;
+  const hasFiles=e=>{
+    const dt=e.dataTransfer;
+    if(!dt) return false;
+    const types=dt.types?[...dt.types]:[];
+    return types.indexOf('Files')>=0;
+  };
+  card.addEventListener('dragenter',e=>{
+    if(!hasFiles(e)) return;
+    e.preventDefault(); depth++;
+    card.classList.add('dragover');
+  });
+  card.addEventListener('dragover',e=>{
+    if(!hasFiles(e)) return;
+    e.preventDefault();
+    if(e.dataTransfer) e.dataTransfer.dropEffect='copy';
+    card.classList.add('dragover');
+  });
+  card.addEventListener('dragleave',e=>{
+    depth=Math.max(0,depth-1);
+    if(!depth) card.classList.remove('dragover');
+  });
+  card.addEventListener('drop',e=>{
+    if(!hasFiles(e)) return;
+    e.preventDefault(); depth=0;
+    card.classList.remove('dragover');
+    const dt=e.dataTransfer;
+    const files=dt && dt.files ? [...dt.files] : [];
+    if(files.length) importFigFiles(files);
+  });
+  // 拖到页面其它位置时，别让浏览器直接导航去打开图片
+  document.addEventListener('dragover',e=>{ if(hasFiles(e)) e.preventDefault(); });
+  document.addEventListener('drop',e=>{ if(hasFiles(e)) e.preventDefault(); });
+})();
 
 function addFigPage(name, img){
   const id=++figSeq;
@@ -2119,9 +2559,15 @@ function drawMark(ctx, m, s, ts, font, part){
       ctx.textAlign='left'; ctx.textBaseline='alphabetic';
     }
   }else if(m.style==='arrow'){
-    // 箭头标注：镂空箭头指向被标注位置（起点），直线引出
+    // 箭头标注：镂空箭头指向被标注位置（起点），直线引出。
+    // 「箭头尺寸」调节箭头头部长度与线宽：默认 15 与旧版外观一致，
+    // 调小得到细线小箭头，调大得到粗线大箭头；PSD 分层导出时读同一设置。
     if(part!=='text'){
-      const ah=Math.max(9*s, Math.min(15*s, len*0.35));
+      const asz=Math.max(4,Math.min(80,
+        parseFloat((window.$('arrowSize')||{value:15}).value)||15));
+      ctx.lineWidth=Math.max(0.5, Math.min(3*s, 2*s*asz/15));
+      // 下限也随尺寸缩放（默认 15 时 = 9*s，与旧版完全一致）
+      const ah=Math.max(asz*s*0.6, Math.min(asz*s, len*0.35));
       const bx=x0+ux*ah, by=y0+uy*ah;              // 箭头底边中心（沿箭身方向回退）
       ctx.beginPath();
       ctx.moveTo(x0,y0);                            // 箭头尖端 = 被标注位置
@@ -2245,11 +2691,24 @@ function snapStd(p, from){
   return p;
 }
 
+/* 自动编号 = 「上一个编号」+1：取标注列表中最后一条数字编号。
+   刻意不扫描全表取最大值 —— 在右侧列表把中间某条改成大编号、或删除标注时，
+   下一个自动编号仍顺着列表末尾继续，不会被最大值带跑。 */
+function recalcNextNum(){
+  for(let i=fig.marks.length-1;i>=0;i--){
+    const lb=fig.marks[i].label;
+    if(/^\d+$/.test(lb)){ fig.nextNum=parseInt(lb,10)+1; return; }
+  }
+  // 剩的全是自定义文本：文本也占一个号（completeMark 里 nextNum++），
+  // 保留计数器进度，不回退到 1 造成重号
+}
+
 function completeMark(p){
   let label=$('markLabel').value.trim();
   if(!label){ label=String(fig.nextNum); }
-  // 每次标记完成后数字自动 +1；自定义文本用完即清空，下次恢复自动编号
-  if(/^\d+$/.test(label)) fig.nextNum=Math.max(fig.nextNum, parseInt(label,10)+1);
+  // 自动编号只跟「上一个编号」走：刚标的这条数字 +1，不再取全表最大值。
+  // 自定义文本用完即清空，下次恢复自动编号（沿用原有的占号行为）。
+  if(/^\d+$/.test(label)) fig.nextNum=parseInt(label,10)+1;
   else fig.nextNum++;
   $('markLabel').value='';
   const style=$('markStyle').value;
@@ -2286,12 +2745,14 @@ document.addEventListener('keydown',e=>{
   $('figThreshLab').textContent = $('figMode').value==='edge' ? '边缘阈值' : '黑/白阈值';
   processFig();
 }));
-// 标注全局参数变化 → 实时重绘
-['textSize','balloonR','fontFam','landLen'].forEach(id=>$(id).addEventListener('input',redrawFig));
+// 标注全局参数变化 → 实时重绘（含箭头尺寸）
+['textSize','balloonR','fontFam','landLen','arrowSize'].forEach(id=>{
+  const el=$(id); if(el) el.addEventListener('input',redrawFig);
+});
 function undoMark(){
   if(!fig.marks.length) return;
-  const m=fig.marks.pop();
-  if(/^\d+$/.test(m.label) && parseInt(m.label,10)===fig.nextNum-1) fig.nextNum--;
+  fig.marks.pop();
+  recalcNextNum();          // 按剩余列表里最后一条数字编号 +1
   syncMarkTable(); redrawFig(); figMsg('已撤销上一个标注。','');
 }
 $('figUndo').addEventListener('click',undoMark);
@@ -2322,7 +2783,7 @@ function syncMarkTable(){
       const v=inp.value.trim();
       if(!v) return;                     // 不允许清空编号
       m.label=v;
-      if(/^\d+$/.test(v)) fig.nextNum=Math.max(fig.nextNum, parseInt(v,10)+1);
+      recalcNextNum();                   // 只跟列表最后一条数字编号 +1
       redrawFig();
     });
     td2.appendChild(inp);
@@ -2333,12 +2794,9 @@ function syncMarkTable(){
     del.style.cssText='background:none;border:none;color:inherit;cursor:pointer;opacity:.6;font-size:12px';
     del.addEventListener('click',()=>{
       fig.marks.splice(i,1);
-      // 重新计算自动编号：取现有数字编号最大值 +1
-      let mx=0;
-      for(const mm of fig.marks){ if(/^\d+$/.test(mm.label)) mx=Math.max(mx,parseInt(mm.label,10)); }
-      fig.nextNum=mx+1;
+      recalcNextNum();                   // 按剩余列表最后一条数字编号 +1
       syncMarkTable(); redrawFig();
-      figMsg('已删除标注 '+i+1+'。','');
+      figMsg('已删除标注 '+(i+1)+'。','');
     });
     td3.appendChild(del);
     tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
@@ -2487,13 +2945,25 @@ const zxState = {
   sid:null, fname:'', fields:[], files:[], images:[],
   edits:{},               // id -> 修改后的值（字段明细表为唯一真源）
   sections:{},            // inventors / agents 草稿
+  docs:{                  // 专利名称 / 说明书 / 摘要 / 权利要求 正文
+    title:'', desc:'', abs:'', claims:'',
+    base:{title:'', desc:'', abs:'', claims:''},
+    dirty:{title:false, desc:false, abs:false, claims:false},
+  },
   fileReplace:{},         // key -> {name, dataB64}
   imgDelete:new Set(),    // 待删除的图片/附件 key
   imgAdd:[],              // [{key, dir, name, size, dataB64, thumb, info, _added:true}]
 };
 const $zxMsg = m => { const el=$('zxStatus'); el.className='msg '+(m.t||''); el.textContent=m.s||''; };
 const $zxSaveMsg = m => { const el=$('zxSaveMsg'); el.className='msg '+(m.t||''); el.textContent=m.s||''; };
+const $zxPdfMsg = m => { const el=$('zxPdfMsg'); if(!el) return; el.className='msg '+(m.t||''); el.textContent=m.s||''; };
+const $zxPartyMsg = m => { const el=$('zxPartyMsg'); if(!el) return; el.className='msg '+(m.t||''); el.textContent=m.s||''; };
 const zxLast = seg => seg.replace(/\[\d+\]$/,'');   // 路径段去 [序号]
+/* 字段当前应显示的值：有待提交的修改就用修改值，否则用 XML 原值。
+   渲染函数统一走这里，重新渲染（如「用当前文档信息替代」之后）才不会把
+   刚写入的值又显示回原值。 */
+const zxEditVal = f => Object.prototype.hasOwnProperty.call(zxState.edits, f.id)
+  ? zxState.edits[f.id] : f.value;
 
 /* ---- 省/市 代码 ↔ 名称映射（GB/T 2260 省级 + 地级） ---- */
 const ZX_DIV = {
@@ -2562,19 +3032,273 @@ const ZX_DOC_ORDER = ['draw','abs','brief','pic','other'];
 // 请求书字段并入「常用信息」快捷表单，委托书图片并入「代理与委托」，
 // 权利要求书与说明书正文篇幅长、通常无需逐字段核对，默认不在此列出。
 const ZX_DOC_HIDDEN = ['req','poa','claims','desc'];
+// 这些分组允许「整块区域拖入」：说明书附图（图）、委托书（扫描件 / 图）
+const ZX_DROP_DOCS = ['draw','poa','pic'];
 
 // 文件逻辑路径（去掉外层 ZIP 前缀）
 function zxInnerPath(key){ return key.split('>').pop(); }
 // 取文档目录 6 位代码（如 100001 / 130101）
 function zxDocCode(key){
   const p = zxInnerPath(key);
-  const m = p.match(/\/(\d{6})\//);
+  // ZIP 里可能有一层/多层外层目录，也可能直接是 100002/xxx.xml，两种都要认
+  const m = p.match(/(?:^|\/)(\d{6})\//);
   return m ? m[1] : null;
 }
 function zxDocKey(key){
   const code = zxDocCode(key);
   if(code){ const d = ZX_DOCS.find(x=>x.codes.includes(code)); if(d) return d.key; }
   return 'other';
+}
+
+/* ==================== 正文（专利名称 / 说明书 / 摘要 / 权利要求） ====================
+   XML 里这些文档是按「章节标签」或「段落节点」存的。这里把叶节点按章节分组：
+   有「技术领域 / 背景技术 / 发明内容 / 附图说明 / 具体实施方式」小标题时按章节
+   写入，没有小标题（权要、摘要，或整篇就是一个大段落）时按顺序逐节点写入。
+   只改叶节点的文字，不动节点结构，保证 XML 仍然合法。 */
+const ZX_SECS = ['技术领域','背景技术','发明内容','实用新型内容','附图说明','具体实施方式'];
+const ZX_SEC_ALIAS = {'所属技术领域':'技术领域','发明所属技术领域':'技术领域',
+                      '实用新型内容':'发明内容'};
+
+function zxCanonSec(s){
+  let t = String(s||'').trim();
+  if(!t) return '';
+  t = t.replace(/^【/,'').replace(/】$/,'').replace(/^[\[（(]/,'').replace(/[\]）)]$/,'');
+  t = t.replace(/^[一二三四五六七八九十\d]{1,3}\s*[、.．)）]\s*/,'').replace(/[：:]+$/,'').trim();
+  if(ZX_SEC_ALIAS[t]) return ZX_SEC_ALIAS[t];
+  return ZX_SECS.indexOf(t) >= 0 ? t : '';
+}
+
+/* 取某类文档的叶节点字段；「发明名称」单独由专利名称输入框负责，不进正文 */
+function zxDocLeaves(key){
+  return (zxState.fields||[]).filter(f => zxDocKey(f.file) === key
+    && ['发明名称', '发明创造名称']
+        .indexOf(zxLast(f.path.split('/').pop())) < 0);
+}
+
+/* 叶节点按「章节 / 顶层标签」分组：groups=[{name, tag, leaves}] */
+function zxDocGroups(key){
+  const groups=[], map={};
+  for(const f of zxDocLeaves(key)){
+    const p = f.path.split('/');
+    let name='', gid='';
+    for(let i=1;i<p.length;i++){
+      const c = zxCanonSec(zxLast(p[i]));
+      if(c){ name=c; gid='s:'+c; break; }
+    }
+    if(!gid) gid = 't:' + zxLast(p[1]||'');
+    if(!map[gid]){ map[gid]={name, tag:zxLast(p[1]||''), leaves:[], buf:null}; groups.push(map[gid]); }
+    map[gid].leaves.push(f);
+  }
+  return groups;
+}
+
+/* XML 现有正文 → 文本框（章节标题单独成行，便于来回切换不丢结构） */
+function zxDocTextFromXml(key){
+  const lines=[];
+  for(const g of zxDocGroups(key)){
+    if(g.name) lines.push(g.name);
+    for(const f of g.leaves){
+      const v = String(f.value||'').trim();
+      if(v) lines.push(v);
+    }
+  }
+  return lines.join('\n');
+}
+
+function zxTitleLeaves(){
+  return (zxState.fields||[]).filter(f => ['发明名称', '发明创造名称']
+    .indexOf(zxLast(f.path.split('/').pop())) >= 0);
+}
+
+/* 解析完 ZIP：用 XML 现有正文填文本框，作为「未修改」的基线 */
+function zxDocInit(){
+  const d = zxState.docs;
+  d.base = {
+    title: String((zxTitleLeaves()[0]||{value:''}).value || '').trim(),
+    desc: zxDocTextFromXml('desc'),
+    abs: zxDocTextFromXml('abs'),
+    claims: zxDocTextFromXml('claims'),
+  };
+  for(const k of ['title','desc','abs','claims']){
+    d[k] = d.base[k];
+    d.dirty[k] = false;
+  }
+  zxDocPaint(true);
+}
+
+const ZX_DOC_UI = [
+  {k:'title',  id:'zxTitle',   cnt:'zxTitleCnt', label:'专利名称'},
+  {k:'desc',   id:'zxDocDsc',  cnt:'zxDscCnt',   label:'说明书'},
+  {k:'abs',    id:'zxDocAbs',  cnt:'zxAbsCnt',   label:'说明书摘要'},
+  {k:'claims', id:'zxDocClm',  cnt:'zxClmCnt',   label:'权利要求书'},
+];
+
+function zxDocPaint(fromState){
+  for(const it of ZX_DOC_UI){
+    const el = $(it.id); if(!el) continue;
+    if(fromState) el.value = zxState.docs[it.k] || '';
+    const v = el.value || '';
+    const c = $(it.cnt);
+    if(c){
+      if(!v.trim()) c.textContent = '';
+      else if(it.k === 'title') c.textContent = '（' + v.trim().length + ' 字）';
+      else c.textContent = '（' + v.split('\n').filter(s=>s.trim()).length + ' 段 · '
+        + v.replace(/\s/g,'').length + ' 字）';
+    }
+    el.classList.toggle('filled', !!zxState.docs.dirty[it.k] && !!v.trim());
+  }
+  zxDocMapPaint();
+}
+
+/* 输入框 → 状态（保存前再同步一次，确保没有漏掉的事件） */
+function zxDocSync(){
+  for(const it of ZX_DOC_UI){
+    const el = $(it.id);
+    if(el) zxState.docs[it.k] = el.value;
+  }
+}
+
+/* 把文本框按段落分配到叶节点；多出的段落并入末节点，多出的节点清空 */
+function zxDocAssign(leaves, blocks, plan){
+  for(let i=0;i<leaves.length;i++){
+    const f = leaves[i];
+    let v = '';
+    if(i < blocks.length){
+      v = (i === leaves.length - 1) ? blocks.slice(i).join('\n') : blocks[i];
+    }else if(String(f.value||'').trim()){
+      plan.stats.cleared++;
+    }
+    if(String(f.value||'') === v) continue;
+    plan.edits[f.id] = v;
+    plan.stats.changed++;
+  }
+  if(blocks.length > leaves.length) plan.stats.merged += blocks.length - leaves.length;
+}
+
+/* 正文文本 → 段落数组（按行切，去掉空行与行尾空白） */
+function zxBlocks(text){
+  return String(text||'').replace(/\r/g,'').split('\n')
+    .map(s=>s.replace(/\s+$/,'')).filter(s=>s.trim());
+}
+
+/* 去掉标题开头的「实用新型-」「发明-」等类型前缀（与主程序同一口径） */
+function zxStripKind(t){
+  let s = String(t==null ? '' : t).trim();
+  const re = /^(?:[\(\[【（]\s*(?:发明|实用新型|外观设计)\s*[\)\]】）]\s*[-－—–~～_:：、,，.。·|]?\s*|(?:发明|实用新型|外观设计)(?:专利|申请|专利申请)?\s*[-－—–~～_:：、,，.。·|]\s*)/;
+  for(let i=0;i<3;i++){
+    const n = s.replace(re, '');
+    if(n === s || !n.trim()) break;
+    s = n.trim();
+  }
+  return s;
+}
+
+/* 正文文本 → {edits}：有章节小标题按章节，否则按叶节点顺序 */
+function zxPlanDoc(key, text){
+  const groups = zxDocGroups(key);
+  const st = {nodes:0, paras:0, changed:0, cleared:0, merged:0, sections:''};
+  const plan = {edits:{}, stats:st};
+  if(!groups.length) return plan;
+  groups.forEach(g=>{ st.nodes += g.leaves.length; });
+  const blocks = zxBlocks(text);
+  st.paras = blocks.length;
+  if(!blocks.length) return plan;
+
+  const byName={};
+  groups.forEach(g=>{ if(g.name) byName[g.name]=g; });
+  let hasHeads = false;
+  for(const b of blocks){
+    const c = zxCanonSec(b);
+    if(c && byName[c]){ hasHeads = true; break; }
+  }
+  if(!hasHeads || !Object.keys(byName).length){
+    const leaves=[];
+    groups.forEach(g=>g.leaves.forEach(f=>leaves.push(f)));
+    zxDocAssign(leaves, blocks, plan);
+    return plan;
+  }
+  const used=[]; let cur=null;
+  for(const b of blocks){
+    const c = zxCanonSec(b);
+    if(c && byName[c]){ cur = byName[c]; if(used.indexOf(c)<0) used.push(c); continue; }
+    if(!cur) continue;                 // 小标题之前的内容（专利名称等）不写进正文
+    (cur.buf || (cur.buf=[])).push(b);
+  }
+  for(const g of groups){
+    if(g.buf) zxDocAssign(g.leaves, g.buf, plan);
+    g.buf = null;
+  }
+  st.sections = used.join('、');
+  return plan;
+}
+
+/* 文本框里的正文 → 待提交的字段改动（只有改过的文档才算） */
+function zxDocEdits(){
+  const out = {}, d = zxState.docs, st = {title:0, docs:[], sections:[]};
+  if(!d) return {edits:out, sections:st.sections, stats:st};
+  if(d.dirty.title){
+    const t = zxStripKind(String(d.title||'').trim());
+    if(t) for(const f of zxTitleLeaves()){
+      if(String(f.value||'') === t) continue;
+      out[f.id] = t; st.title++;
+    }
+  }
+  for(const key of ['desc','abs','claims']){
+    if(!d.dirty[key]) continue;
+    const leaves = zxDocLeaves(key);
+    const blocks = zxBlocks(d[key]);
+    if(!leaves.length){
+      st.docs.push({key, stats:{nodes:0, paras:blocks.length, skip:true}});
+      continue;
+    }
+    if(key === 'claims' && blocks.length && blocks.length !== leaves.length){
+      // 条数变了：交给后端按模板重建「权利要求」节点。把两三条挤进同一个
+      // 节点在电子申请里是错的（一条权利要求必须是一个节点）。
+      st.sections.push({file: leaves[0].file, kind:'claims', items: blocks});
+      st.docs.push({key, stats:{nodes:leaves.length, paras:blocks.length, rebuild:true}});
+      continue;
+    }
+    const p = zxPlanDoc(key, d[key]);
+    Object.assign(out, p.edits);
+    st.docs.push({key, stats:p.stats});
+  }
+  return {edits:out, sections:st.sections, stats:st};
+}
+
+function zxDocMapPaint(){
+  const box = $('zxDocMap'); if(!box) return;
+  const bits=[];
+  for(const it of ZX_DOC_UI){
+    if(it.k === 'title') continue;
+    const groups = zxDocGroups(it.k);
+    if(!groups.length){
+      if(zxState.docs.dirty[it.k] && (zxState.docs[it.k]||'').trim())
+        bits.push(it.label + '：<b>ZIP 中没有对应 XML</b>，不写入');
+      continue;
+    }
+    if(!zxState.docs.dirty[it.k] || !(zxState.docs[it.k]||'').trim()) continue;
+    if(it.k === 'claims'){
+      const lv = zxDocLeaves('claims');
+      const bk = zxBlocks(zxState.docs.claims);
+      if(lv.length && bk.length && bk.length !== lv.length){
+        bits.push('权利要求书：' + bk.length + ' 条 → 重建 ' + bk.length
+          + ' 个节点（原 ' + lv.length + ' 个，结构照抄模板）');
+        continue;
+      }
+    }
+    const p = zxPlanDoc(it.k, zxState.docs[it.k]);
+    const s = p.stats;
+    let one = it.label + '：' + s.paras + ' 段 → ' + s.nodes + ' 个段落节点';
+    if(s.sections) one += '，按章节写入（' + s.sections + '）';
+    if(s.merged) one += '，' + s.merged + ' 段并入末段';
+    if(s.cleared) one += '，清空 ' + s.cleared + ' 个多余节点';
+    bits.push(one);
+  }
+  const note = $('zxDocNote');
+  if(note) note.textContent = zxState.sid
+    ? '保存时写回 100002 / 100004 / 100001.xml，只改文字不动结构'
+    : '先解析 ZIP 才能写入';
+  box.innerHTML = bits.length ? bits.join('；') + '。' : '';
 }
 
 /* 省市控件：显示名称，保存代码 */
@@ -2640,6 +3364,9 @@ async function zxParse(file){
   zxState.edits={}; zxState.fileReplace={}; zxState.sections={}; zxState.imgDelete=new Set(); zxState.imgAdd=[];
   const nimg = r.images? r.images.length : 0;
   $zxMsg({t:'ok', s:'解析完成：'+r.files.length+' 个文件，'+r.fields.length+' 个 XML 标签，'+nimg+' 张附图。'});
+  $zxPartyMsg({t:'', s:''});
+  if($('zxAppMore')) $('zxAppMore').innerHTML='';
+  zxDocInit();
   zxRenderFiles(); zxRenderQuick(); zxRenderDetail();
   $('zxCards').style.display=''; $('zxTableCard').style.display=''; $('zxSaveCard').style.display='';
 }
@@ -2691,7 +3418,7 @@ function zxFieldItem(f, label){
   if(f.type==='checkbox'){
     const lab=document.createElement('label'); lab.className='chk';
     const box=document.createElement('input'); box.type='checkbox';
-    box.checked=(f.value==='1'); box.dataset.zxid=f.id;
+    box.checked=(zxEditVal(f)==='1'); box.dataset.zxid=f.id;
     box.addEventListener('change', ()=>{
       const v=box.checked?'1':'0';
       if(v===f.value) delete zxState.edits[f.id]; else zxState.edits[f.id]=v;
@@ -2699,9 +3426,9 @@ function zxFieldItem(f, label){
     const sp=document.createElement('span'); sp.textContent='勾选 = 1';
     lab.appendChild(box); lab.appendChild(sp); item.appendChild(lab);
   } else if(f.type==='div'){
-    const inp=zxMakeDiv(f.id, f.value); inp.dataset.zxid=f.id; item.appendChild(inp);
+    const inp=zxMakeDiv(f.id, zxEditVal(f)); inp.dataset.zxid=f.id; item.appendChild(inp);
   } else {
-    const inp=document.createElement('input'); inp.type='text'; inp.value=f.value; inp.dataset.zxid=f.id;
+    const inp=document.createElement('input'); inp.type='text'; inp.value=zxEditVal(f); inp.dataset.zxid=f.id;
     inp.addEventListener('input', ()=>{
       if(inp.value===f.value) delete zxState.edits[f.id]; else zxState.edits[f.id]=inp.value;
     });
@@ -2746,13 +3473,13 @@ function zxImagesOf(dk){
 }
 
 /* ---- 图片卡片：内联缩略图 + 点击放大 + 拖拽/选择替换 + 删除/恢复 ---- */
-async function zxNormImage(file, profile){
+async function zxNormImage(file, profile, pdf){
   const b64 = await new Promise(res=>{
     const rd=new FileReader(); rd.onload=()=>res((rd.result||'').split(',')[1]||''); rd.readAsDataURL(file);
   });
   const r = await fetch(API+'/api/zipxml_norm_image',{
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({dataB64:b64, profile})
+    body: JSON.stringify({dataB64:b64, profile, pdf: !!pdf})
   });
   const j = await r.json();
   if(!j.ok) throw new Error(j.error||'归一化失败');
@@ -2773,8 +3500,15 @@ function zxImgSlot(im){
   if(deleting) card.classList.add('deleted');
   const img=document.createElement('img'); img.alt=im.name||zxBaseName(im.key); img.loading='lazy';
   img.src=im._preview||im.thumb||im.full||'';
-  if(!img.src){ card.className='zxNoImg'; card.textContent='无法生成预览：'+(im.err||'未知格式'); return card; }
-  card.appendChild(img);
+  if(!img.src){
+    // 预览生不出来也要保留拖放入口：这种情况恰恰最需要换一张图
+    card.classList.add('noprev');
+    const ph=document.createElement('div'); ph.className='ph';
+    ph.textContent='无法生成预览：'+(im.err||'未知格式')+'（可拖入图片替换）';
+    card.appendChild(ph);
+  }else{
+    card.appendChild(img);
+  }
   const nm=document.createElement('div'); nm.className='nm';
   nm.textContent=(im.name||zxBaseName(im.key))+' · '+(im.size/1024).toFixed(1)+' KB'; card.appendChild(nm);
   const lim=document.createElement('div'); lim.className='lim'; lim.textContent=limitTxt; card.appendChild(lim);
@@ -2818,6 +3552,8 @@ function zxImgSlot(im){
       $zxMsg({t:'warn', s:'适配失败：'+(e.message||e)});
     }
   };
+  // 供分组级拖放调用：整块区域拖入时也能替换到具体某张图
+  card._zxReplace = replace;
   // 删除 / 恢复 / 取消新增
   const del=document.createElement('button');
   del.className = deleting ? 'undo' : 'del';
@@ -2903,27 +3639,110 @@ function zxImgAddBtn(dk){
   return btn;
 }
 
-/* ---- 非图片附件行：选择文件替换 ---- */
+/* ---- 非图片附件行（委托书扫描件等）：点击选择 / 拖入文件 替换 ---- */
+const ZX_IMG_RE = /^(image\/|.*\.(png|jpe?g|bmp|tiff?|webp|gif)$)/i;
+
 function zxBinSlot(fi){
+  const base=zxBaseName(fi.key);
+  const ext=(base.match(/\.[A-Za-z0-9]+$/)||[''])[0].toLowerCase();
   const row=document.createElement('div'); row.className='zxFileRow';
-  row.innerHTML='<span class="fk">附件</span><span>'+fi.key.replace(/</g,'&lt;')+'</span>'
-    + '<span class="fk">'+(fi.size/1024).toFixed(1)+' KB</span>'
-    + (zxState.fileReplace[fi.key]?'<span class="scanflag">已替换</span>':'');
-  const btn=document.createElement('button'); btn.className='ghost'; btn.textContent='选择替换';
-  btn.addEventListener('click',()=>{
-    const inp=document.createElement('input'); inp.type='file';
-    inp.onchange=async ()=>{
-      const f=inp.files[0]; if(!f) return;
-      const ab=await f.arrayBuffer(); let bin=''; const u8=new Uint8Array(ab);
+  row.title=fi.key;
+  const paint=()=>{
+    row.innerHTML='<span class="fk kind bin">附件</span>'
+      + '<span class="fname">'+base.replace(/</g,'&lt;')+'</span>'
+      + '<span class="fk">'+(fi.size/1024).toFixed(1)+' KB</span>';
+    const rp=zxState.fileReplace[fi.key];
+    if(rp) row.insertAdjacentHTML('beforeend',
+      '<span class="scanflag">已替换'+(rp.size?(' · '+(rp.size/1024).toFixed(1)+' KB'):'')+'</span>');
+    row.insertAdjacentHTML('beforeend','<span class="dropTip">可拖入文件替换</span>');
+    row.appendChild(btn);
+    if(rp){
+      const un=document.createElement('button'); un.className='ghost'; un.textContent='↺ 还原';
+      un.addEventListener('click',(e)=>{ e.stopPropagation(); delete zxState.fileReplace[fi.key];
+        paint(); $zxMsg({t:'',s:'已还原：'+base}); });
+      row.appendChild(un);
+    }
+  };
+  const setBytes=(b64, size)=>{
+    zxState.fileReplace[fi.key]={name:fi.key, dataB64:b64, size};
+    paint();
+  };
+  const replace=async (file)=>{
+    if(!file) return;
+    const fname=(file.name||'').toLowerCase();
+    const fext=(fname.match(/\.[A-Za-z0-9]+$/)||[''])[0];
+    const isImg=ZX_IMG_RE.test(file.type||'')||ZX_IMG_RE.test(fext);
+    try{
+      if(isImg && ext==='.pdf'){
+        // 扫描件原件是 PDF：图片铺到 A4 白底页再存 PDF，扩展名保持不变
+        $zxMsg({t:'', s:'正在把图片按 A4 转成 PDF…'});
+        const info=await zxNormImage(file,'scan',true);
+        const b64=info.dataB64;
+        setBytes(b64, Math.round(b64.length*0.75));
+        $zxMsg({t: info.warn?'warn':'ok',
+          s:'已替换扫描件：'+base+'（A4 '+info.cmW+'×'+info.cmH+'cm @'+info.ppi+'PPI PDF，生成 ZIP 时写入）'});
+        return;
+      }
+      if(!isImg && fext && ext && fext!==ext){
+        $zxMsg({t:'warn', s:'格式不一致：该附件是 '+ext+'，拖入的是 '+fext
+          +'。请拖入 '+ext+' 文件（图片会自动转成 PDF）。'});
+        return;
+      }
+      const ab=await file.arrayBuffer(); let bin=''; const u8=new Uint8Array(ab);
       for(let i=0;i<u8.length;i+=8192) bin+=String.fromCharCode.apply(null,u8.subarray(i,i+8192));
-      zxState.fileReplace[fi.key]={name:fi.key, dataB64:btoa(bin)};
-      $zxMsg({t:'ok',s:'已标记替换：'+fi.key+'（生成 ZIP 时生效）'});
-      row.innerHTML+='<span class="scanflag">已替换</span>';
-    };
-    inp.click();
+      setBytes(btoa(bin), ab.byteLength);
+      $zxMsg({t:'ok', s:'已替换：'+base+'（生成 ZIP 时生效）'});
+    }catch(e){
+      $zxMsg({t:'warn', s:'替换失败：'+(e.message||e)});
+    }
+  };
+  const btn=document.createElement('button'); btn.className='ghost'; btn.textContent='选择替换';
+  btn.addEventListener('click',(e)=>{
+    e.stopPropagation();
+    const inp=document.createElement('input'); inp.type='file';
+    inp.onchange=()=>replace(inp.files[0]); inp.click();
   });
-  row.appendChild(btn);
+  row._zxReplace=replace;
+  row.addEventListener('dragover',(e)=>{ e.preventDefault(); e.stopPropagation();
+    row.classList.add('drop-on');
+    $zxMsg({t:'', s:'松开即替换：'+base});
+  });
+  row.addEventListener('dragleave',()=>row.classList.remove('drop-on'));
+  row.addEventListener('drop',(e)=>{ e.preventDefault(); e.stopPropagation();
+    row.classList.remove('drop-on'); replace(e.dataTransfer.files[0]);
+  });
+  paint();
   return row;
+}
+
+/* ---- 分组级拖放：整块「说明书附图 / 委托书」区域都能接文件 ----
+   只有一张图 + 拖入一个文件 = 替换那张；其余情况按新增顺序追加。
+   语义写在提示里，不让用户猜。 */
+function zxGroupDrop(box, dk, slots, onMulti){
+  const live=()=>slots.filter(el=>el && el._zxReplace);
+  const tip=(files)=>{
+    const n=files.length, m=live().length;
+    if(!n) return '';
+    if(n===1 && m===1) return '松开 = 替换这 1 个';
+    if(n===1 && m>1) return '松开 = 新增 1 个（要替换请拖到具体某项上）';
+    return onMulti ? ('松开 = 替换第 1 个（共 '+n+' 个文件，只取第 1 个）') : ('松开 = 新增 '+n+' 张');
+  };
+  box.addEventListener('dragover',(e)=>{ e.preventDefault();
+    box.classList.add('drop-on');
+    const fs=(e.dataTransfer.files||[]);
+    if(fs.length) $zxMsg({t:'', s:tip(fs)});
+  });
+  box.addEventListener('dragleave',(e)=>{ if(!box.contains(e.relatedTarget)) box.classList.remove('drop-on'); });
+  box.addEventListener('drop',(e)=>{
+    e.preventDefault(); e.stopPropagation();
+    box.classList.remove('drop-on');
+    const fs=Array.from(e.dataTransfer.files||[]);
+    if(!fs.length) return;
+    const cards=live();
+    if(fs.length===1 && cards.length===1){ cards[0]._zxReplace(fs[0]); return; }
+    if(onMulti) onMulti(fs);
+    else zxAddImages(dk, fs);
+  });
 }
 
 /* ---- 主渲染：分组明细 ---- */
@@ -2995,13 +3814,17 @@ function zxRenderDetail(){
     }
     if(g.images.length || canAdd){
       const box=document.createElement('div'); box.className='zxImgs';
-      g.images.forEach(im=>box.appendChild(zxImgSlot(im)));
+      const slots=[];
+      g.images.forEach(im=>{ const c=zxImgSlot(im); if(!c.classList.contains('deleted')) slots.push(c);
+        box.appendChild(c); });
       if(canAdd) box.appendChild(zxImgAddBtn(dk));
+      if(ZX_DROP_DOCS.includes(dk) && (slots.length||canAdd)) zxGroupDrop(box, dk, slots);
       sec.appendChild(box);
     }
     if(g.bins.length){
       const box=document.createElement('div'); box.className='zxBins';
-      g.bins.forEach(fi=>box.appendChild(zxBinSlot(fi)));
+      const rows=g.bins.map(fi=>{ const r=zxBinSlot(fi); box.appendChild(r); return r; });
+      if(ZX_DROP_DOCS.includes(dk)) zxGroupDrop(box, dk, rows, fs=>rows[0]._zxReplace(fs[0]));
       sec.appendChild(box);
     }
     root.appendChild(sec);
@@ -3022,10 +3845,14 @@ function zxRenderPoa(){
   const canAdd=!!zxGroupDir('poa');
   box.style.display = (imgs.length||bins.length||canAdd) ? '' : 'none';
   const ib=$('zxPoaImgs'); ib.innerHTML='';
-  imgs.forEach(im=>ib.appendChild(zxImgSlot(im)));
+  const slots=[];
+  imgs.forEach(im=>{ const c=zxImgSlot(im); if(!c.classList.contains('deleted')) slots.push(c);
+    ib.appendChild(c); });
   if(canAdd) ib.appendChild(zxImgAddBtn('poa'));
+  if(slots.length||canAdd) zxGroupDrop(ib, 'poa', slots);
   const bb=$('zxPoaBins'); bb.innerHTML='';
-  bins.forEach(fi=>bb.appendChild(zxBinSlot(fi)));
+  const rows=bins.map(fi=>{ const r=zxBinSlot(fi); bb.appendChild(r); return r; });
+  if(rows.length) zxGroupDrop(bb, 'poa', rows, fs=>rows[0]._zxReplace(fs[0]));
 }
 
 /* ---- 快捷表单 ---- */
@@ -3042,7 +3869,7 @@ function zxRenderQuick(){
     if(ids.length){
       const f0 = zxState.fields.find(f=>f.id===ids[0]);
       if(f0.type==='div'){
-        const inp = zxMakeDiv(ids[0], f0.value);
+        const inp = zxMakeDiv(ids[0], zxEditVal(f0));
         inp.style.minWidth='220px';
         inp.addEventListener('change', ()=>{
           const code = inp._code;
@@ -3054,8 +3881,9 @@ function zxRenderQuick(){
         continue;
       }
       const inp=document.createElement('input'); inp.type='text';
-      inp.style.minWidth='220px'; inp.value = f0.value;
+      inp.style.minWidth='220px'; inp.value = zxEditVal(f0);
       inp.dataset.zxids = JSON.stringify(ids);
+      inp.dataset.zxq = q.key;
       inp.addEventListener('input', ()=>{
         for(const id of ids){
           zxState.edits[id]=inp.value;
@@ -3090,10 +3918,13 @@ function zxRenderInventors(){
     idcard: (byFile.find(f=>f.path.endsWith('/'+firstTag+'/身份证件号码'))||{value:''}).value,
   };
   const others=[];
-  const re=new RegExp('/'+otherTag.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\[(\\d+)\\]\\/姓名$');
+  // 同级只有一个「其他发明人 / 其他设计人」时路径不带 [n] 序号；老正则只认
+  // 带序号的写法会漏掉这种人，而保存时要按草稿重建整个「其他发明人」节点，
+  // 漏掉等于把这个人从请求书里删掉，所以序号设为可选。
+  const re=new RegExp('/'+otherTag.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:\\[(\\d+)\\])?\\/姓名$');
   for(const f of byFile){
     const m=f.path.match(re);
-    if(m){ others.push({i:+m[1],
+    if(m){ others.push({i: m[1] ? +m[1] : 0,
       name:f.value,
       idcard:(byFile.find(x=>x.path===f.path.replace(/\/姓名$/,'/身份证件号码'))||{value:''}).value}); }
   }
@@ -3127,6 +3958,87 @@ function zxRenderInventors(){
   add.style.marginTop='2px';
   add.addEventListener('click',()=>{ draft.others.push({name:'',idcard:''}); zxRenderInventors(); });
   wrap.appendChild(add);
+}
+
+/* ---- 批量分隔符设置（申请人 / 发明人 共用） ----
+   多个发明人 / 申请人之间的分隔符由这里统一配置：常用分隔符做成可多选的
+   chip（中英文标点都给，避免用户混用），另提供「自定义」可填任意字符（支持
+   多字符，如 "；；"）。解析时按所有生效分隔符的并集切分，多选手动去重。 */
+const zxSep = { active:new Set(['comma','fcomma','ideo','newline']), custom:'' };
+const ZX_SEP_MAP = {
+  comma:',', fcomma:'，', ideo:'、', semicolon:';', fsemicolon:'；', newline:'\n', space:' ', tab:'\t'
+};
+function zxSepChars(){
+  const out=[];
+  for(const k of zxSep.active){
+    if(k==='custom'){ const c=(zxSep.custom||''); if(c) out.push(c); }
+    else if(k==='newline'){ out.push('\n'); out.push('\r'); }
+    else if(ZX_SEP_MAP[k]!=null) out.push(ZX_SEP_MAP[k]);
+  }
+  if(!out.length) out.push('\n');
+  return out;
+}
+function zxSepRender(){
+  document.querySelectorAll('#zxSepChips button').forEach(b=>{
+    b.classList.toggle('on', zxSep.active.has(b.dataset.sep));
+  });
+  const cust=$('zxSepCustom');
+  if(cust) cust.style.display = zxSep.active.has('custom') ? '' : 'none';
+  const prev=$('zxSepPreview');
+  if(prev){
+    const names={comma:'逗号 ,', fcomma:'全角逗号 ，', ideo:'顿号 、', semicolon:'分号 ;', fsemicolon:'全角分号 ；',
+      newline:'换行', space:'空格', tab:'Tab', custom:(zxSep.custom?('自定义「'+zxSep.custom+'」'):'自定义')};
+    const list=[...zxSep.active].map(k=>names[k]).filter(Boolean);
+    prev.innerHTML='当前生效分隔符：<b>'+(list.join('，')||'（无）')+'</b>。可多选，解析时按任一分隔符切分。';
+  }
+}
+/* 把文本框内容按生效分隔符切成若干「人名」 */
+function zxSplitPeople(text){
+  const seps=zxSepChars();
+  const esc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  const re=new RegExp(seps.map(esc).sort((a,b)=>b.length-a.length).join('|'),'g');
+  return String(text||'').split(re).map(s=>s.trim()).filter(Boolean);
+}
+/* 批量粘贴申请人 → 写入第一申请人 + 其他申请人 节点的姓名/名称字段 */
+function zxBatchApplicants(){
+  const msg=$('zxAppBatchMsg'); if(!msg) return;
+  const names=zxSplitPeople($('zxAppBatch').value);
+  if(!names.length){ msg.className='zxBatchHint err'; msg.textContent='没识别到任何申请人，请检查文本框与分隔符设置。'; return; }
+  const firstIds={}, otherIds={};
+  for(const f of zxState.fields){
+    let m=f.path.match(/\/第一申请人\/([^/]+)$/);
+    if(m){ const k=ZX_PARTY_TAGS[m[1]]; if(k) firstIds[k]=f.id; continue; }
+    m=f.path.match(/\/其他申请人(?:\[(\d+)\])?\/([^/]+)$/);
+    if(m && ZX_PARTY_TAGS[m[2]]){ const k=ZX_PARTY_TAGS[m[2]]; const idx=m[1]===undefined?'0':m[1]; (otherIds[idx]||(otherIds[idx]={}))[k]=f.id; }
+  }
+  const slots=[];
+  if(firstIds.name||firstIds.cert) slots.push(firstIds);
+  Object.keys(otherIds).sort((a,b)=>(+a)-(+b)).forEach(k=>slots.push(otherIds[k]));
+  let filled=0, un=0;
+  names.forEach((nm,i)=>{
+    const ids=slots[i];
+    if(!ids){ un++; return; }
+    if(ids.name)  zxState.edits[ids.name]=nm;
+    if(ids.cert)  zxState.edits[ids.cert]=nm;
+    filled++;
+  });
+  zxRenderQuick(); zxRenderDetail();
+  if($('zxAppMore')) $('zxAppMore').innerHTML='';
+  msg.className='zxBatchHint ok';
+  msg.innerHTML='已填入 <b>'+filled+'</b> 个申请人'+(un?('，另有 '+un+' 个因 ZIP 中申请人节点不足未写入'):'')+'。地址 / 邮编 / 身份证号等请在上方可改处补充。';
+}
+/* 批量粘贴发明人 → 写入草稿 first / others（重绘行） */
+function zxBatchInventors(){
+  const msg=$('zxInvBatchMsg'); if(!msg) return;
+  const names=zxSplitPeople($('zxInvBatch').value);
+  if(!names.length){ msg.className='zxBatchHint err'; msg.textContent='没识别到任何发明人，请检查文本框与分隔符设置。'; return; }
+  const d=zxState.sections.inventors;
+  if(!d){ msg.className='zxBatchHint err'; msg.textContent='请先解析 ZIP（未找到发明人节点）。'; return; }
+  d.first={name:names[0]||'', idcard:(d.first&&d.first.idcard)||''};
+  d.others=names.slice(1).map(n=>({name:n, idcard:''}));
+  zxRenderInventors();
+  msg.className='zxBatchHint ok';
+  msg.innerHTML='已填入 <b>'+names.length+'</b> 位发明人（第 1 人为第一发明人，其余为其他发明人）。身份证号请在各行补充。';
 }
 
 /* ---- 代理师（请求书 + 委托书姓名同步） ---- */
@@ -3198,6 +4110,328 @@ function zxRenderDate(){
   }
 }
 
+/* ---- 用当前文档的申请信息替代 XML 对应内容 ----
+   zxPlanParty 是纯规划函数（只算「哪些字段要改成什么」，不碰 DOM），
+   便于脱离浏览器单独验证；zxImportParty 负责取数据 / 落库 / 重绘 / 提示。
+   语义：面板里填了的项覆盖 XML，空着的项保留 XML 原值（不静默清空）；
+   申请人按顺序对应「第一申请人 + 其他申请人[n]」，发明人按顺序对应
+   「第一发明人 + 其他发明人[n]」，多出的行会明确提示而不是丢掉。 */
+/* ==== ZX-PARTY-BEGIN ==== */
+const ZX_PARTY_TAGS = {
+  '姓名或名称':'name', '名称':'name',
+  '身份证件号码或统一社会信用代码':'cert', '身份证件号码':'cert',
+  '城区乡街道门牌号':'addr', '邮政编码':'zip',
+  '省自治区直辖市名称':'prov', '市县名称':'city',
+};
+
+/* 「广西壮族自治区」→「广西」、「河北省」→「河北」、「北京市」→「北京」 */
+function zxPartyShort(name){
+  return String(name || '').replace(
+    /(省|市|壮族自治区|回族自治区|维吾尔自治区|自治区|特别行政区)$/, '');
+}
+
+/* 从地址开头识别省 / 市代码；匹配不到就返回空串（绝不猜）。 */
+function zxPartyRegion(addr){
+  const s = String(addr || '').replace(/[\s\u3000]/g, '');
+  const out = {prov:'', city:''};
+  if(!s) return out;
+  const provs = [];
+  for(const code in ZX_DIV){
+    if(!/^\d{2}0000$/.test(code)) continue;
+    const nm = ZX_DIV[code];
+    provs.push([nm, zxPartyShort(nm), code]);
+  }
+  provs.sort((a, b) => b[0].length - a[0].length);
+  let used = 0;
+  for(const p of provs){
+    if(s.startsWith(p[0])){ out.prov = p[2]; used = p[0].length; break; }
+    if(p[1] && s.startsWith(p[1])){ out.prov = p[2]; used = p[1].length; break; }
+  }
+  if(!out.prov) return out;
+  const cities = [];
+  for(const code in ZX_DIV){
+    if(code.slice(0, 2) !== out.prov.slice(0, 2)) continue;
+    if(/^\d{2}0000$/.test(code)) continue;
+    const nm = ZX_DIV[code];
+    if(nm === '市辖区') continue;            // 直辖市的「市辖区」不进「市县名称」
+    cities.push([nm, zxPartyShort(nm), code]);
+  }
+  cities.sort((a, b) => b[0].length - a[0].length);
+  const rest = s.slice(used);
+  for(const c of cities){
+    if(rest.startsWith(c[0]) || (c[1] && rest.startsWith(c[1]))){ out.city = c[2]; break; }
+  }
+  return out;
+}
+
+function zxPlanParty(fields, snap, cur){
+  const apps = (snap && snap.applicants) || [];
+  const invs = (snap && snap.inventors) || [];
+  const plan = {edits:{}, first:null, others:[], regions:[],
+    stats:{appNodes:0, appRows:apps.length, appPeople:0, appFields:0, appExtra:0,
+           appIdle:0, invRows:invs.length, invWritten:0, invIdKept:0}};
+  const byId = {};
+  for(const f of fields) byId[f.id] = f;
+
+  /* 申请人节点：第一申请人 + 其他申请人（同级只有一个时路径不带 [n] 序号） */
+  const firstIds = {}, otherIds = {};
+  for(const f of fields){
+    let m = f.path.match(/\/第一申请人\/([^/]+)$/);
+    if(m){ const k = ZX_PARTY_TAGS[m[1]]; if(k) firstIds[k] = f.id; continue; }
+    m = f.path.match(/\/其他申请人(?:\[(\d+)\])?\/([^/]+)$/);
+    if(m && ZX_PARTY_TAGS[m[2]]){
+      const k = ZX_PARTY_TAGS[m[2]];
+      const idx = m[1] === undefined ? '0' : m[1];
+      (otherIds[idx] || (otherIds[idx] = {}))[k] = f.id;
+    }
+  }
+  const slots = [];
+  if(firstIds.name || firstIds.cert || firstIds.addr || firstIds.zip)
+    slots.push({label:'第一申请人', ids:firstIds});
+  Object.keys(otherIds).sort((a, b) => (+a) - (+b)).forEach(k => {
+    slots.push({label:'其他申请人' + (+k > 0 ? '[' + k + ']' : ''), ids:otherIds[k]});
+  });
+  plan.stats.appNodes = slots.length;
+
+  /* 只写非空值，且与 XML 原值不同才记一笔改动 */
+  const put = (id, val) => {
+    if(!id) return false;
+    const v = String(val === undefined || val === null ? '' : val).trim();
+    if(!v) return false;
+    if(String((byId[id] || {}).value || '') === v) return false;
+    plan.edits[id] = v;
+    return true;
+  };
+
+  const nApp = Math.min(slots.length, apps.length);
+  for(let i = 0; i < nApp; i++){
+    const a = apps[i] || [], ids = slots[i].ids;
+    let w = 0;
+    if(put(ids.name, a[0])) w++;
+    if(put(ids.cert, a[1])) w++;
+    if(put(ids.addr, a[2])) w++;
+    if(put(ids.zip,  a[3])) w++;
+    const reg = zxPartyRegion(a[2]);
+    if(reg.prov && put(ids.prov, reg.prov)) w++;
+    if(reg.city && put(ids.city, reg.city)) w++;
+    plan.stats.appFields += w;
+    plan.regions.push({label:slots[i].label, name:String(a[0] || '').trim(),
+                       prov:reg.prov, city:reg.city});
+  }
+  plan.stats.appPeople  = nApp;
+  plan.stats.appExtra   = Math.max(0, apps.length - slots.length);
+  plan.stats.appIdle    = Math.max(0, slots.length - apps.length);
+
+  /* 发明人：按顺序对应，空值保留 XML 原值（尤其是身份证号） */
+  if(invs.length){
+    const cf = (cur && cur.first) || {};
+    const co = (cur && cur.others) || [];
+    const pickInv = (i, p) => {
+      const old = i === 0 ? cf : (co[i - 1] || {});
+      const name = String((p || [])[0] || '').trim() || String(old.name || '').trim();
+      let idcard = String((p || [])[1] || '').trim();
+      if(!idcard && String(old.idcard || '').trim()){
+        idcard = String(old.idcard).trim();
+        plan.stats.invIdKept++;
+      }
+      return {name, idcard};
+    };
+    plan.first  = pickInv(0, invs[0]);
+    plan.others = invs.slice(1).map((p, i) => pickInv(i + 1, p));
+    plan.stats.invWritten = invs.length;
+  }
+  return plan;
+}
+/* ==== ZX-PARTY-END ==== */
+
+/* 把规划结果写进 zxState（字段改动 + 发明人草稿），并重绘表单。返回改动条数。 */
+function zxApplyPlan(plan){
+  let n = 0;
+  for(const id in plan.edits){
+    const f = zxState.fields.find(x => x.id === id);
+    if(!f) continue;
+    if(String(f.value || '') === plan.edits[id]) delete zxState.edits[id];
+    else { zxState.edits[id] = plan.edits[id]; n++; }
+  }
+  const draft = zxState.sections.inventors;
+  if(plan.first && draft){
+    draft.first = plan.first;
+    draft.others = plan.others;
+  }
+  zxRenderQuick();          // 会连带按草稿重绘发明人行
+  return n;
+}
+
+function zxPartySrcTxt(snap){
+  const el = $('zxPartySrc'); if(!el) return;
+  if(!snap || !snap.ts){ el.textContent = ''; return; }
+  const d = new Date(snap.ts * 1000), p = n => String(n).padStart(2, '0');
+  el.textContent = '来源：' + (snap.doc || '当前文档') + ' · '
+    + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' '
+    + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* 专利名称一律以主界面标签栏为准：导入后把快捷表单、字段明细表里的旧值一起刷新，
+   避免「正文区已经是正确名称、上面的快捷表单还显示 ZIP 里那个」的两套值打架 */
+function zxTitlePaintAll(v){
+  v = String(v == null ? '' : v).replace(/\r/g, '').trim();
+  if(!v) return;
+  document.querySelectorAll('[data-zxq="title"]').forEach(el => { el.value = v; });
+  const q = ZX_QUICK.find(x => x.key === 'title');
+  if(!q) return;
+  for(const id of zxMatchFields(q)){
+    const ti = document.querySelector('#zxDetail input[data-zxid="' + CSS.escape(id) + '"]');
+    if(ti) ti.value = v;
+  }
+}
+
+/* 主程序快照里的正文 → 四个输入框（立即可见，保存时才写入 XML） */
+function zxApplyDocSnap(snap){
+  const d = zxState.docs, got = [];
+  const put = (k, v, label) => {
+    v = String(v == null ? '' : v).replace(/\r/g, '').trim();
+    if(k === 'title') v = zxStripKind(v);
+    if(!v) return;
+    d[k] = v; d.dirty[k] = true; got.push(label);
+  };
+  put('title',  snap && snap.title,    '专利名称');
+  put('desc',   snap && snap.desc,     '说明书');
+  put('abs',    snap && snap.abstract, '说明书摘要');
+  put('claims', snap && snap.claims,   '权利要求书');
+  if(d.dirty.title) zxTitlePaintAll(d.title);
+  zxDocPaint(true);
+  return got;
+}
+
+/* 主程序收藏夹里的委托书 JPG → ZIP 的 100007 目录。
+   原扫描件是图片：整组替换；原扫描件是 PDF：按 A4 转成 PDF 替换同名附件。
+   归一化走服务端同一套尺寸限制，保证与「＋ 添加图片」的结果一致。 */
+async function zxNormB64(b64, profile){
+  const r = await fetch(API + '/api/zipxml_norm_image', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dataB64: b64, profile: profile || 'other'})
+  });
+  const j = await r.json();
+  if(!j.ok) throw new Error(j.error || '归一化失败');
+  return j;
+}
+
+async function zxApplyPoaSnap(list){
+  if(!list || !list.length) return {n: 0, old: 0, warn: ''};
+  const dir = zxGroupDir('poa');
+  if(!dir) return {n: 0, old: 0, warn: '此 ZIP 里没有委托书目录，委托书未写入'};
+  // 先清掉上次导入留下的临时新增，避免连点两次叠出重复页
+  zxState.imgAdd = (zxState.imgAdd || []).filter(a => zxDocKey(a.key) !== 'poa');
+  const live = (zxState.images || []).filter(im => zxDocKey(im.key) === 'poa'
+    && !zxState.imgDelete.has(im.key));
+  const bins = (zxState.files || []).filter(fi => !fi.xml && !fi.img
+    && zxDocKey(fi.key) === 'poa');
+  let n = 0, warn = '';
+  if(bins.length && !live.length){
+    // 原扫描件是 PDF：JPG 铺到 A4 转 PDF 后替换，扩展名保持不变
+    const pair = Math.min(bins.length, list.length);
+    for(let i = 0; i < pair; i++){
+      try{
+        const info = await zxNormB64(list[i].dataB64, 'scan');
+        zxState.fileReplace[bins[i].key] = {name: bins[i].key,
+          dataB64: info.dataB64, size: Math.round(info.dataB64.length * 0.75)};
+        n++;
+      }catch(e){ warn = '委托书转换失败：' + (e.message || e); }
+    }
+    if(list.length > pair) warn = '委托书 ' + (list.length - pair) + ' 张超出原 PDF 张数，未写入';
+    zxRenderDetail();
+    return {n: n, old: bins.length, warn: warn};
+  }
+  for(const im of live) zxState.imgDelete.add(im.key);   // 整组替换
+  for(const it of list){
+    try{
+      const info = await zxNormB64(it.dataB64, 'other');
+      const name = zxNextName(dir);
+      const url = 'data:image/jpeg;base64,' + info.dataB64;
+      zxState.imgAdd.push({key: dir + '/' + name, dir: dir, name: name,
+        size: Math.round(info.dataB64.length * 0.75), dataB64: info.dataB64,
+        thumb: url, full: url, info: info, _added: true});
+      n++;
+    }catch(e){ warn = '委托书导入失败：' + (e.message || e); }
+  }
+  zxRenderDetail();
+  return {n: n, old: live.length, warn: warn};
+}
+
+async function zxImportParty(){
+  if(!zxState.sid){ $zxPartyMsg({t:'warn', s:'请先解析 ZIP，再导入申请信息。'}); return; }
+  $zxPartyMsg({t:'', s:'正在读取主界面当前文档的申请信息…'});
+  let snap;
+  try{
+    const r = await fetch(API + '/api/party_snapshot', {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    snap = await r.json();
+  }catch(e){
+    $zxPartyMsg({t:'err', s:'读取失败：' + e.message
+      + '。请从主界面「XML修改」入口打开本页，并确认主程序正在运行。'});
+    return;
+  }
+  zxPartySrcTxt(snap);
+  const apps = (snap && snap.applicants) || [];
+  const invs = (snap && snap.inventors) || [];
+  const src = snap && snap.doc ? ('当前文档「' + snap.doc + '」') : '当前文档';
+  const hasText = !!(snap && (snap.title || snap.desc || snap.abstract || snap.claims));
+  const hasPoa = !!(snap && snap.poa && snap.poa.length);
+  if(!apps.length && !invs.length && !hasText && !hasPoa){
+    $zxPartyMsg({t:'warn', s:src + '没有申请人 / 发明人信息，也没有可用正文。'
+      + '请先在主界面填写申请信息或撰写正文，再点此按钮。'});
+    return;
+  }
+
+  const plan = zxPlanParty(zxState.fields, snap, zxState.sections.inventors);
+  const st = plan.stats;
+  zxApplyPlan(plan);
+  const docGot = zxApplyDocSnap(snap);      // 专利名称 + 说明书 / 摘要 / 权利要求
+  const poaGot = await zxApplyPoaSnap(snap.poa);   // 收藏夹里的委托书 JPG
+
+  const bits = [];
+  if(st.appPeople) bits.push('申请人 ' + st.appPeople + ' 个（' + st.appFields + ' 处字段）');
+  if(st.invWritten) bits.push('发明人 ' + st.invWritten + ' 人');
+  if(docGot.length) bits.push(docGot.join('、'));
+  if(poaGot.n) bits.push('委托书 ' + poaGot.n + ' 张'
+    + (poaGot.old ? ('（替换原 ' + poaGot.old + ' 张）') : ''));
+  let msg = '已用' + src + '替代：' + (bits.length ? bits.join('、') : '没有可写入的内容') + '。';
+  const warn = [];
+  if(!st.appNodes) warn.push('此 ZIP 里没有申请人节点（不是请求书？）');
+  if(st.appExtra) warn.push('面板有 ' + st.appRows + ' 个申请人，ZIP 只有 '
+    + st.appNodes + ' 个申请人节点，多出的 ' + st.appExtra + ' 个未写入');
+  if(st.appIdle) warn.push('ZIP 里还有 ' + st.appIdle + ' 个申请人节点面板中没有，未改动');
+  if(invs.length && !plan.first) warn.push('此 ZIP 里没有发明人节点，发明人未写入');
+  if(st.invIdKept) warn.push(st.invIdKept + ' 位发明人面板里没填身份证号，已保留 XML 原值');
+  if(poaGot.warn) warn.push(poaGot.warn);
+  const noDoc = ['desc','abs','claims'].filter(k => zxState.docs.dirty[k]
+    && (zxState.docs[k]||'').trim() && !zxDocGroups(k).length);
+  if(noDoc.length) warn.push('ZIP 里没有 ' + noDoc.map(k => (ZX_DOC_UI.find(u=>u.k===k)||{}).label).join(' / ')
+    + ' 对应的 XML 文件，这几段未写入');
+  const regs = plan.regions.filter(r => r.prov)
+    .map(r => (r.name || r.label) + '：' + (ZX_DIV[r.prov] || r.prov)
+         + (r.city ? (' / ' + (ZX_DIV[r.city] || r.city)) : ''));
+  if(warn.length) msg += ' ' + warn.join('；') + '。';
+  if(regs.length) msg += ' 省/市代码已按地址识别：' + regs.join('，') + '。';
+  msg += ' 核对无误后点「生成并下载修改后的 ZIP」写入。';
+  $zxPartyMsg({t: (st.appFields || st.invWritten || docGot.length || poaGot.n)
+    ? 'ok' : 'warn', s: msg});
+
+  /* 第二申请人起在快捷表单里没有输入框（表单只做第一申请人），
+     这里给一行只读回显，至少能核对写进去的是谁；要改回主界面左栏改。 */
+  const more = $('zxAppMore');
+  if(more){
+    const extra = apps.slice(1, st.appPeople)
+      .map(a => String(a[0] || '').trim()).filter(Boolean);
+    const parts = [];
+    if(extra.length) parts.push('其他申请人（按面板顺序写入）：<b>' + extra.join('、') + '</b>');
+    if(st.appExtra) parts.push('另有 ' + st.appExtra + ' 个申请人因 ZIP 中没有对应节点未写入');
+    more.innerHTML = parts.length
+      ? (parts.join('；') + '。要改请在主界面左栏修改后重新点上面的按钮。')
+      : '';
+  }
+}
+
 /* ---- 字段明细表 ---- */
 /* ---- 选项与声明（复选框）快捷组 ---- */
 function zxRenderOptions(){
@@ -3229,21 +4463,34 @@ function zxRenderOptions(){
 $('zxFilter').addEventListener('input', zxRenderDetail);
 
 /* ---- 保存 ---- */
-$('zxSave').addEventListener('click', async ()=>{
-  if(!zxState.sid){ $zxSaveMsg({t:'warn',s:'请先解析 ZIP。'}); return; }
-  const edits=Object.entries(zxState.edits).map(([id,value])=>({id,value}));
+/* 装配请求体：正文区按段落映射成字段改动，再与字段明细表的改动合并；
+   同一节点以正文区为准（它是最完整的视图）。保存 ZIP / 打印 PDF 共用。 */
+function zxPayload(){
+  zxDocSync();
+  const de = zxDocEdits();
+  const allEdits = Object.assign({}, zxState.edits, de.edits);
+  const edits=Object.entries(allEdits).map(([id,value])=>({id,value}));
   const sections=[];
   if(zxState.sections.inventors) sections.push({file:zxState.sections.inventors.file, kind:zxState.sections.inventors.kind,
     first:{name:zxState.sections.inventors.first.name, idcard:zxState.sections.inventors.first.idcard},
     others:zxState.sections.inventors.others});
   if(zxState.sections.agents) sections.push({file:zxState.sections.agents.file, kind:'agents', list:zxState.sections.agents.list});
+  if(de.sections.length) sections.push.apply(sections, de.sections);   // 权利要求条数变化时重建节点
   const payload={
     sid:zxState.sid, edits, sections,
     fileReplace:Object.values(zxState.fileReplace),
     deletes:Array.from(zxState.imgDelete),
     adds:(zxState.imgAdd||[]).map(a=>({key:a.key, dataB64:a.dataB64})),
     fname:zxState.fname||'modified.zip',
+    title:(zxState.docs.title||'').trim(),
   };
+  return {payload, edits, sections, de};
+}
+
+$('zxSave').addEventListener('click', async ()=>{
+  if(!zxState.sid){ $zxSaveMsg({t:'warn',s:'请先解析 ZIP。'}); return; }
+  const st = zxPayload();
+  const payload = st.payload, edits = st.edits, sections = st.sections, de = st.de;
   $zxSaveMsg({t:'',s:''});
   try{
     const resp=await fetch(API+'/api/zipxml_save', {
@@ -3256,7 +4503,9 @@ $('zxSave').addEventListener('click', async ()=>{
     a.href=URL.createObjectURL(blob); a.download='修改后_'+(zxState.fname||'modified.zip');
     document.body.appendChild(a); a.click();
     setTimeout(()=>{a.remove(); URL.revokeObjectURL(a.href);},800);
-    $zxSaveMsg({t:'ok', s:'已生成下载：修改 '+edits.length+' 处文本、'+sections.length+' 组结构、'
+    $zxSaveMsg({t:'ok', s:'已生成下载：修改 '+edits.length+' 处文本'
+      +(de.stats.docs.length ? ('（含正文 '+de.stats.docs.length+' 篇）') : '')
+      +'、'+sections.length+' 组结构、'
       +Object.keys(zxState.fileReplace).length+' 个替换、'
       +zxState.imgDelete.size+' 个删除、'+(zxState.imgAdd||[]).length+' 个新增。'});
   }catch(err){
@@ -3264,9 +4513,54 @@ $('zxSave').addEventListener('click', async ()=>{
   }
 });
 
+/* ---- 打印申请文件 PDF：同一次改动，另出一份国知局样式的 A4 PDF ---- */
+$('zxPdf').addEventListener('click', async ()=>{
+  if(!zxState.sid){ $zxPdfMsg({t:'warn', s:'请先解析 ZIP。'}); return; }
+  const btn = $('zxPdf');
+  const labelHtml = btn.innerHTML;          // 含打印小图标，恢复时整块写回
+  const {payload} = zxPayload();
+  $zxSaveMsg({t:'', s:''}); $zxPdfMsg({t:'', s:'正在排版…'});
+  btn.disabled = true; btn.textContent = '排版中…';
+  try{
+    const resp = await fetch(API+'/api/zipxml_pdf', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload),
+    });
+    if(!resp.ok){ let msg='HTTP '+resp.status; try{msg=(await resp.json()).error||msg;}catch(e){} throw new Error(msg); }
+    const blob = await resp.blob();
+    let info = null;
+    try{ info = JSON.parse(resp.headers.get('X-Pdf-Info')||'null'); }catch(e){}
+    const name = '申请文件_' + (payload.title || zxState.fname || '未命名')
+      .replace(/[\\/:*?"<>|]/g, '_') + '.pdf';
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{a.remove(); URL.revokeObjectURL(a.href);}, 800);
+    const lack = [];
+    if(info && info.has){
+      if(!info.has.request) lack.push('请求书');
+      if(!info.has.abstract) lack.push('说明书摘要');
+      if(!info.has.claims) lack.push('权利要求书');
+      if(!info.has.description) lack.push('说明书');
+      if(!info.has.figures) lack.push('说明书附图');
+    }
+    $zxPdfMsg({t: lack.length ? 'warn' : 'ok',
+      s: '已生成：' + name + (info ? '（共 ' + info.pages + ' 页）' : '')
+        + (lack.length ? '。ZIP 里没有 ' + lack.join(' / ') + '，这几份未排入。' : '')
+        + ' 顺序：请求书 → 摘要 → 权利要求书 → 说明书 → 说明书附图，A4 / 宋体 10.5pt / 行距 1.5。'});
+  }catch(err){
+    $zxPdfMsg({t:'err', s:'打印失败：'+err.message});
+  }finally{
+    btn.disabled = false; btn.innerHTML = labelHtml;
+  }
+});
+
 /* ---- 重置 ---- */
 $('zxReset').addEventListener('click', ()=>{
   zxState.edits={}; zxState.fileReplace={}; zxState.sections={}; zxState.imgDelete=new Set(); zxState.imgAdd=[];
+  $zxPartyMsg({t:'', s:''}); $zxPdfMsg({t:'', s:''});
+  if($('zxAppMore')) $('zxAppMore').innerHTML='';
+  zxDocInit();
   zxRenderQuick(); zxRenderDetail();
   $zxSaveMsg({t:'ok', s:'已重置全部修改。'});
 });
@@ -3280,16 +4574,54 @@ $('zxFile').addEventListener('change', ()=>{
   const f=$('zxFile').files[0];
   if(f) zxParse(f);
 });
+$('zxImportParty').addEventListener('click', ()=>{ zxImportParty(); });
+/* 正文四个框：改过就标记 dirty，保存时才参与写入 */
+ZX_DOC_UI.forEach(it=>{
+  const el = $(it.id); if(!el) return;
+  el.addEventListener('input', ()=>{
+    zxState.docs[it.k] = el.value;
+    zxState.docs.dirty[it.k] = true;
+    zxDocPaint(false);
+  });
+});
 $('zxImgClose').addEventListener('click', ()=>$('zxImgModal').classList.remove('on'));
 $('zxImgModal').addEventListener('click', (e)=>{ if(e.target.id==='zxImgModal') $('zxImgModal').classList.remove('on'); });
 document.addEventListener('keydown', (e)=>{ if(e.key==='Escape') $('zxImgModal').classList.remove('on'); });
+
+/* 批量粘贴：展开/收起 + 解析填入 */
+function zxToggleBatch(bodyId, tglId, label){
+  const b=$(bodyId); if(!b) return;
+  const open=b.style.display!=='none';
+  b.style.display=open?'none':'';
+  const t=$(tglId); if(t) t.textContent=(open?'▸':'▾')+' '+label;
+}
+$('zxAppBatchTgl').addEventListener('click', ()=>zxToggleBatch('zxAppBatchBody','zxAppBatchTgl','批量粘贴多个申请人'));
+$('zxAppBatchBtn').addEventListener('click', zxBatchApplicants);
+$('zxInvBatchTgl').addEventListener('click', ()=>zxToggleBatch('zxInvBatchBody','zxInvBatchTgl','批量粘贴多个发明人'));
+$('zxInvBatchBtn').addEventListener('click', zxBatchInventors);
+/* 分隔符 chips：多选切换 + 自定义输入 */
+document.querySelectorAll('#zxSepChips button').forEach(b=>{
+  b.addEventListener('click', ()=>{
+    const k=b.dataset.sep;
+    if(zxSep.active.has(k)) zxSep.active.delete(k); else zxSep.active.add(k);
+    if(k==='custom'){ const c=$('zxSepCustom'); if(c && zxSep.active.has('custom')) setTimeout(()=>c.focus(),0); }
+    zxSepRender();
+  });
+});
+const zxSepCustomEl=$('zxSepCustom');
+if(zxSepCustomEl) zxSepCustomEl.addEventListener('input', e=>{ zxSep.custom=e.target.value; zxSepRender(); });
+zxSepRender();
 
 updateStatus();
 
 /* ---------- tab4：特征关系分析（EUREKA → 3D 气泡蛛网图 · 可交互） ---------- */
 const relGraph = { hasData:false, nodes:[], edges:[], yaw:0.6, pitch:0.35, zoom:1,
                    drag:false, dragNode:-1, lx:0, ly:0, hover:-1, pinned:-1,
-                   spin:false, moved:false, raf:0, t:0 };
+                   spin:false, moved:false, raf:0, t:0,
+                   only:'',            // 图例点击筛选的关系类别；空串=全部
+                   text:'auto',        // 关系文字：auto 自动 / on 全部显示 / off 隐藏
+                   moving:false,       // 正在拖动/旋转：期间不画关系文字，省掉逐帧文字栅格化
+                   _legendKey:'' };
 
 /* 关系类别配色：与后端 edge.kind 对应，连线和图例共用（高饱和，深色底上更醒目） */
 const REL_COLORS = { contain:'#25d98a', connect:'#4f9bff', fix:'#ffb224', position:'#b06bff',
@@ -3308,6 +4640,274 @@ function relMix(hex, d, a){
   const g = Math.min(255,Math.max(0,((n>>8)&255)+d));
   const b = Math.min(255,Math.max(0,(n&255)+d));
   return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+}
+
+/* ---------- tab4 星空背景：星云 + 星点（离屏缓存一次）+ 偶发流星 ----------
+   星空整体画进一张离屏 canvas，拖动 / 旋转 / 缩放时只 drawImage 一次，
+   不重新生成星点，保证交互帧率；流星只在触发期间跑 rAF。 */
+/* 星空比视口大一圈（mx 为留边），拖动/旋转时按视角平移贴图，做出视差纵深 */
+const relSky = { cv:null, w:0, h:0, mx:80, k:null, data:null, bright:[], meteors:[], timer:0, raf:0 };
+
+/* 固定种子的伪随机：同一台机器每次刷新星位一致，不会一刷新就换一片天 */
+function relRng(seed){
+  let s = seed >>> 0;
+  return function(){ s = (s*1664525 + 1013904223) >>> 0; return s/4294967296; };
+}
+
+/* 星点 / 星云参数只生成一次，全部用 0~1 归一化坐标，canvas 换尺寸时按比例复用 */
+function relSkyData(){
+  if(relSky.data) return relSky.data;
+  const rnd = relRng(20261111);
+  const stars = [];
+  // 银河带：沿左上→右下走向一条密集星带，越靠带心越密
+  const ax=0.02, ay=0.90, bx=0.98, by=0.10;
+  const dx=bx-ax, dy=by-ay, dl=Math.hypot(dx,dy);
+  const nx=-dy/dl, ny=dx/dl;
+  for(let i=0;i<790;i++){
+    const t=rnd();
+    const off=(rnd()+rnd()+rnd()-1.5)*0.17;      // 三次均匀叠加 ≈ 中间密两侧疏
+    const px=ax+dx*t+nx*off, py=ay+dy*t+ny*off;
+    if(px<0 || px>1 || py<0 || py>1) continue;   // 落在画布外的直接丢，不做裁边堆积
+    stars.push({x:px, y:py, r:0.45+rnd()*0.75, a:0.10+rnd()*0.34, halo:0, spike:0});
+  }
+  // 全幅散星：两层，浅层多而暗、深层少而亮
+  for(let i=0;i<380;i++){
+    stars.push({x:rnd(), y:rnd(), r:0.35+rnd()*0.6, a:0.06+rnd()*0.20, halo:0, spike:0});
+  }
+  for(let i=0;i<150;i++){
+    stars.push({x:rnd(), y:rnd(), r:0.7+rnd()*0.9, a:0.30+rnd()*0.45, halo:0, spike:0});
+  }
+  // 亮星：带光晕，个别加十字星芒。这批**不进烘焙层**，逐帧绘制才能呼吸闪烁
+  for(let i=0;i<30;i++){
+    stars.push({x:rnd(), y:rnd(), r:1.1+rnd()*1.4, a:0.62+rnd()*0.34,
+                halo:1, spike: rnd()<0.34 ? 1 : 0, ph:rnd()*6.283});
+  }
+  // 星云：4 团，每团若干重叠圆团叠出云絮感
+  const PAL = ['#2e6bd6','#6a3fd0','#c03a94','#1e88a8','#3b4fd8'];
+  const neb = [];
+  for(let i=0;i<5;i++){
+    const cx=0.12+rnd()*0.76, cy=0.12+rnd()*0.72;
+    const col=PAL[i%PAL.length], spread=0.09+rnd()*0.07, base=0.030+rnd()*0.030;
+    const puffs=[];
+    for(let k=0;k<7;k++){
+      puffs.push({x:cx+(rnd()-0.5)*spread*2.1, y:cy+(rnd()-0.5)*spread*1.5,
+                  rr:(0.16+rnd()*0.30)*(0.7+spread*3),
+                  a:base*(0.5+rnd()*0.9)});
+    }
+    neb.push({col:col, puffs:puffs});
+  }
+  // 星点色温：多数冷白，少量冰蓝与微暖，避免一片死白
+  for(let i=0;i<stars.length;i++){
+    const t=rnd();
+    stars[i].c = t<0.70 ? '#f4f9ff' : (t<0.90 ? '#cfe0ff' : '#ffe9c9');
+  }
+  relSky.data = {stars:stars, neb:neb};
+  return relSky.data;
+}
+
+function relRgba(c, a){ return relAlpha(c, Math.max(0,Math.min(1,a)).toFixed(3)); }
+
+/* 把整片星空烘焙到离屏 canvas。
+   烘焙范围比视口大 2*mx，多出来的边用于视差平移，否则一平移就露白边。 */
+function relSkyBuild(w, h){
+  const d = relSkyData();
+  const M = relSky.mx;
+  const W = w + M*2, H = h + M*2;
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  const k = Math.max(0.5, Math.max(w,h)/1200);   // 星点尺寸基准按视口算，留边不影响大小
+
+  // 1) 深空底
+  const base = c.createRadialGradient(W*0.5, H*0.46, 10, W*0.5, H*0.5, Math.max(W,H)*0.80);
+  base.addColorStop(0,   '#08111d');
+  base.addColorStop(0.52,'#04080f');
+  base.addColorStop(1,   '#010206');
+  c.fillStyle = base; c.fillRect(0,0,W,H);
+
+  // 2) 星云：加色叠加，柔和大团 + 内部云絮
+  c.globalCompositeOperation = 'lighter';
+  const m = Math.min(w,h);
+  d.neb.forEach(n=>{
+    n.puffs.forEach(p=>{
+      const x=p.x*W, y=p.y*H, rr=p.rr*m;
+      const g=c.createRadialGradient(x,y,0,x,y,rr);
+      g.addColorStop(0,    relRgba(n.col, p.a));
+      g.addColorStop(0.42, relRgba(n.col, p.a*0.42));
+      g.addColorStop(1,    relRgba(n.col, 0));
+      c.fillStyle=g;
+      c.beginPath(); c.arc(x,y,rr,0,6.2832); c.fill();
+    });
+  });
+  // 3) 银河带：渐变方向垂直于带子，整幅铺一层柔光（若沿带子方向做渐变会出现直边色块）
+  const bx1=W*0.04, by1=H*0.94, bx2=W*0.96, by2=H*0.06;
+  const ang=Math.atan2(by2-by1, bx2-bx1);
+  const vnx=Math.sin(ang), vny=-Math.cos(ang);        // 带的法线
+  const bxm=(bx1+bx2)/2, bym=(by1+by2)/2, half=m*0.46;
+  const bg = c.createLinearGradient(bxm-vnx*half, bym-vny*half, bxm+vnx*half, bym+vny*half);
+  bg.addColorStop(0,   'rgba(70,110,200,0)');
+  bg.addColorStop(0.34,'rgba(88,126,210,0.026)');
+  bg.addColorStop(0.50,'rgba(112,140,225,0.044)');
+  bg.addColorStop(0.66,'rgba(88,126,210,0.026)');
+  bg.addColorStop(1,   'rgba(70,110,200,0)');
+  c.fillStyle=bg; c.fillRect(0,0,W,H);
+
+  // 4) 星点（亮星只登记坐标，留到每帧画，见 relBrightStars）
+  c.globalCompositeOperation = 'source-over';
+  const bright = [];
+  d.stars.forEach(s=>{
+    const x=s.x*W, y=s.y*H, r=Math.max(0.4, s.r*k);
+    if(s.halo){ bright.push({x:x, y:y, r:r, a:s.a, c:s.c, spike:s.spike, ph:s.ph}); return; }
+    c.fillStyle = relRgba(s.c, s.a);
+    c.beginPath(); c.arc(x,y,r,0,6.2832); c.fill();
+  });
+
+  // 5) 四周压暗，收边更沉、气泡更突出
+  const vg = c.createRadialGradient(W*0.5,H*0.5,Math.min(w,h)*0.30, W*0.5,H*0.5,Math.max(w,h)*0.80);
+  vg.addColorStop(0,'rgba(0,0,0,0)');
+  vg.addColorStop(0.62,'rgba(0,0,0,0.22)');
+  vg.addColorStop(1,'rgba(0,0,0,0.62)');
+  c.fillStyle=vg; c.fillRect(0,0,W,H);
+
+  relSky.cv = cv; relSky.w = w; relSky.h = h; relSky.bright = bright;
+}
+
+/* 亮星逐帧绘制：呼吸闪烁 + 十字星芒（坐标即烘焙图层坐标，不再单独算视差） */
+function relBrightStars(ctx, w, h){
+  const bs = relSky.bright, t = relGraph.t || 0;
+  if(!bs || !bs.length) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for(let i=0;i<bs.length;i++){
+    const s = bs[i];
+    const x = s.x, y = s.y;
+    if(x < -24 || x > w+24 || y < -24 || y > h+24) continue;
+    const tw = 0.70 + 0.30*Math.sin(t*1.55 + s.ph);     // 0.40~1.00 的缓慢呼吸
+    const a  = s.a * tw;
+    const hr = s.r*3.6;
+    const g = ctx.createRadialGradient(x,y,0,x,y,hr);
+    g.addColorStop(0,   'rgba(214,234,255,'+(0.24*a).toFixed(3)+')');
+    g.addColorStop(0.30,'rgba(170,205,255,'+(0.08*a).toFixed(3)+')');
+    g.addColorStop(1,   'rgba(150,190,255,0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,y,hr,0,6.2832); ctx.fill();
+    ctx.fillStyle = relRgba(s.c, a);
+    ctx.beginPath(); ctx.arc(x,y,s.r,0,6.2832); ctx.fill();
+    if(s.spike){
+      ctx.strokeStyle='rgba(220,238,255,'+(0.30*a).toFixed(3)+')';
+      ctx.lineWidth=Math.max(0.5, s.r*0.22);
+      const L=s.r*4.2;
+      ctx.beginPath(); ctx.moveTo(x-L,y); ctx.lineTo(x+L,y);
+      ctx.moveTo(x,y-L); ctx.lineTo(x,y+L); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/* ---------- 流星 ---------- */
+function relMeteorSpawn(){
+  const w = relSky.w || 1200, h = relSky.h || 680;
+  const M = relSky.mx;                                    // 星空图层比视口大，坐标要加上留边
+  const dir  = Math.random() < 0.5 ? 1 : -1;              // 向右下 / 向左下
+  const ang  = (16 + Math.random()*24) * Math.PI/180;     // 与水平夹角，压低更自然
+  const len  = (140 + Math.random()*180) * (w/1200);
+  const x0   = M + (dir > 0 ? (-0.12*w + Math.random()*0.62*w)
+                            : ( 0.50*w + Math.random()*0.62*w));
+  const y0   = M + (-0.06*h + Math.random()*0.40*h);
+  relSky.meteors.push({x0:x0, y0:y0, dir:dir, ang:ang,
+                       sp:(0.95+Math.random()*0.75)*(w/1200),
+                       len:len, life:860+Math.random()*520, t0:performance.now()});
+}
+
+function relMeteorDraw(ctx){
+  if(!relSky.meteors.length) return;
+  const now = performance.now();
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  relSky.meteors.forEach(m=>{
+    const t = now - m.t0;
+    if(t < 0 || t > m.life) return;
+    const p = t/m.life;
+    // 淡入 12%、尾段 40% 淡出
+    const a = p < 0.12 ? p/0.12 : (p > 0.60 ? Math.max(0, 1-(p-0.60)/0.40) : 1);
+    const d  = m.sp * t;
+    const cx = (m.dir > 0 ? 1 : -1) * Math.cos(m.ang);
+    const cy = Math.sin(m.ang);
+    const hx = m.x0 + cx*d, hy = m.y0 + cy*d;
+    const tx = hx - cx*m.len, ty = hy - cy*m.len;
+    const g = ctx.createLinearGradient(hx,hy,tx,ty);
+    g.addColorStop(0,   'rgba(255,255,255,'+(0.95*a).toFixed(3)+')');
+    g.addColorStop(0.16,'rgba(205,232,255,'+(0.52*a).toFixed(3)+')');
+    g.addColorStop(0.52,'rgba(130,178,255,'+(0.17*a).toFixed(3)+')');
+    g.addColorStop(1,   'rgba(100,150,255,0)');
+    ctx.strokeStyle = g;
+    ctx.lineWidth = Math.max(1, m.len*0.011);
+    ctx.beginPath(); ctx.moveTo(hx,hy); ctx.lineTo(tx,ty); ctx.stroke();
+    // 头部亮点
+    const hr = Math.max(5, m.len*0.045);
+    const hg = ctx.createRadialGradient(hx,hy,0,hx,hy,hr);
+    hg.addColorStop(0,   'rgba(255,255,255,'+(0.95*a).toFixed(3)+')');
+    hg.addColorStop(0.38,'rgba(198,226,255,'+(0.30*a).toFixed(3)+')');
+    hg.addColorStop(1,   'rgba(160,200,255,0)');
+    ctx.fillStyle = hg;
+    ctx.beginPath(); ctx.arc(hx,hy,hr,0,6.2832); ctx.fill();
+  });
+  ctx.restore();
+}
+
+/* 流星期间逐帧重绘；没有流星时完全停下，不占 CPU */
+function relSkyLoop(){
+  cancelAnimationFrame(relSky.raf);
+  const step = ()=>{
+    const now = performance.now();
+    relGraph.t = now/1000;
+    relSky.meteors = relSky.meteors.filter(m=> now - m.t0 < m.life + 80);
+    if(relGraph.hasData && !relGraph.spin){
+      relSkyFrame();                                    // 流星只在星空层，不重绘节点层
+      if(relGraph.pinned>=0 || relGraph.hover>=0) relDraw();   // 有聚焦时顺带推进流光/光环
+    }
+    if(relSky.meteors.length){ relSky.raf = requestAnimationFrame(step); }
+    else { relSky.raf = 0; }
+  };
+  relSky.raf = requestAnimationFrame(step);
+}
+
+/* ---------- 氛围动画：亮星呼吸 / 连线光点流动 / 选中光环脉动 ----------
+   约 16fps 重绘一次即可表现，比 60fps 省得多；tab4 不可见或没数据时自动停。 */
+const relAmb = { raf:0, last:0 };
+function relAmbStart(){
+  if(relAmb.raf) return;
+  const step=(ts)=>{
+    relAmb.raf = 0;
+    if(!relGraph.hasData || !relSkyVisible()) return;    // 停掉，等 showTab(4) 再启
+    if(ts - relAmb.last >= 62){
+      relAmb.last = ts;
+      relGraph.t = ts/1000;
+      if(!relGraph.spin && !relSky.raf){
+        relSkyFrame();                                   // 只刷星空层：星点呼吸 + 流星
+        // 节点层没有需要动的东西就不重绘，省掉整张图的连线与文字开销
+        if(relGraph.pinned>=0 || relGraph.hover>=0) relDraw();
+      }
+    }
+    relAmb.raf = requestAnimationFrame(step);
+  };
+  relAmb.raf = requestAnimationFrame(step);
+}
+
+function relSkyVisible(){
+  const card=$('relGraphCard'), tab=$('tab4');
+  return !!(card && tab && card.style.display!=='none' && tab.style.display!=='none');
+}
+
+/* 安排下一颗流星：只在图表可见且有数据时才真正发射，否则顺延 */
+function relSkyKick(){
+  clearTimeout(relSky.timer);
+  relSky.timer = setTimeout(()=>{
+    if(!relGraph.hasData || !relSkyVisible()){ relSkyKick(); return; }
+    relMeteorSpawn();
+    relSkyLoop();
+    relSkyKick();
+  }, 5500 + Math.random()*7500);      // 约 5.5~13 秒一颗，偶尔划过
 }
 
 $('relSample').addEventListener('click', ()=>{
@@ -3331,6 +4931,7 @@ $('relAnalyze').addEventListener('click', async ()=>{
     if(d.error){ msg.textContent=d.error; msg.className='msg err'; return; }
     relGraph.nodes = d.nodes||[]; relGraph.edges = d.edges||[]; relGraph.hasData = true;
     relGraph.pinned = -1; relGraph.hover = -1; relGraph.dragNode = -1;
+    relGraph.only = ''; relGraph._legendKey = '';      // 新一轮分析清掉上次的类别筛选
     relLayout();
     $('relGraphCard').style.display='';
     const mode = (d.stats.mode||'') ? '（'+d.stats.mode+'模式）' : '';
@@ -3343,7 +4944,9 @@ $('relAnalyze').addEventListener('click', async ()=>{
       msg.className='msg ok';
     }
     relDetail(null);
-    relDraw();
+    relRender();
+    relSkyKick();                 // 出图后开始安排流星
+    relAmbStart();                // 亮星呼吸 / 光点流动
     $('relGraphCard').scrollIntoView({behavior:'smooth'});
   }catch(e){ msg.textContent='请求失败：'+e.message; msg.className='msg err'; }
 });
@@ -3409,16 +5012,50 @@ function relTints(idx, es, ns){
   });
 }
 
+/* 星空层：烘焙图原地重绘（闪烁/流星），视差靠 CSS transform 平移整层——
+   平移交给合成器，不必每帧重新贴一张大图（那是这一层最贵的操作）。 */
+function relSkyFrame(){
+  const cv=$('relSkyCv'); if(!cv) return;
+  const ctx=cv.getContext('2d');
+  const W=cv.width, H=cv.height;
+  const g=relGraph, M=relSky.mx;
+  if(!relSky.cv || relSky.cv.width!==W || relSky.cv.height!==H){
+    relSkyBuild(W - M*2, H - M*2);
+  }
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(relSky.cv, 0, 0);      // 固定偏移 = 整数原样拷贝，走快路径
+  relBrightStars(ctx, W, H);
+  relMeteorDraw(ctx);                  // 流星随时序叠加，未触发时为空
+  if(g.pinned>=0 || g.hover>=0){       // 聚焦时把背景压暗一档
+    ctx.fillStyle='rgba(2,4,9,0.34)'; ctx.fillRect(0,0,W,H);
+  }
+  // 视差：yaw/pitch → 最多 ±80px（留边范围内），换算成 CSS 像素交给 GPU
+  if(relSky.k == null){
+    const gw=$('relCanvas');
+    relSky.k = (gw && gw.getBoundingClientRect().width ? gw.getBoundingClientRect().width : 1200) / (W - M*2);
+  }
+  const dx = Math.max(-M, Math.min(M, -g.yaw*20));
+  const dy = Math.max(-M, Math.min(M, -g.pitch*14));
+  const tr = 'translate3d(' + (dx*relSky.k).toFixed(2) + 'px,'
+           + (dy*relSky.k).toFixed(2) + 'px,0)';
+  if(cv.style.transform !== tr) cv.style.transform = tr;   // 视角没动就别写样式，省掉无谓的重排
+}
+
+/* 画布全量刷新：星空层 + 节点层 */
+function relRender(){
+  relSkyFrame();
+  relDraw();
+}
+
+/* 窗口宽度变化后，星空层的 CSS 像素换算比例要重算 */
+window.addEventListener('resize', ()=>{ relSky.k = null; });
+
 function relDraw(){
   const cv=$('relCanvas'); if(!cv) return;
   const ctx=cv.getContext('2d'), w=cv.width, h=cv.height;
   const g=relGraph, ns=g.nodes, es=g.edges;
   const idx={}; ns.forEach((n,i)=>idx[n.id]=i);
   ctx.clearRect(0,0,w,h);
-  // 深色径向底，让高饱和气泡更亮
-  const bg=ctx.createRadialGradient(w/2,h*0.42,40,w/2,h/2,Math.max(w,h)*0.72);
-  bg.addColorStop(0,'#141d26'); bg.addColorStop(1,'#0b1016');
-  ctx.fillStyle=bg; ctx.fillRect(0,0,w,h);
   if(!ns.length) return;
 
   const proj = ns.map(n=>relProject([n._x,n._y,n._z],w,h));
@@ -3433,19 +5070,33 @@ function relDraw(){
       if(b===focus) near.add(a);
     });
   }
-  // 连线
+  // 连线：only 是图例点选的类别过滤；text 控制关系文字显示策略
+  const only = g.only;
+  const inOnly = new Set();        // 参与了该类关系的特征，其余的要一起淡出，否则看着像悬空
+  if(only){
+    es.forEach(e=>{
+      if(e.kind!==only) return;
+      const a=idx[e.a], b=idx[e.b];
+      if(a!=null) inOnly.add(a);
+      if(b!=null) inOnly.add(b);
+    });
+  }
+  // 拖动/旋转期间不画关系文字：文字每帧重新栅格化是旋转帧里最贵的一项
+  const showRel = !g.moving && ((g.text==='on') || (g.text==='auto' && es.length<=40));
   ctx.lineCap='round';
   es.forEach(e=>{
     const a=idx[e.a], b=idx[e.b];
     if(a==null||b==null) return;
     const pa=proj[a], pb=proj[b];
     const on = focus>=0 && (a===focus || b===focus);
-    const dim = focus>=0 && !on;
+    const off = !!only && e.kind!==only;                 // 被类别过滤掉
+    const dim = (focus>=0 && !on) || off;
     const c = relColor(e.kind);
-    ctx.strokeStyle = dim ? 'rgba(110,125,150,0.10)' : (on ? c : relAlpha(c, 0.55));
+    ctx.strokeStyle = off ? 'rgba(110,125,150,0.06)'
+                          : (dim ? 'rgba(110,125,150,0.10)' : (on ? c : relAlpha(c, 0.55)));
     ctx.lineWidth = dim ? 1 : (on ? 2.6 : 1.5);
     ctx.beginPath(); ctx.moveTo(pa.x,pa.y); ctx.lineTo(pb.x,pb.y); ctx.stroke();
-    if(!dim && (on || es.length<=40)){
+    if(!dim && (on || showRel)){
       const mx=(pa.x+pb.x)/2, my=(pa.y+pb.y)/2;
       if((pa.z+pb.z)/2 < 0.6){
         ctx.font='11px sans-serif'; ctx.textAlign='center';
@@ -3454,6 +5105,16 @@ function relDraw(){
         ctx.fillStyle = on ? '#e8f2ff' : relAlpha(c, 0.9);
         ctx.fillText(e.rel, mx, my-3);
       }
+    }
+    // 聚焦连线上的流动光点：顺着关系方向跑，提示"谁连着谁"
+    if(on && !dim){
+      const ph = ((g.t*0.5 + (a*0.17 + b*0.11)) % 1 + 1) % 1;
+      const fx = pa.x + (pb.x-pa.x)*ph, fy = pa.y + (pb.y-pa.y)*ph;
+      ctx.save();
+      ctx.shadowColor = c; ctx.shadowBlur = 9;
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.beginPath(); ctx.arc(fx,fy,2.3,0,6.2832); ctx.fill();
+      ctx.restore();
     }
   });
   const tints = relTints(idx, es, ns);
@@ -3475,7 +5136,7 @@ function relDraw(){
   order.forEach(i=>{
     const n=ns[i], p=proj[i];
     const r = Math.max(5, n._r*p.f*g.zoom*0.85);
-    const dim = focus>=0 && !near.has(i);
+    const dim = (focus>=0 && !near.has(i)) || (!!only && !inOnly.has(i));
     const front = p.z<0;
     const alpha = dim?0.18:(front?1:0.78);
     const base = tints[i];
@@ -3497,6 +5158,13 @@ function relDraw(){
       ctx.lineWidth = sel ? 2.4 : 1.6;
       ctx.beginPath(); ctx.arc(p.x,p.y,Math.max(2,r)+3.5,0,6.2832); ctx.stroke();
     }
+    // 选中气泡外再套一圈呼吸光环，静看时也有"活着"的感觉
+    if(sel){
+      const pr = Math.max(2,r) + 8 + Math.sin(g.t*2.6)*3.2;
+      ctx.strokeStyle = relMix(base, 120, 0.42);
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(p.x,p.y,pr,0,6.2832); ctx.stroke();
+    }
     // 标签（选中的一定画，其它按防重叠结果）
     if(!dim && (labelOk.has(i) || sel || hov)){
       const rc = labelRect[i], fs = Math.max(11, Math.min(15, 11*Math.min(p.f,1.3)));
@@ -3510,13 +5178,25 @@ function relDraw(){
       ctx.fillText(n.label, p.x, rc.y+rc.h-6);
     }
   });
-  // 图例
+  // 图例（可点选类别筛选）。active 帧率高，内容不变就不重写 DOM，避免闪烁与 hover 丢失
   const kd = {}; es.forEach(e=>{ kd[e.kind] = (kd[e.kind]||0) + 1; });
-  const rows = Object.keys(REL_NAMES).filter(k=>kd[k])
-    .map(k=>'<span style="color:'+relColor(k)+'">●</span> '+REL_NAMES[k]+' '+kd[k]).join('<br>');
-  $('relLegend').innerHTML =
-    '特征 <b style="color:#eaf4ff">'+ns.length+'</b> 个 · 关系 <b style="color:#eaf4ff">'+es.length+'</b> 条<br>'+rows+
-    '<br><span style="color:#6b7688">拖节点移动 · 拖空白旋转<br>滚轮缩放 · 单击查看详情</span>';
+  const key = ns.length+'/'+es.length+'/'+g.only+'/'+JSON.stringify(kd);
+  if(key !== g._legendKey){
+    g._legendKey = key;
+    const rows = Object.keys(REL_NAMES).filter(k=>kd[k]).map(k=>{
+      const act = (g.only === k);
+      const op = (g.only && !act) ? 0.30 : 1;
+      return '<span class="relK" data-k="'+k+'" title="只看「'+REL_NAMES[k]+'」，再点取消"'
+           + ' style="cursor:pointer;pointer-events:auto;opacity:'+op+';'
+           + (act ? 'text-decoration:underline;text-underline-offset:3px;' : '') + '">'
+           + '<span style="color:'+relColor(k)+'">●</span> '+REL_NAMES[k]+' '+kd[k]+'</span>';
+    }).join('<br>');
+    $('relLegend').innerHTML =
+      '特征 <b style="color:#eaf4ff">'+ns.length+'</b> 个 · 关系 <b style="color:#eaf4ff">'+es.length+'</b> 条'
+      + (g.only ? '<br><span style="color:#ffd479">仅看「'+REL_NAMES[g.only]+'」· 再点该类别取消</span>' : '')
+      + '<br>'+rows
+      + '<br><span style="color:#6b7688">点类别只看该类 · 拖节点移动<br>拖空白旋转 · 滚轮缩放 · 单击查看详情</span>';
+  }
 }
 
 /* 右下角详情面板：选中节点的全部关系 */
@@ -3545,7 +5225,7 @@ function relDetail(i){
   box.innerHTML = html.join('');
   box.style.display='';
   const c = $('relDetailClose');
-  if(c) c.onclick = ()=>{ relGraph.pinned=-1; relDetail(null); relDraw(); };
+  if(c) c.onclick = ()=>{ relGraph.pinned=-1; relDetail(null); relRender(); };
 }
 
 (function(){
@@ -3594,12 +5274,14 @@ function relDetail(i){
         relGraph.pitch = Math.max(-1.4, Math.min(1.4, relGraph.pitch + dy*0.008));
       }
       relGraph.lx=q.x; relGraph.ly=q.y;
-      if(relGraph.hasData) relDraw();
+      relGraph.moving = true;
+      // 拖节点只动上层；拖视角要连星空一起平移（视差），所以走全量刷新
+      if(relGraph.hasData) relGraph.dragNode>=0 ? relDraw() : relRender();
       e.preventDefault();
     }else if(relGraph.hasData){
       const h=pick(q);
       if(h!==relGraph.hover){
-        relGraph.hover=h; relDraw();
+        relGraph.hover=h; relRender();
         cv.style.cursor = h>=0 ? 'pointer' : 'grab';
       }
       $('relHover').textContent = h>=0
@@ -3612,9 +5294,11 @@ function relDetail(i){
       const q=pos(e); const h=pick(q);
       relGraph.pinned = (h===relGraph.pinned)? -1 : h;
       relDetail(relGraph.pinned);
-      if(relGraph.hasData) relDraw();
+      if(relGraph.hasData) relRender();
     }
-    relGraph.drag=false; relGraph.dragNode=-1; cv.style.cursor='grab';
+    const wasMoving = relGraph.moving;
+    relGraph.moving=false; relGraph.drag=false; relGraph.dragNode=-1; cv.style.cursor='grab';
+    if(wasMoving && relGraph.hasData) relRender();     // 松手把关系文字补回来
   };
   cv.addEventListener('mousedown',down); cv.addEventListener('mousemove',move);
   window.addEventListener('mouseup',up);
@@ -3633,7 +5317,7 @@ function relDetail(i){
       const n=relGraph.nodes[h];
       relGraph.yaw = -Math.atan2(n._z, n._x);
       relGraph.pitch = Math.asin(Math.max(-1,Math.min(1,-n._y)))*0.8;
-      relGraph.pinned=h; relDetail(h); relDraw();
+      relGraph.pinned=h; relDetail(h); relRender();
     }
   });
 
@@ -3641,7 +5325,8 @@ function relDetail(i){
   const spin=()=>{
     if(!relGraph.spin) return;
     relGraph.yaw += 0.0035;
-    if(relGraph.hasData) relDraw();
+    relGraph.t = performance.now()/1000;
+    if(relGraph.hasData) relRender();       // 视角在变，星空视差也要跟着动
     relGraph.raf = requestAnimationFrame(spin);
   };
   $('relSpin').addEventListener('click', ()=>{
@@ -3651,15 +5336,55 @@ function relDetail(i){
   });
   $('relReset').addEventListener('click', ()=>{
     relGraph.yaw=0.6; relGraph.pitch=0.35; relGraph.zoom=1;
-    relGraph.pinned=-1; relDetail(null); relLayout(); relDraw();
+    relGraph.pinned=-1; relDetail(null); relLayout(); relRender();
   });
 })();
 
-/* ---------- 主程序深链：/?tab=1|2|3|4 或 /#tab1|tab2|tab3|tab4 ----------
-   1 调整外观图（一键改图） / 2 附图标注（编辑图片） / 3 XML 修改 / 4 特征关系分析 */
+/* 图例点选筛选：点某类别只看该类，再点同一类别取消 */
 (function(){
-  var m = location.search.match(/[?&]tab=([1-4])(?:&|$)/)
-       || location.hash.match(/^#tab([1-4])\b/);
+  const lg = $('relLegend'); if(!lg) return;
+  lg.addEventListener('click', ev=>{
+    const el = ev.target && ev.target.closest ? ev.target.closest('.relK') : null;
+    if(!el) return;
+    const k = el.getAttribute('data-k') || '';
+    if(!k) return;
+    relGraph.only = (relGraph.only === k) ? '' : k;
+    relDraw();
+  });
+})();
+
+/* 关系文字三态（自动→全部→隐藏）+ 保存当前视角为 PNG */
+(function(){
+  const btn = $('relTextBtn');
+  if(btn) btn.addEventListener('click', ()=>{
+    const order = ['auto','on','off'];
+    const label = {auto:'自动', on:'全部', off:'隐藏'};
+    const i = order.indexOf(relGraph.text);
+    relGraph.text = order[(i >= 0 ? i+1 : 0) % order.length];
+    btn.textContent = '关系文字：' + label[relGraph.text];
+    relDraw();
+  });
+  const sv = $('relSave');
+  if(sv) sv.addEventListener('click', ()=>{
+    const cv = $('relCanvas');
+    if(!cv || !relGraph.hasData) return;
+    try{
+      const d = new Date(), p = n=>('0'+n).slice(-2);
+      const name = '特征关系图-' + d.getFullYear() + p(d.getMonth()+1) + p(d.getDate())
+                 + '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.png';
+      const a = document.createElement('a');
+      a.download = name;
+      a.href = cv.toDataURL('image/png');
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }catch(e){}
+  });
+})();
+
+/* ---------- 主程序深链：/?tab=1|2|3|4|5 或 /#tab1|tab2|tab3|tab4|tab5 ----------
+   1 调整外观图（一键改图） / 2 附图标注（编辑图片） / 3 XML 修改 / 4 特征关系分析 / 5 公式截图 */
+(function(){
+  var m = location.search.match(/[?&]tab=([1-5])(?:&|$)/)
+       || location.hash.match(/^#tab([1-5])\b/);
   if(m) showTab(parseInt(m[1],10));
 })();
 </script>
@@ -3670,6 +5395,70 @@ function relDetail(i){
 # ---------------- 六视图处理与 HTTP 服务（原 server.py） ----------------
 SESSIONS = {}          # sid -> {'full': {view: Image}, 'ppi': {view: int}, 'ext': {view: str}, 'detect_cache': {}}
 LOCK = threading.Lock()
+
+# 主程序（Qt）推送的「当前文档申请信息」快照，供「XML 修改」页一键替代使用。
+# 页面运行在系统浏览器里，与主窗口没有脚本通道，所以由主程序在信息变化时把
+# 最新数据写进这个模块级变量，页面点按钮时按需 GET 取走（不做轮询）。
+_PARTY_SNAP = {'doc': '', 'applicants': [], 'inventors': [], 'poa': [],
+               'title': '', 'desc': '', 'abstract': '', 'claims': '', 'ts': 0}
+_PARTY_SNAP_LOCK = threading.Lock()
+
+
+def _party_row(row, width):
+    """把一行（tuple / list / 标量）规整成定长字符串列表，供 JSON 直出。"""
+    if not isinstance(row, (list, tuple)):
+        row = (row,)
+    row = tuple(row) + ('',) * max(0, width - len(row))
+    return [str(x if x is not None else '').strip() for x in row[:width]]
+
+
+def set_party_snapshot(doc='', applicants=None, inventors=None,
+                       title='', desc='', abstract='', claims='', poa=None):
+    """主程序侧调用：写入当前文档的申请人 / 发明人 / 委托书与正文快照。
+
+    applicants: [(名称, 证件号, 地址, 邮编), ...]；inventors: [(姓名, 身份证号), ...]
+    title/desc/abstract/claims: 专利名称、说明书、说明书摘要、权利要求书正文。
+    poa: [{'name': 文件名, 'dataB64': JPG 的 base64}, ...]（收藏夹里的委托书扫描件）
+    只保留非空行，全部转成纯 list / str，保证能直接 json 序列化。
+    """
+    apps = [_party_row(a, 4) for a in (applicants or [])
+            if any(str(x or '').strip() for x in _party_row(a, 4))]
+    invs = [_party_row(b, 2) for b in (inventors or [])
+            if any(str(x or '').strip() for x in _party_row(b, 2))]
+    poas = []
+    for e in (poa or []):
+        if not isinstance(e, dict):
+            continue
+        data = str(e.get('dataB64') or '').strip()
+        if not data:
+            continue
+        poas.append({'name': str(e.get('name') or '')[:120] or '委托书.jpg',
+                     'dataB64': data})
+    texts = {}
+    for k, v in (('title', title), ('desc', desc),
+                 ('abstract', abstract), ('claims', claims)):
+        texts[k] = str(v or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    with _PARTY_SNAP_LOCK:
+        _PARTY_SNAP['doc'] = doc or ''
+        _PARTY_SNAP['applicants'] = apps
+        _PARTY_SNAP['inventors'] = invs
+        _PARTY_SNAP['poa'] = poas
+        _PARTY_SNAP.update(texts)
+        _PARTY_SNAP['ts'] = time.time()
+
+
+def get_party_snapshot():
+    """网页端调用：取当前文档的申请信息与正文快照（含来源文档名与时间）。"""
+    with _PARTY_SNAP_LOCK:
+        return {'doc': _PARTY_SNAP['doc'],
+                'applicants': [list(a) for a in _PARTY_SNAP['applicants']],
+                'inventors': [list(b) for b in _PARTY_SNAP['inventors']],
+                'poa': [dict(p) for p in _PARTY_SNAP['poa']],
+                'title': _PARTY_SNAP['title'],
+                'desc': _PARTY_SNAP['desc'],
+                'abstract': _PARTY_SNAP['abstract'],
+                'claims': _PARTY_SNAP['claims'],
+                'ts': _PARTY_SNAP['ts']}
 
 
 def b64_to_image(b64):
@@ -3974,6 +5763,858 @@ def process(session, params):
     return out, notes, D
 
 
+# ---------------- 公式转图片：Word 文档 → 识别公式 → 原位替换为图片 → 导出 .docx ----------------
+_FM_NS = {
+    'w':  'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+    'r':  'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+    'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+    'a':  'http://schemas.openxmlformats.org/drawingml/2006/main',
+    'pic':'http://schemas.openxmlformats.org/drawingml/2006/picture',
+    'm':  'http://schemas.openxmlformats.org/officeDocument/2006/math',
+    'rel':'http://schemas.openxmlformats.org/package/2006/relationships',
+    'ct': 'http://schemas.openxmlformats.org/package/2006/content-types',
+}
+W_NS=_FM_NS['w']; R_NS=_FM_NS['r']; WP_NS=_FM_NS['wp']; A_NS=_FM_NS['a']; A=A_NS
+PIC_NS=_FM_NS['pic']; M_NS=_FM_NS['m']; REL_NS=_FM_NS['rel']; CT_NS=_FM_NS['ct']
+W=W_NS; R=R_NS
+# 反向映射（URI -> 前缀），供 lxml 序列化时统一命名空间前缀
+_FM_PREFIX = {uri: pref for pref, uri in _FM_NS.items()}
+
+def _fm_lxq(ns, tag):
+    return '{%s}%s' % (ns, tag)
+
+def _fm_local(el):
+    return _LXET.QName(el).localname
+
+def _fm_load_media(zf):
+    names = set(zf.namelist())
+    rels = {}
+    rel_path = 'word/_rels/document.xml.rels'
+    if rel_path in names:
+        try:
+            root = _LXET.fromstring(zf.read(rel_path))
+            for rel in root:
+                rid = rel.get('Id'); tgt = rel.get('Target'); typ = rel.get('Type') or ''
+                if not rid or not tgt:
+                    continue
+                path = tgt[1:] if tgt.startswith('/') else 'word/' + tgt
+                path = path.replace('\\', '/')
+                rels[rid] = {'target': path, 'type': typ}
+        except Exception:
+            pass
+    media = {}
+    for rid, info in rels.items():
+        if 'image' in info['type'] and info['target'] in names:
+            try:
+                media[rid] = zf.read(info['target'])
+            except Exception:
+                pass
+    return media
+
+def _fm_safe_rgb(b):
+    im = Image.open(io.BytesIO(b))
+    if im.mode in ('RGBA', 'LA'):
+        bg = Image.new('RGB', im.size, (255, 255, 255))
+        bg.paste(im, mask=im.split()[-1])
+        return bg
+    if im.mode == 'P':
+        return im.convert('RGBA').convert('RGB')
+    return im.convert('RGB')
+
+def _fm_trim(img, margin=6):
+    try:
+        px = img.load()
+        W, H = img.size
+        minx, miny, maxx, maxy = W, H, -1, -1
+        for y in range(H):
+            for x in range(W):
+                p = px[x, y]
+                if len(p) >= 3 and (abs(p[0]-255) > 6 or abs(p[1]-255) > 6 or abs(p[2]-255) > 6):
+                    if x < minx: minx = x
+                    if x > maxx: maxx = x
+                    if y < miny: miny = y
+                    if y > maxy: maxy = y
+        if maxx < 0:
+            return img
+        minx = max(0, minx - margin); miny = max(0, miny - margin)
+        maxx = min(W-1, maxx + margin); maxy = min(H-1, maxy + margin)
+        return img.crop((minx, miny, maxx + 1, maxy + 1))
+    except Exception:
+        return img
+
+def _fm_encode(img, fmt):
+    buf = io.BytesIO()
+    if fmt.upper() == 'JPG':
+        img.convert('RGB').save(buf, 'JPEG', quality=90)
+    else:
+        img.save(buf, 'PNG')
+    return buf.getvalue()
+
+_FM_FONT = None
+def _fm_placeholder(text):
+    global _FM_FONT
+    if _FM_FONT is None:
+        for fp in ('C:/Windows/Fonts/arial.ttf', 'C:/Windows/Fonts/times.ttf',
+                   'C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf',
+                   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'):
+            if os.path.exists(fp):
+                try:
+                    _FM_FONT = ImageFont.truetype(fp, 18); break
+                except Exception:
+                    pass
+        if _FM_FONT is None:
+            _FM_FONT = ImageFont.load_default()
+    txt = text or '(空公式)'
+    tmp = Image.new('RGB', (10, 10), (255, 255, 255))
+    d = ImageDraw.Draw(tmp)
+    try:
+        bb = d.textbbox((0, 0), txt, font=_FM_FONT)
+        tw, th = bb[2] - bb[0], bb[3] - bb[1]
+    except Exception:
+        tw, th = max(20, len(txt) * 9), 22
+    pad = 8
+    img = Image.new('RGB', (tw + pad * 2, th + pad * 2), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    try:
+        d.text((pad - bb[0], pad - bb[1]), txt, fill=(30, 30, 30), font=_FM_FONT)
+    except Exception:
+        d.text((pad, pad), txt, fill=(30, 30, 30))
+    return _fm_trim(img, 4)
+
+def _fm_omml_text(node):
+    parts = []
+    for t in node.iter():
+        if _fm_local(t) == 't' and t.text:
+            parts.append(t.text)
+    return ''.join(parts).strip()
+
+# ---- OMML 矢量公式内置数学排版渲染（无 Word/LibreOffice 时的高保真兜底） ----
+# 思路：解析 OMML 结构（sSub/sSup/sSubSup/d/f/nary/r…），用 Cambria Math 字体以
+# _FM_OMML_SCALE 倍分辨率排版绘制，插入文档时按逻辑尺寸（1 倍）计算 EMU，
+# Word 中缩放显示为高清图片。样式映射：m:scr/m:sty → Unicode 数学字母变体区。
+_FM_OMML_SCALE = 3
+_FM_MATH_FONT_PATH = 'C:/Windows/Fonts/cambria.ttc'
+_FM_MATH_FONTS = {}
+_FM_M_VAL = '{%s}val' % M_NS
+
+def _fm_math_font(px):
+    px = max(6, int(round(px)))
+    f = _FM_MATH_FONTS.get(px)
+    if f is None:
+        f = ImageFont.truetype(_FM_MATH_FONT_PATH, px, index=0)
+        _FM_MATH_FONTS[px] = f
+    return f
+
+def _fm_math_range(upper, lower, exc=None):
+    d = {}
+    for i in range(26):
+        d[chr(65 + i)] = upper + i
+        d[chr(97 + i)] = lower + i
+    if exc:
+        d.update(exc)
+    return d
+
+_FM_MATH_VARIANTS = {
+    'script':        _fm_math_range(0x1D49C, 0x1D4B6, {'B': 0x212C, 'E': 0x2130, 'F': 0x2131, 'H': 0x210B, 'I': 0x2110, 'L': 0x2112, 'M': 0x2133, 'R': 0x211B, 'e': 0x212F, 'g': 0x210A, 'o': 0x2134}),
+    'bold-script':   _fm_math_range(0x1D4D0, 0x1D4EA),
+    'fraktur':       _fm_math_range(0x1D504, 0x1D51E, {'C': 0x212D, 'H': 0x210C, 'I': 0x2111, 'R': 0x211C, 'Z': 0x2128}),
+    'bold-fraktur':  _fm_math_range(0x1D56C, 0x1D586),
+    'double-struck': _fm_math_range(0x1D538, 0x1D552, {'C': 0x2102, 'H': 0x210D, 'N': 0x2115, 'P': 0x2119, 'Q': 0x211A, 'R': 0x211D, 'Z': 0x2124}),
+}
+_FM_MATH_ITALIC = _fm_math_range(0x1D434, 0x1D44E, {'h': 0x210E})
+_FM_MATH_BOLD = _fm_math_range(0x1D400, 0x1D41A)
+_FM_MATH_BOLD_ITALIC = _fm_math_range(0x1D468, 0x1D482)
+# 单字符运算符 run 的左右附加间距（em 倍数），模拟 Word 数学排版间距
+_FM_OP_SPACING = {'=': (0.22, 0.22), '+': (0.20, 0.20), '-': (0.20, 0.20),
+                  '\u2212': (0.20, 0.20), '\u2264': (0.20, 0.20), '\u2265': (0.20, 0.20),
+                  '\u2208': (0.17, 0.17), '|': (0.15, 0.15),
+                  ',': (0.0, 0.18), ';': (0.0, 0.18)}
+
+def _fm_variant_char(ch, scr, sty):
+    """按 m:scr / m:sty 把 ASCII 字母映射到 Unicode 数学字母变体（花体/斜体等）。"""
+    if not (('A' <= ch <= 'Z') or ('a' <= ch <= 'z')):
+        return ch
+    if scr == 'monospace':
+        base = 0x1D670 if ch <= 'Z' else 0x1D68A
+        return chr(base + (ord(ch.lower()) - 97))
+    if scr == 'sans-serif':
+        u, l = {'p': (0x1D5A0, 0x1D5BA), 'b': (0x1D5D4, 0x1D5EE),
+                'i': (0x1D608, 0x1D622), 'bi': (0x1D63C, 0x1D656)}.get(sty or 'p', (0x1D5A0, 0x1D5BA))
+        return chr((u if ch <= 'Z' else l) + (ord(ch) - (65 if ch <= 'Z' else 97)))
+    if scr in _FM_MATH_VARIANTS:
+        m = _FM_MATH_VARIANTS[scr]
+        if scr in ('script', 'fraktur', 'double-struck') and sty in ('b', 'bi'):
+            m = _FM_MATH_VARIANTS.get('bold-' + scr, m)
+        return chr(m[ch]) if ch in m else ch
+    if sty == 'p':
+        return ch
+    m = _FM_MATH_ITALIC
+    if sty == 'b':
+        m = _FM_MATH_BOLD
+    elif sty == 'bi':
+        m = _FM_MATH_BOLD_ITALIC
+    return chr(m[ch]) if ch in m else ch
+
+class _FmBox(object):
+    """排版盒：w/h/asc（基线距顶部），paint(ox, oy, ops) 把绘制指令追加到 ops。"""
+    def __init__(self, w, h, asc, paint):
+        self.w, self.h, self.asc, self.paint = w, h, asc, paint
+        self._text = None
+        self._pads = (0.0, 0.0)
+
+# CJK 回退：Cambria Math 无中文字形，中文/全角标点用系统 CJK 字体渲染
+_FM_CJK_FONT_PATHS = ('C:/Windows/Fonts/msyh.ttc', 'C:/Windows/Fonts/simhei.ttf',
+                      'C:/Windows/Fonts/simsun.ttc')
+_FM_CJK_FONTS = {}
+_FM_CJK_FONT_PATH = None
+for _p in _FM_CJK_FONT_PATHS:
+    if os.path.exists(_p):
+        _FM_CJK_FONT_PATH = _p
+        break
+
+def _fm_cjk_font(px):
+    if _FM_CJK_FONT_PATH is None:
+        return None
+    px = max(6, int(round(px)))
+    f = _FM_CJK_FONTS.get(px)
+    if f is None:
+        f = ImageFont.truetype(_FM_CJK_FONT_PATH, px)
+        _FM_CJK_FONTS[px] = f
+    return f
+
+def _fm_is_cjk(ch):
+    o = ord(ch)
+    return (0x2E80 <= o <= 0x9FFF) or (0xAC00 <= o <= 0xD7FF) or \
+           (0x3000 <= o <= 0x303F) or (0xFF00 <= o <= 0xFFEF) or (0x20000 <= o <= 0x2FFFF)
+
+def _fm_box_text(text, size, pads=(0.0, 0.0)):
+    f = _fm_math_font(size)
+    # 按 CJK/非 CJK 切分段落（基线统一，desc 取各字体较大值）
+    segs = []
+    cur, cur_cjk = '', None
+    for ch in (text or ''):
+        c = _fm_is_cjk(ch)
+        if c == cur_cjk:
+            cur += ch
+        else:
+            if cur:
+                segs.append((cur, _fm_cjk_font(size) if cur_cjk else f))
+            cur, cur_cjk = ch, c
+    if cur:
+        segs.append((cur, _fm_cjk_font(size) if cur_cjk else f))
+    w = sum(ff.getlength(s) for s, ff in segs)
+    asc, desc = f.getmetrics()
+    for _s, ff in segs:
+        if ff is not None and ff is not f:
+            desc = max(desc, ff.getmetrics()[1])
+    pl, pr = pads[0] * size, pads[1] * size
+    def paint(ox, oy, ops):
+        x = ox + pl
+        for s, ff in segs:
+            ops.append(('t', x, oy + asc, s, ff))
+            x += ff.getlength(s)
+    b = _FmBox(w + pl + pr, asc + desc, asc, paint)
+    b._text = text
+    b._pads = pads
+    return b
+
+# 可缩放数学定界符：按目标高度放大字号取自然字形（不水平拉伸），缓存
+_FM_DELIM_CACHE = {}
+
+def _fm_delim_glyph(ch, target_h, size=None):
+    """返回 (PIL L 图, 宽, 实际高)，实际高 >= target_h；找不到足够高字形时垂直拉伸保底。
+
+    大型定界符（目标高度超过行内 1.5 倍）用行内字号渲染后垂直拉伸：
+    字形笔画宽度只由渲染字号决定，不会随目标高度变粗——与 Word 大括号
+    的细笔画观感一致；行内尺寸仍用自然字形。"""
+    big = size is not None and target_h > size * 1.5
+    s_start = size * 1.3 if big else float(target_h)
+    key = (ch, int(round(target_h)), None if size is None else int(round(size)))
+    hit = _FM_DELIM_CACHE.get(key)
+    if hit is not None:
+        return hit
+    best = None
+    s = max(12.0, s_start)
+    for _ in range(10):
+        try:
+            f = _fm_math_font(s)
+            tmp = Image.new('L', (int(s * 2) + 16, int(s * 2) + 16), 0)
+            td = ImageDraw.Draw(tmp)
+            td.text((s + 8, s + 8), ch, font=f, anchor='ls', fill=255)
+            bb = tmp.getbbox()
+        except Exception:
+            bb = None
+        if bb is None:
+            break
+        gw, gh = bb[2] - bb[0], bb[3] - bb[1]
+        best = (tmp.crop(bb), gw, gh)
+        if gh >= target_h or big:
+            break
+        s = min(400.0, s * (target_h / max(1.0, gh)) * 1.08)
+    if best is None:
+        # 极端退化：画一条竖线
+        seg = Image.new('L', (max(1, int(round(target_h / 12.0))), max(1, int(round(target_h)))), 255)
+        best = (seg, seg.width, seg.height)
+    seg, gw, gh = best
+    if gh < target_h:
+        seg = seg.resize((gw, max(1, int(round(target_h)))), Image.LANCZOS)
+        gw, gh = seg.width, seg.height
+    val = (seg, gw, gh)
+    _FM_DELIM_CACHE[key] = val
+    return val
+
+def _fm_box_v(rows, gap_px):
+    """多行垂直堆叠（左对齐），用于矩阵 m / 方程组 eqArr。"""
+    rows = [r for r in rows if r is not None]
+    if not rows:
+        return _fm_box_text('', 12)
+    w = max(r.w for r in rows)
+    h = sum(r.h for r in rows) + gap_px * (len(rows) - 1)
+    asc = rows[0].asc
+    def paint(ox, oy, ops):
+        y = 0.0
+        for r in rows:
+            r.paint(ox, oy + y, ops)
+            y += r.h + gap_px
+    return _FmBox(w, h, asc, paint)
+
+def _fm_box_h(items):
+    items = [b for b in items if b is not None]
+    if not items:
+        return _fm_box_text('', 12)
+    w = sum(b.w for b in items)
+    asc = max(b.asc for b in items)
+    h = asc + max(b.h - b.asc for b in items)
+    def paint(ox, oy, ops):
+        x = 0.0
+        for b in items:
+            b.paint(ox + x, oy + (asc - b.asc), ops)
+            x += b.w
+    return _FmBox(w, h, asc, paint)
+
+def _fm_rescale_text(box, newsize):
+    """上下标按脚本字号重建（仅支持纯文本盒；复杂内容保持原字号）。"""
+    if box is not None and box._text is not None:
+        return _fm_box_text(box._text, newsize, box._pads)
+    return box
+
+def _fm_box_subsup(base, sub, sup, size):
+    base = base or _fm_box_text('', size)
+    sc = 0.65
+    if sub is not None:
+        sub = _fm_rescale_text(sub, size * sc)
+    if sup is not None:
+        sup = _fm_rescale_text(sup, size * sc)
+    w = base.w + max(b.w if b is not None else 0 for b in (sub, sup)) + 0.02 * size
+    asc_b = base.asc
+    tops = [0.0]
+    paints = [(0.0, 0.0, base)]
+    if sup is not None:
+        t = asc_b - 0.45 * size - sup.asc
+        tops.append(t)
+        paints.append((base.w, t, sup))
+    if sub is not None:
+        t = asc_b + 0.28 * size - sub.asc
+        tops.append(t)
+        paints.append((base.w, t, sub))
+    mt = min(tops)
+    bot = max([pp.h + t for (_x, t, pp) in paints])
+    h = bot - mt
+    asc = asc_b - mt
+    def paint(ox, oy, ops):
+        for x, t, p in paints:
+            p.paint(ox + x, oy + (t - mt), ops)
+    return _FmBox(w, h, asc, paint)
+
+def _fm_box_delim(kids, beg, end, sep, size):
+    """定界符盒。beg/end 为 None 时用默认 '('/')'；显式空串表示无该定界符（OMML 规范）。"""
+    if beg is None:
+        beg = '('
+    if end is None:
+        end = ')'
+    items = []
+    for i, c in enumerate(kids):
+        if i and sep:
+            items.append(_fm_box_text(sep, size, _FM_OP_SPACING.get(sep, (0.10, 0.10))))
+        items.append(c)
+    inner = _fm_box_h(items)
+    target_h = inner.h + 0.08 * size
+    seg_b = _fm_delim_glyph(beg, target_h, size) if beg else None
+    seg_e = _fm_delim_glyph(end, target_h, size) if end else None
+    dw_b = seg_b[1] if seg_b else 0.0
+    dw_e = seg_e[1] if seg_e else 0.0
+    gap = 0.04 * size if (seg_b and seg_e) else 0.0
+    w = dw_b + inner.w + dw_e + gap
+    dh = max(seg_b[2] if seg_b else 0, seg_e[2] if seg_e else 0)
+    h = max(inner.h, dh)
+    inner_top = (h - inner.h) / 2
+    asc = inner_top + inner.asc
+    def paint(ox, oy, ops):
+        if seg_b is not None:
+            ops.append(('g', ox, oy + (h - seg_b[2]) / 2, seg_b[0]))
+        x = ox + dw_b
+        inner.paint(x, oy + inner_top, ops)
+        if seg_e is not None:
+            ops.append(('g', x + inner.w + gap, oy + (h - seg_e[2]) / 2, seg_e[0]))
+    return _FmBox(w, h, asc, paint)
+
+def _fm_box_frac(num, den, size):
+    num = num or _fm_box_text('', size)
+    den = den or _fm_box_text('', size)
+    w = max(num.w, den.w) + 0.4 * size
+    gap = 0.12 * size
+    bar_y = num.h + gap
+    h = bar_y + gap + den.h + 0.10 * size
+    asc = bar_y + 0.28 * size
+    def paint(ox, oy, ops):
+        ops.append(('l', ox, oy + bar_y, ox + w, oy + bar_y, max(1, int(round(size / 24)))))
+        num.paint(ox + (w - num.w) / 2, oy, ops)
+        den.paint(ox + (w - den.w) / 2, oy + bar_y + gap, ops)
+    return _FmBox(w, h, asc, paint)
+
+def _fm_layout_node(el, size):
+    """OMML 节点 → 排版盒。未知结构退化为子元素横向拼接（跳过属性容器）。"""
+    ln = _fm_local(el)
+    if ln == 'r':
+        text = ''
+        scr = sty = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'rPr':
+                for cc in c:
+                    l2 = _fm_local(cc)
+                    if l2 == 'scr':
+                        scr = cc.get(_FM_M_VAL)
+                    elif l2 == 'sty':
+                        sty = cc.get(_FM_M_VAL)
+            elif cl == 't' and c.text:
+                text += c.text
+        text = ''.join(_fm_variant_char(ch, scr, sty) for ch in text)
+        pads = (0.0, 0.0)
+        if sty == 'p' and len(text) == 1 and text in _FM_OP_SPACING:
+            pads = _FM_OP_SPACING[text]
+        return _fm_box_text(text, size, pads)
+    if ln == 'sSub':
+        e = sub = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'e':
+                e = _fm_layout_node(c, size)
+            elif cl == 'sub':
+                sub = _fm_layout_node(c, size)
+        return _fm_box_subsup(e, sub, None, size)
+    if ln == 'sSup':
+        e = sup = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'e':
+                e = _fm_layout_node(c, size)
+            elif cl == 'sup':
+                sup = _fm_layout_node(c, size)
+        return _fm_box_subsup(e, None, sup, size)
+    if ln == 'sSubSup':
+        e = sub = sup = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'e':
+                e = _fm_layout_node(c, size)
+            elif cl == 'sub':
+                sub = _fm_layout_node(c, size)
+            elif cl == 'sup':
+                sup = _fm_layout_node(c, size)
+        return _fm_box_subsup(e, sub, sup, size)
+    if ln == 'd':
+        beg = end = sep = None
+        kids = []
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'dPr':
+                for cc in c:
+                    l2 = _fm_local(cc)
+                    if l2 == 'begChr':
+                        beg = cc.get(_FM_M_VAL)
+                    elif l2 == 'endChr':
+                        end = cc.get(_FM_M_VAL)
+                    elif l2 == 'sepChr':
+                        sep = cc.get(_FM_M_VAL)
+            elif cl == 'e':
+                kids.append(_fm_layout_node(c, size))
+        return _fm_box_delim(kids, beg, end,
+                             sep if sep not in (None, '') else '|', size)
+    if ln == 'm':
+        # 数学矩阵/方程组：m:mr 为行，行内 m:e 为单元格（左对齐，行间留小间距）
+        rows = []
+        for c in el:
+            if _fm_local(c) == 'mr':
+                cells = []
+                for cc in c:
+                    if _fm_local(cc) == 'e':
+                        cells.append(_fm_layout_node(cc, size))
+                rows.append(_fm_box_h(cells))
+        if not rows:
+            return _fm_box_text('', size)
+        return _fm_box_v(rows, 0.22 * size)
+    if ln == 'eqArr':
+        rows = []
+        for c in el:
+            if _fm_local(c) == 'e':
+                rows.append(_fm_layout_node(c, size))
+        if not rows:
+            return _fm_box_text('', size)
+        return _fm_box_v(rows, 0.22 * size)
+    if ln == 'f':
+        num = den = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'num':
+                num = _fm_layout_node(c, size)
+            elif cl == 'den':
+                den = _fm_layout_node(c, size)
+        return _fm_box_frac(num, den, size)
+    if ln == 'nary':
+        chr_c = None
+        sub = sup = body = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'naryPr':
+                for cc in c:
+                    if _fm_local(cc) == 'chr':
+                        chr_c = cc.get(_FM_M_VAL)
+            elif cl == 'sub':
+                sub = _fm_layout_node(c, size)
+            elif cl == 'sup':
+                sup = _fm_layout_node(c, size)
+            elif cl == 'e':
+                body = _fm_layout_node(c, size)
+        big = _fm_box_text(chr_c or '\u222b', size * 1.45)
+        left = _fm_box_subsup(big, sub, sup, size)
+        return _fm_box_h([left] + ([body] if body is not None else []))
+    if ln == 'rad':
+        deg = body = None
+        for c in el:
+            cl = _fm_local(c)
+            if cl == 'deg' and len(c):
+                deg = _fm_layout_node(c, size)
+            elif cl == 'e':
+                body = _fm_layout_node(c, size)
+        body = body or _fm_box_text('', size)
+        seg, sq, dh = _fm_delim_glyph('\u221a', body.h + 0.12 * size, size)
+        w = sq + 0.05 * size + body.w
+        dh = max(dh, body.h)
+        h = dh + 0.10 * size
+        asc = (h - body.h) / 2 + body.asc
+        def paint(ox, oy, ops):
+            dy = (h - seg.height) / 2
+            ops.append(('g', ox, oy + dy, seg))
+            x = ox + sq + 0.05 * size
+            top = oy + dy + max(1, int(round(seg.height * 0.03)))
+            ops.append(('l', ox + sq * 0.55, top, ox + w + 0.04 * size, top,
+                        max(1, int(round(size / 24)))))
+            body.paint(x, oy + (asc - body.asc), ops)
+        b = _FmBox(w, h, asc, paint)
+        b._text = '\u221a'  # 占位防缩放
+        return b
+    items = []
+    for c in el:
+        if not isinstance(c.tag, str):
+            continue
+        cl = _fm_local(c)
+        if cl.endswith('Pr') or cl in ('t', 'begChr', 'endChr', 'sepChr', 'chr', 'scr', 'sty'):
+            continue
+        items.append(_fm_layout_node(c, size))
+    return _fm_box_h(items)
+
+def _fm_render_omml(el):
+    """将 m:oMath 元素渲染为 PIL 图片（_FM_OMML_SCALE 倍分辨率，白底黑字）。"""
+    base_px = 48.0
+    for n in el.iter():
+        if _fm_local(n) == 'sz':
+            try:
+                v = int(n.get(_fm_lxq(W_NS, 'val')) or 0)
+            except Exception:
+                v = 0
+            if v > 0:
+                # w:sz 半点值 → 磅 → 逻辑像素（96dpi）→ 渲染倍率
+                base_px = (v / 2.0) * (96.0 / 72.0) * _FM_OMML_SCALE
+                break
+    box = _fm_layout_node(el, base_px)
+    pad = max(4, int(base_px * 0.22))
+    img = Image.new('RGB', (max(2, int(round(box.w)) + pad * 2), max(2, int(round(box.h)) + pad * 2)), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    ops = []
+    box.paint(pad, pad, ops)
+    for op in ops:
+        k = op[0]
+        if k == 't':
+            d.text((op[1], op[2]), op[3], font=op[4], anchor='ls', fill=(20, 20, 20))
+        elif k == 'l':
+            d.line([op[1], op[2], op[3], op[4]], fill=(20, 20, 20), width=op[5])
+        elif k == 'g':
+            # 数学定界符自然字形（已按目标高度放大/取整），按 alpha 蒙版贴黑色
+            _, x, y, seg = op
+            solid = Image.new('RGB', seg.size, (20, 20, 20))
+            img.paste(solid, (int(round(x)), int(round(y))), seg)
+    return _fm_trim(img, 6)
+
+def _fm_fit_emu(wpx, hpx, max_w_in=6.3, max_h_in=2.8):
+    PX = 9525
+    maxw = int(max_w_in * 914400); maxh = int(max_h_in * 914400)
+    emuw = wpx * PX; emuh = hpx * PX
+    scale = 1.0
+    if emuw > 0 and emuw > maxw: scale = min(scale, maxw / emuw)
+    if emuh > 0 and emuh > maxh: scale = min(scale, maxh / emuh)
+    return int(round(emuw * scale)), int(round(emuh * scale))
+
+def _fm_make_drawing(embed_rid, emu_w, emu_h, docid, name):
+    W=W_NS; WP=WP_NS; A=A_NS; PIC=PIC_NS; R=R_NS
+    drawing=_LXET.Element(_fm_lxq(W,'drawing'))
+    inline=_LXET.SubElement(drawing,_fm_lxq(WP,'inline'))
+    inline.set('distT','0'); inline.set('distB','0'); inline.set('distL','0'); inline.set('distR','0')
+    ext=_LXET.SubElement(inline,_fm_lxq(WP,'extent')); ext.set('cx',str(emu_w)); ext.set('cy',str(emu_h))
+    eff=_LXET.SubElement(inline,_fm_lxq(WP,'effectExtent')); eff.set('l','0'); eff.set('t','0'); eff.set('r','0'); eff.set('b','0')
+    dp=_LXET.SubElement(inline,_fm_lxq(WP,'docPr')); dp.set('id',str(docid)); dp.set('name',name); dp.set('descr',name)
+    _LXET.SubElement(inline,_fm_lxq(WP,'cNvGraphicFramePr'))
+    graphic=_LXET.SubElement(inline,_fm_lxq(A,'graphic'))
+    data=_LXET.SubElement(graphic,_fm_lxq(A,'graphicData')); data.set('uri',PIC)
+    pic=_LXET.SubElement(data,_fm_lxq(PIC,'pic'))
+    nv=_LXET.SubElement(pic,_fm_lxq(PIC,'nvPicPr'))
+    cp=_LXET.SubElement(nv,_fm_lxq(PIC,'cNvPr')); cp.set('id',str(docid)); cp.set('name',name)
+    _LXET.SubElement(nv,_fm_lxq(PIC,'cNvPicPr'))
+    bf=_LXET.SubElement(pic,_fm_lxq(PIC,'blipFill'))
+    blip=_LXET.SubElement(bf,_fm_lxq(A,'blip')); blip.set(_fm_lxq(R,'embed'), embed_rid)
+    st=_LXET.SubElement(bf,_fm_lxq(A,'stretch')); _LXET.SubElement(st,_fm_lxq(A,'fillRect'))
+    sp=_LXET.SubElement(pic,_fm_lxq(PIC,'spPr'))
+    xf=_LXET.SubElement(sp,_fm_lxq(A,'xfrm'))
+    off=_LXET.SubElement(xf,_fm_lxq(A,'off')); off.set('x','0'); off.set('y','0')
+    ex=_LXET.SubElement(xf,_fm_lxq(A,'ext')); ex.set('cx',str(emu_w)); ex.set('cy',str(emu_h))
+    pg=_LXET.SubElement(sp,_fm_lxq(A,'prstGeom')); pg.set('prst','rect')
+    _LXET.SubElement(pg,_fm_lxq(A,'avLst'))
+    return drawing
+
+def _fm_docx_to_images(docx_bytes, fmt='PNG', autocrop=True):
+    """将 docx 中的公式（m:oMath / m:oMathPara）原位替换为图片，返回 (修改后的docx字节, 统计, 预览图列表)。"""
+    zf = zipfile.ZipFile(io.BytesIO(docx_bytes))
+    names = set(zf.namelist())
+    if 'word/document.xml' not in names:
+        raise ValueError('不是有效的 Word 文档（缺少 word/document.xml）')
+    media = _fm_load_media(zf)
+    root = _LXET.fromstring(zf.read('word/document.xml'))
+    rel_path = 'word/_rels/document.xml.rels'
+    if rel_path in names:
+        rels_root = _LXET.fromstring(zf.read(rel_path))
+    else:
+        rels_root = _LXET.Element(_fm_lxq(REL_NS, 'Relationships'))
+    max_rid = 0
+    for rel in rels_root:
+        m = re.match(r'rId(\d+)', rel.get('Id') or '')
+        if m: max_rid = max(max_rid, int(m.group(1)))
+    max_img = 0
+    for n in names:
+        m = re.match(r'word/media/image(\d+)\.', n)
+        if m: max_img = max(max_img, int(m.group(1)))
+    docid = 1000
+    for el in root.iter():
+        if _fm_local(el) == 'docPr':
+            try: docid = max(docid, int(el.get('id') or 0))
+            except Exception: pass
+    docid += 1
+
+    formulas = [el for el in root.iter() if _fm_local(el) in ('oMath', 'oMathPara')]
+    formulas.sort(key=lambda e: 0 if _fm_local(e) == 'oMathPara' else 1)
+
+    report = {'paragraphs': 0, 'images': 0, 'formulas': 0, 'omml': 0, 'replaced': 0}
+    for el in root.iter():
+        if _fm_local(el) == 'p': report['paragraphs'] += 1
+
+    new_media = {}
+    images = []
+    for el in formulas:
+        parent = el.getparent()
+        if parent is None:
+            continue
+        pln = _fm_local(parent)
+        if pln in ('oMath', 'oMathPara'):
+            continue  # 跳过嵌套数学对象，由外层容器统一替换，避免重复处理
+        ln = _fm_local(el)
+        blip = el.find('.//' + _fm_lxq(A, 'blip'))
+        img_bytes = None
+        hi_res = False
+        if blip is not None:
+            rid = blip.get(_fm_lxq(R, 'embed'))
+            img_bytes = media.get(rid)
+        if img_bytes is not None:
+            try:
+                im = _fm_safe_rgb(img_bytes)
+                if autocrop: im = _fm_trim(im, 6)
+                kind = 'formula'
+                report['formulas'] += 1
+            except Exception:
+                img_bytes = None
+        if img_bytes is None:
+            txt = _fm_omml_text(el)
+            im = None
+            hi_res = False
+            if txt:
+                try:
+                    im = _fm_render_omml(el)
+                    hi_res = True
+                except Exception:
+                    im = None
+            if im is None:
+                im = _fm_placeholder(txt)
+                kind = 'omml'
+            else:
+                kind = 'formula'
+            report['omml'] += 1
+        out = _fm_encode(im, fmt)
+        max_img += 1; max_rid += 1
+        ext = 'jpg' if fmt.upper() == 'JPG' else 'png'
+        media_name = 'image%d.%s' % (max_img, ext)
+        embed_rid = 'rId%d' % max_rid
+        if img_bytes is None and hi_res:
+            # 渲染图是 _FM_OMML_SCALE 倍分辨率，按逻辑尺寸计算插入大小
+            emu_w, emu_h = _fm_fit_emu(max(1, im.width // _FM_OMML_SCALE), max(1, im.height // _FM_OMML_SCALE))
+        else:
+            emu_w, emu_h = _fm_fit_emu(im.width, im.height)
+        rel = _LXET.SubElement(rels_root, _fm_lxq(REL_NS, 'Relationship'))
+        rel.set('Id', embed_rid)
+        rel.set('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image')
+        rel.set('Target', 'media/' + media_name)
+        new_media[media_name] = out
+        drawing = _fm_make_drawing(embed_rid, emu_w, emu_h, docid, 'Formula%d' % docid)
+        docid += 1
+        if ln == 'oMathPara':
+            run = _LXET.Element(_fm_lxq(W, 'r'))
+            run.append(drawing)
+            parent.replace(el, run)
+        else:
+            parent.replace(el, drawing)
+        report['replaced'] += 1
+        try:
+            thumb = _fm_encode(_fm_trim(im, 4) if not autocrop else im, 'PNG')
+            images.append({'kind': kind, 'w': im.width, 'h': im.height,
+                           'thumb': 'data:image/png;base64,' + base64.b64encode(thumb).decode('ascii')})
+        except Exception:
+            pass
+
+    # 重建根节点并以显式 nsmap 统一命名空间前缀（兼容无 namespaces 参数的 lxml 版本）
+    combined = {}
+    for pref, uri in (root.nsmap or {}).items():
+        if pref:
+            combined[pref] = uri
+    for pref, uri in _FM_NS.items():
+        combined[pref] = uri
+    new_root = _LXET.Element(root.tag, nsmap=combined)
+    new_root.text = root.text
+    new_root.tail = root.tail
+    for k, v in root.attrib.items():
+        new_root.set(k, v)
+    new_root[:] = root[:]
+    new_doc = _LXET.tostring(new_root, xml_declaration=True, encoding='UTF-8', standalone=True)
+    new_rels = _LXET.tostring(rels_root, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+    ct_name = '[Content_Types].xml'
+    ct_bytes = None
+    if ct_name in names:
+        try:
+            ct_root = _LXET.fromstring(zf.read(ct_name))
+            have = {}
+            for d in ct_root:
+                if _fm_local(d) == 'Default':
+                    have[(d.get('Extension') or '').lower()] = d.get('ContentType')
+            need = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg'}
+            changed = False
+            for ext, ctt in need.items():
+                if ext not in have:
+                    dd = _LXET.SubElement(ct_root, _fm_lxq(CT_NS, 'Default'))
+                    dd.set('Extension', ext); dd.set('ContentType', ctt); changed = True
+            if changed:
+                ct_bytes = _LXET.tostring(ct_root, xml_declaration=True, encoding='UTF-8', standalone=True)
+        except Exception:
+            ct_bytes = None
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for n in zf.namelist():
+            if n == 'word/document.xml':
+                zout.writestr(n, new_doc)
+            elif n == rel_path:
+                zout.writestr(n, new_rels)
+            elif n == ct_name and ct_bytes is not None:
+                zout.writestr(n, ct_bytes)
+            else:
+                zout.writestr(n, zf.read(n))
+        for mn, mb in new_media.items():
+            zout.writestr('word/media/' + mn, mb)
+    return out_buf.getvalue(), report, images
+
+def _fm_guess_mime(b):
+    if len(b) >= 4 and b[:4] == b'\x89PNG':
+        return 'image/png'
+    if len(b) >= 3 and b[:3] == b'\xff\xd8\xff':
+        return 'image/jpeg'
+    if len(b) >= 2 and b[:2] == b'BM':
+        return 'image/bmp'
+    if len(b) >= 4 and b[:4] == b'GIF8':
+        return 'image/gif'
+    return 'image/png'
+
+def _fm_docx_to_html(docx_bytes):
+    """把处理后的 docx 还原成只读预览 HTML：保留段落文本，并把内嵌图片（含已替换的公式）
+    以 data-URI 形式按原位置内联，从而得到「整合文档」预览。无 Word/LibreOffice 时的最佳方案。"""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(docx_bytes))
+        names = set(zf.namelist())
+        if 'word/document.xml' not in names:
+            return ''
+        rels = {}
+        rel_path = 'word/_rels/document.xml.rels'
+        if rel_path in names:
+            rroot = _LXET.fromstring(zf.read(rel_path))
+            for rel in rroot:
+                rid = rel.get('Id'); tgt = rel.get('Target')
+                if rid and tgt:
+                    p = tgt[1:] if tgt.startswith('/') else 'word/' + tgt
+                    rels[rid] = p
+        media = {}
+        for rid, p in rels.items():
+            if p in names:
+                try:
+                    media[rid] = zf.read(p)
+                except Exception:
+                    pass
+        root = _LXET.fromstring(zf.read('word/document.xml'))
+        W = W_NS; R = R_NS; A = A_NS
+        body_el = root.find(_fm_lxq(W, 'body'))
+        if body_el is None:
+            body_el = root
+        paras = []
+        for p in body_el.findall('.//' + _fm_lxq(W, 'p')):
+            line = ''
+            for node in p.iter():
+                ln = _fm_local(node)
+                if ln == 't':
+                    if node.text:
+                        line += html.escape(node.text)
+                elif ln == 'tab':
+                    line += '&nbsp;&nbsp;&nbsp;&nbsp;'
+                elif ln in ('br', 'cr'):
+                    line += '<br/>'
+                elif ln == 'drawing':
+                    blip = node.find('.//' + _fm_lxq(A, 'blip'))
+                    rid = blip.get(_fm_lxq(R, 'embed')) if blip is not None else None
+                    img = media.get(rid) if rid else None
+                    if img:
+                        line += '<img class="fmInDoc" src="data:%s;base64,%s"/>' % (
+                            _fm_guess_mime(img), base64.b64encode(img).decode('ascii'))
+                    else:
+                        line += '[图]'
+            paras.append('<p>%s</p>' % (line if line else '&nbsp;'))
+        return '\n'.join(paras)
+    except Exception:
+        return ''
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -3982,6 +6623,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        # 打印 PDF 时前端要读回页数（跨源访问 file:// 打开时也能读到）
+        self.send_header('Access-Control-Expose-Headers', 'X-Pdf-Info')
 
     def _json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -3992,11 +6635,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _bytes(self, data, ctype, filename=None, fname_utf8=None):
+    def _bytes(self, data, ctype, filename=None, fname_utf8=None, extra=None):
         self.send_response(200)
         self.send_header('Content-Type', ctype)
         self._cors()
         self.send_header('Content-Length', str(len(data)))
+        for k, v in (extra or []):
+            self.send_header(k, v)
         if filename:
             if fname_utf8:
                 from urllib.parse import quote as _q
@@ -4017,6 +6662,9 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in ('/', '/index.html'):
             self._bytes(INDEX_HTML.encode('utf-8'), 'text/html; charset=utf-8')
+        elif path == '/api/party_snapshot':
+            # 「XML 修改」页一键替代：拉取主程序推送的当前文档申请信息
+            self._json(get_party_snapshot())
         else:
             self._json({'error': 'not found'}, 404)
 
@@ -4045,12 +6693,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.handle_zipxml_info(body)
             elif path == '/api/zipxml_save':
                 self.handle_zipxml_save(body)
+            elif path == '/api/zipxml_pdf':
+                self.handle_zipxml_pdf(body)
             elif path == '/api/zipxml_norm_image':
                 self.handle_zipxml_norm_image(body)
             elif path == '/api/zip':
                 self.handle_zip(body)
             elif path == '/api/relations':
                 self.handle_relations(body)
+            elif path == '/api/formula_process':
+                self.handle_formula_process(body)
             else:
                 self._json({'error': 'not found'}, 404)
         except Exception as exc:
@@ -4118,6 +6770,34 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'error': '分析失败: %s' % exc}, 500)
             return
         self._json(result)
+
+    def handle_formula_process(self, body):
+        """公式转图片：接收 docx（base64），将公式原位替换为图片，返回修改后的 docx。"""
+        docx_b64 = body.get('docx') or ''
+        fmt = (body.get('fmt') or 'PNG')
+        autocrop = bool(body.get('autocrop', True))
+        raw = None
+        if not docx_b64:
+            self._json({'error': '未收到文档（请选择文件）'}, 400)
+            return
+        try:
+            raw = base64.b64decode(docx_b64)
+        except Exception as e:
+            self._json({'error': '文档解码失败: %s' % e}, 400)
+            return
+        try:
+            out_doc, report, images = _fm_docx_to_images(raw, fmt, autocrop)
+        except Exception as e:
+            self._json({'error': '处理失败: %s: %s' % (type(e).__name__, e)}, 500)
+            return
+        preview_html = _fm_docx_to_html(out_doc)
+        self._json({
+            'doc': base64.b64encode(out_doc).decode('ascii'),
+            'report': report,
+            'images': images,
+            'preview': preview_html,
+            'filename': 'document.docx',
+        })
 
     def handle_zip(self, body):
         sid = body.get('sid')
@@ -4305,6 +6985,20 @@ class Handler(BaseHTTPRequestHandler):
         if not sess:
             self._json({'error': '会话已过期，请重新选择 ZIP 文件'}, 400)
             return
+        edits, sections, replaces, deletes, adds = self._zipxml_args(body)
+        try:
+            out = _zipxml_rebuild(sess['data'], edits, sections, replaces, '',
+                                  deletes=deletes, adds=adds)
+        except Exception as e:
+            traceback.print_exc()
+            self._json({'error': '重建 ZIP 失败: %s' % e}, 500)
+            return
+        fname = body.get('fname') or 'modified.zip'
+        self._bytes(out, 'application/zip', 'modified.zip', fname_utf8=fname)
+
+    @staticmethod
+    def _zipxml_args(body):
+        """前端 payload → (edits, sections, replaces, deletes, adds)。"""
         edits = {}                      # id -> 新文本
         for e in body.get('edits', []):
             edits[e['id']] = e['value']
@@ -4318,6 +7012,20 @@ class Handler(BaseHTTPRequestHandler):
             if k:
                 adds[k] = {'data': base64.b64decode(a.get('dataB64', '') or b''),
                            'view': a.get('view') or ''}
+        return edits, sections, replaces, deletes, adds
+
+    def handle_zipxml_pdf(self, body):
+        """把修改后的申请文件按国知局打印稿样式排成一份 PDF 返回。
+
+        与「生成 ZIP」用同一套 payload：先按改动重建 ZIP（只读，不落盘），
+        再取 100004 / 100001 / 100002 / 100003 四份文件排版：
+        说明书摘要 → 权利要求书 → 说明书 → 说明书附图。
+        """
+        sess = self.ZIPXML_SESS.get(body.get('sid'))
+        if not sess:
+            self._json({'error': '会话已过期，请重新选择 ZIP 文件'}, 400)
+            return
+        edits, sections, replaces, deletes, adds = self._zipxml_args(body)
         try:
             out = _zipxml_rebuild(sess['data'], edits, sections, replaces, '',
                                   deletes=deletes, adds=adds)
@@ -4325,8 +7033,26 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self._json({'error': '重建 ZIP 失败: %s' % e}, 500)
             return
-        fname = body.get('fname') or 'modified.zip'
-        self._bytes(out, 'application/zip', 'modified.zip', fname_utf8=fname)
+        try:
+            docs = _pdf_docs_from_zip(out, title=body.get('title') or '')
+            from patent_pdf import build_pdf
+            # 排版要向量字体、复用全局字体缓存：同一时刻只让一个请求用
+            with _PDF_LOCK:
+                data, pages = build_pdf(docs)
+        except Exception as e:
+            traceback.print_exc()
+            self._json({'error': 'PDF 排版失败: %s' % e}, 500)
+            return
+        if not data:
+            self._json({'error': 'PDF 生成失败：没有可打印的文档内容'}, 500)
+            return
+        info = {'pages': pages,
+                'has': {k: bool(docs.get(k)) for k in
+                        ('request', 'abstract', 'claims', 'description', 'figures')}}
+        name = '申请文件_%s.pdf' % re.sub(r'[\\/:*?"<>|]', '_',
+                                          (docs.get('title') or '未命名').strip())
+        self._bytes(data, 'application/pdf', 'application.pdf', fname_utf8=name,
+                    extra=[('X-Pdf-Info', json.dumps(info, ensure_ascii=True))])
 
 
     def handle_zipxml_norm_image(self, body):
@@ -4334,10 +7060,13 @@ class Handler(BaseHTTPRequestHandler):
 
         外观图片：72 <= ppi <= 300，宽 = 15cm，高 <= 22cm
         其他图片：72 <= ppi <= 300，宽 <= 16.5cm，高 <= 24.5cm
+        扫描件(scan)+pdf=True：图片铺到 A4（21×29.7cm@300PPI）白底页上存成 PDF，
+        用于替换 ZIP 里本来是 PDF 的委托书扫描件（保持扩展名不变）。
         """
         import io as _io
         raw = base64.b64decode(body.get('dataB64', '') or b'')
         profile = body.get('profile', 'other')
+        want_pdf = bool(body.get('pdf')) or profile == 'scan'
         try:
             im = Image.open(_io.BytesIO(raw))
         except Exception as e:
@@ -4347,12 +7076,23 @@ class Handler(BaseHTTPRequestHandler):
         w0, h0 = im.size
         INCH = 2.54
         PPI_MIN, PPI_MAX = 72, 300
-        if profile == 'appearance':
+        if profile == 'scan':
+            # 扫描件：整页 A4，图片等比铺满、居中留白
+            WCM, HCM = 21.0, 29.7
+        elif profile == 'appearance':
             WCM, HCM = 15.0, 22.0
         else:
             WCM, HCM = 16.5, 24.5
         ratio = h0 / float(w0)
-        if profile == 'appearance':
+        page_w = page_h = 0
+        if profile == 'scan':
+            ppi = PPI_MAX
+            page_w = int(round(WCM / INCH * ppi))
+            page_h = int(round(HCM / INCH * ppi))
+            scale = min(page_w / float(w0), page_h / float(h0))
+            out_w = max(1, int(round(w0 * scale)))
+            out_h = max(1, int(round(h0 * scale)))
+        elif profile == 'appearance':
             # 宽度固定 15cm；高度必须 <= 22cm
             # 取「保持原像素宽度」对应的 ppi，并钳制到 [72,300]
             ppi = w0 / (WCM / INCH)
@@ -4375,13 +7115,27 @@ class Handler(BaseHTTPRequestHandler):
         if (out_w, out_h) != (w0, h0):
             im = im.resize((out_w, out_h), Image.LANCZOS)
         buf = _io.BytesIO()
-        im.save(buf, 'JPEG', dpi=(int(round(ppi)), int(round(ppi))), quality=90)
+        if page_w and page_h:
+            page = Image.new('RGB', (page_w, page_h), 'white')
+            page.paste(im, ((page_w - out_w) // 2, (page_h - out_h) // 2))
+            if want_pdf:
+                page.save(buf, 'PDF', resolution=float(ppi))
+            else:
+                page.save(buf, 'JPEG', dpi=(int(round(ppi)), int(round(ppi))), quality=90)
+        elif want_pdf:
+            im.save(buf, 'PDF', resolution=float(ppi))
+        else:
+            im.save(buf, 'JPEG', dpi=(int(round(ppi)), int(round(ppi))), quality=90)
         data = buf.getvalue()
-        cmW = out_w / ppi * INCH
-        cmH = out_h / ppi * INCH
+        if page_w and page_h:
+            cmW, cmH = WCM, HCM
+        else:
+            cmW = out_w / ppi * INCH
+            cmH = out_h / ppi * INCH
         # 警告：分辨率未达 300PPI，或原图过小被迫放大（画质下降）
         warn = (ppi < PPI_MAX - 1) or (out_w > w0 + 1)
         self._json({'ok': True, 'dataB64': base64.b64encode(data).decode('ascii'),
+                    'ext': 'pdf' if want_pdf else 'jpg',
                     'w': out_w, 'h': out_h, 'ppi': int(round(ppi)),
                     'cmW': round(cmW, 2), 'cmH': round(cmH, 2),
                     'warn': bool(warn), 'orig': {'w': w0, 'h': h0}})
@@ -4574,6 +7328,46 @@ def _zipxml_apply_sections(root, fkey, sections):
                     if leaf.tag in ('姓名', '身份证件号码'):
                         leaf.text = o.get('name') if leaf.tag == '姓名' else o.get('idcard')
                 cont.append(node)
+
+        elif kind == 'claims':
+            # 权利要求书：条数与 XML 不一致时逐条重建（可增可减）。
+            # 结构照抄模板（标签 / 属性 / 子节点都不动），只把正文写进第一个
+            # 叶节点——直接按顺序塞文字会把两条权利要求挤进同一个节点。
+            cont = root if root.tag == '权利要求书' else None
+            if cont is None:
+                hits = find_all(root, '权利要求书')
+                cont = hits[0] if hits else None
+            if cont is None:
+                continue
+            olds = [ch for ch in cont if ch.tag == '权利要求']
+            if not olds:
+                continue
+            tpl = _zipxml_clone_template(olds)
+            pos = list(cont).index(olds[0])
+            for ch in olds:
+                cont.remove(ch)
+            for i, item in enumerate(sec.get('items') or []):
+                if tpl is not None:
+                    node = copy.deepcopy(tpl)
+                else:
+                    node = ET.Element('权利要求', {'顺序': str(i + 1)})
+                node.set('顺序', str(i + 1))
+                leaves = []
+
+                def _collect(e):
+                    if len(e) == 0:
+                        leaves.append(e)
+                    else:
+                        for c in e:
+                            _collect(c)
+
+                _collect(node)
+                if not leaves:
+                    node.text = item
+                else:
+                    for j, lf in enumerate(leaves):
+                        lf.text = item if j == 0 else ''
+                cont.insert(pos + i, node)
 
         elif kind == 'agents':
             # 请求书：专利代理机构/代理师[姓名,资格证号,电话]
@@ -4808,6 +7602,423 @@ def _zipxml_rebuild(data, edits, sections, replaces, prefix,
         zout.writestr(st, ainfo.get('data') or b'')
     zout.close()
     return buf.getvalue()
+
+
+# ---------- 申请文件 PDF：从（重建后的）ZIP 取四份文件的正文与附图 ----------
+
+_PDF_LOCK = threading.Lock()
+_PDF_CODE_RE = re.compile(r'(?:^|/)(\d{6})/')
+_PDF_SKIP_TAGS = frozenset(('顺序', '编号', '图号', '序号', '发明名称',
+                            '发明创造名称', '名称', '文件名称', '文件类型'))
+_PDF_IMG_EXT = ('.tif', '.tiff', '.bmp', '.gif', '.webp')
+
+
+_REQ_TYPES = {
+    '110101': ('invention', '发 明 专 利 请 求 书', '发明专利请求书'),
+    '120101': ('utility', '实 用 新 型 专 利 请 求 书', '实用新型专利请求书'),
+    '130101': ('design', '外 观 设 计 专 利 请 求 书', '外观设计专利请求书'),
+}
+
+
+def _q_txt(elem, *path):
+    """按子节点路径取文本；任一层缺失都返回 ''。"""
+    node = elem
+    for seg in path:
+        if node is None:
+            return ''
+        node = node.find(seg)
+    return ((node.text or '').strip() if node is not None else '')
+
+
+def _q_flag(elem, *path):
+    return _q_txt(elem, *path) in ('1', 'true', 'True', '是', 'Y', 'y')
+
+
+def _q_date(elem):
+    if elem is None:
+        return ''
+    y, m, d = _q_txt(elem, '年'), _q_txt(elem, '月'), _q_txt(elem, '日')
+    return '%s年%s月%s日' % (y, m, d) if (y or m or d) else ''
+
+
+def _q_pick(elem, *words):
+    """找第一个标签里包含全部关键词的直接子节点。"""
+    if elem is None:
+        return None
+    for ch in elem:
+        if all(w in (ch.tag or '') for w in words):
+            return ch
+    return None
+
+
+def _q_checked_deep(root, word):
+    """整棵树里找标签含 word 的节点，看它或它的子节点有没有「附加=1」。"""
+    for e in root.iter():
+        if word in (e.tag or ''):
+            if _q_flag(e, '附加'):
+                return True
+            for ch in e:
+                if _q_flag(ch, '附加'):
+                    return True
+    return False
+
+
+def _pdf_request_from_root(root, code):
+    """把请求书 XML（110101 / 120101 / 130101）转成排版用的字典。"""
+    kind, head, short = _REQ_TYPES.get(code, ('invention', '专 利 请 求 书', '专利请求书'))
+    req = {'kind': kind, 'code': code, 'head': head,
+           'case_no': _q_txt(root, '内部编号'),
+           'title': _q_txt(root, '发明名称') or _q_txt(root, '外观设计名称'),
+           'inventors': [], 'applicants': [], 'priority': [],
+           'novelty': [False, False, False, False],
+           'files': [], 'extra_files': []}
+
+    grp = root.find('发明人')
+    if grp is not None:
+        first = grp.find('第一发明人')
+        others = sorted(list(grp.findall('其他发明人')),
+                        key=lambda e: int(e.get('顺序') or 0))
+        for e in ([first] if first is not None else []) + others:
+            req['inventors'].append({
+                'name': _q_txt(e, '姓名'),
+                'private': _q_flag(e, '请求不公开', '附加'),
+                'country': _q_txt(e, '国籍'),
+                'id': _q_txt(e, '身份证件号码'),
+            })
+
+    grp = root.find('申请人')
+    if grp is not None:
+        first = grp.find('第一申请人')
+        others = sorted(list(grp.findall('其他申请人')),
+                        key=lambda e: int(e.get('顺序') or 0))
+        for e in ([first] if first is not None else []) + others:
+            req['applicants'].append({
+                'name': _q_txt(e, '姓名或名称'),
+                'type': _q_txt(e, '申请人类型'),
+                'id': _q_txt(e, '身份证件号码或统一社会信用代码'),
+                'email': _q_txt(e, '电子邮箱'),
+                'country': _q_txt(e, '国籍或总部所在地'),
+                'business': _q_txt(e, '经营所在地或营业所在地'),
+                'prov': _q_txt(e, '省自治区直辖市名称'),
+                'city': _q_txt(e, '市县名称'),
+                'detail': _q_txt(e, '城区乡街道门牌号'),
+                'zip': _q_txt(e, '邮政编码'),
+                'phone': _q_txt(e, '电话'),
+                'fee': _q_flag(e, '费减备案', '附加'),
+            })
+    req['fee_reduction'] = any(a.get('fee') for a in req['applicants'])
+
+    ct = root.find('联系人')
+    req['contact'] = {
+        'name': _q_txt(ct, '姓名'), 'phone': _q_txt(ct, '电话'),
+        'email': _q_txt(ct, '电子邮箱'), 'zip': _q_txt(ct, '邮政编码'),
+        'prov': _q_txt(ct, '省自治区直辖市名称'),
+        'detail': _q_txt(ct, '城区乡街道门牌号'),
+    }
+
+    rep = _q_txt(root, '代表人')
+    req['rep_index'] = int(rep) if rep.isdigit() else 0
+
+    ag = root.find('专利代理机构')
+    agents = []
+    if ag is not None:
+        for e in sorted(list(ag.findall('代理师')), key=lambda x: int(x.get('顺序') or 0)):
+            a = {'name': _q_txt(e, '姓名'), 'cert': _q_txt(e, '资格证号'),
+                 'phone': _q_txt(e, '电话')}
+            if a['name'] or a['cert']:
+                agents.append(a)
+    req['agency'] = {
+        'name': _q_txt(ag, '名称'), 'code': _q_txt(ag, '代码'),
+        'statement': _q_flag(ag, '声明已经与申请人签订了专利代理委托书'
+                                 '且本表中的信息与委托书中相应信息一致', '附加'),
+        'agents': agents,
+    }
+
+    dv = root.find('分案申请')
+    req['divisional'] = {
+        'origin': _q_txt(dv, '原申请号'),
+        'target': _q_txt(dv, '针对的分案申请号'),
+        'date': _q_date(dv.find('原申请日') if dv is not None else None),
+    }
+
+    pr = root.find('要求优先权声明')
+    if pr is not None:
+        for e in pr:
+            tag = e.tag or ''
+            if '优先权' in tag or '在先申请' in tag:
+                d = e.find('在先申请日')
+                req['priority'].append({
+                    'office': _q_txt(e, '原受理机构名称'),
+                    'date': _q_date(d) if d is not None else _q_txt(e, '在先申请日'),
+                    'number': _q_txt(e, '在先申请号'),
+                })
+
+    nv = _q_pick(root, '新颖性')
+    if nv is not None:
+        for i, key in enumerate(('紧急状态', '国际展览会', '学术会议', '泄露')):
+            for ch in nv:
+                if key in (ch.tag or ''):
+                    req['novelty'][i] = _q_flag(ch, '附加')
+                    break
+
+    sd = root.find('同日申请')
+    if sd is not None:
+        for ch in sd:
+            tag = ch.tag or ''
+            if '声明' in tag:
+                req['same_day'] = _q_flag(ch, '附加')
+                req['same_day_text'] = tag
+                break
+
+    req['abs_figure'] = _q_txt(root, '摘要附图', '图号')
+    req['join_by_ref'] = _q_flag(root, '援引加入声明', '附加')
+
+    wa = root.find('主动修改')
+    req['waive_amend'] = any(_q_flag(ch, '附加') for ch in wa) if wa is not None else False
+
+    dy = root.find('延迟审查')
+    if dy is not None:
+        for ch in dy:
+            if _q_flag(ch, '附加'):
+                t = ch.tag or ''
+                req['delay'] = '1' if '一' in t else ('2' if '二' in t else '3')
+                break
+
+    req['sequence'] = _q_checked_deep(root, '核苷酸')
+    req['genetic'] = _q_checked_deep(root, '遗传资源')
+
+    ep = _q_pick(root, '提前公布')
+    req['early_pub'] = any(_q_flag(ch, '附加') for ch in ep) if ep is not None else False
+    se = _q_pick(root, '实质审查')
+    req['sub_exam'] = any(_q_flag(ch, '附加') for ch in se) if se is not None else False
+
+    bio = _q_pick(root, '生物材料')
+    req['bio'] = {
+        'unit': _q_txt(bio, '保藏单位代码'),
+        'date': _q_date(bio.find('保藏日期') if bio is not None else None),
+        'no': _q_txt(bio, '保藏编号'),
+        'name': _q_txt(bio, '分类命名'),
+    }
+
+    fl = root.find('申请文件清单')
+    if fl is not None:
+        box = fl.find('申请文件信息')
+        if box is None:
+            box = fl
+        for e in box.findall('申请文件'):
+            nm = _q_txt(e, '文件名称')
+            if nm:
+                req['files'].append({'name': nm, 'code': _q_txt(e, '表格代码'),
+                                     'pages': _q_txt(e, '页数')})
+
+    ex = root.find('附加文件清单')
+    if ex is not None:
+        for e in ex.findall('附加文件'):
+            nm = _q_txt(e, '文件名称')
+            if nm:
+                req['extra_files'].append({'name': nm, 'code': _q_txt(e, '表格代码'),
+                                           'pages': _q_txt(e, '页数')})
+        req['total_entrust'] = _q_txt(ex, '总委托书编号')
+        req['record_no'] = _q_txt(ex, '备案编号')
+
+    sg = root.find('申请人或代理机构签章')
+    req['sign'] = {
+        'name': _q_txt(sg, '签章'),
+        'y': _q_txt(sg, '签章日期', '年'),
+        'm': _q_txt(sg, '签章日期', '月'),
+        'd': _q_txt(sg, '签章日期', '日'),
+    }
+
+    if not req['files']:
+        req['files'] = [
+            {'name': short, 'code': code, 'pages': ''},
+            {'name': '说明书摘要', 'code': '100004', 'pages': ''},
+            {'name': '权利要求书', 'code': '100001', 'pages': ''},
+            {'name': '说明书', 'code': '100002', 'pages': ''},
+            {'name': '说明书附图', 'code': '100003', 'pages': ''},
+        ]
+    return req
+
+
+def _pdf_docs_from_zip(zip_bytes, title=''):
+    """把 ZIP 里的 100004 / 100001 / 100002 / 100003 抽成排版用的字典。
+
+    只按「文档顺序取叶节点文字」这一件事做，不依赖具体标签名：
+    国知局各版本 XML 的段落节点叫 段落 / p / 正文 都无所谓，章节标题
+    （技术领域 / 背景技术 …）按标签名或正文首行识别。
+    """
+    from patent_pdf import canon_section
+
+    entries = {}
+    for key, blob in _zipxml_iter(zip_bytes):
+        inner = key.split('>')[-1].replace('\\', '/')
+        entries.setdefault(inner, blob)
+
+    def doc_of(code):
+        for inner in entries:
+            if inner.lower().endswith('.xml'):
+                m = _PDF_CODE_RE.search(inner)
+                if m and m.group(1) == code:
+                    try:
+                        return inner, _zipxml_parse(entries[inner])
+                    except Exception:
+                        traceback.print_exc()
+                        return inner, None
+        return None, None
+
+    def blocks(root, heads=True):
+        """[('h'|'p', 文本)]：章节标题与段落，按文档顺序。"""
+        out = []
+
+        def walk(elem):
+            kids = list(elem)
+            if not kids:
+                txt = (elem.text or '').strip()
+                if txt and elem.tag not in _PDF_SKIP_TAGS:
+                    out.append(('p', txt))
+                return
+            for ch in kids:
+                if heads:
+                    sec = canon_section(ch.tag)
+                    if sec:
+                        out.append(('h', sec))
+                walk(ch)
+
+        walk(root)
+        return out
+
+    def claims_of(root):
+        nodes = [e for e in root.iter() if e.tag == '权利要求']
+        if not nodes:
+            # CPC 另一套结构：<claim num="1"><claim-text>…</claim-text>…</claim>
+            # 一个 claim 里的多个 claim-text 是同一权项的连续段落，要拼成一条，
+            # 否则一条权项会被拆成好几条、编号和项数全错。
+            cls = [e for e in root.iter() if e.tag in ('claim', 'cl')]
+            if cls:
+                out = []
+                for e in cls:
+                    parts = [(t.text or '').replace('\u00a0', ' ').strip()
+                             for t in e.iter('claim-text')]
+                    txt = ''.join(parts) if parts else ''.join(e.itertext())
+                    txt = re.sub(r'[ \t\r\n\u3000]+', ' ', txt).strip()
+                    if txt:
+                        out.append(txt)
+                if out:
+                    return out
+            return [t for _, t in blocks(root, heads=False)]
+        out = []
+        for e in nodes:
+            txt = ''.join((t or '') for t in e.itertext())
+            txt = re.sub(r'[\s\u3000]+', ' ', txt).strip()
+            if txt:
+                out.append(txt)
+        return out
+
+    def figures_of(root, inner_dir):
+        figs = [e for e in root.iter() if e.tag == 'figure']
+        out = []
+        if figs:
+            for i, fg in enumerate(figs, 1):
+                fn = ''
+                for node in fg.iter():
+                    if node.tag == 'img' and node.get('file'):
+                        fn = node.get('file')
+                        break
+                if not fn:
+                    for node in fg.iter():
+                        if node.tag == '文件名称' and (node.text or '').strip():
+                            fn = node.text.strip()
+                            break
+                label = (fg.get('figure-labels') or '').strip() or ('图 %d' % i)
+                if fn:
+                    out.append((label, fn))
+            return out
+        for i, e in enumerate([x for x in root.iter()
+                               if x.tag in ('图片', '照片', '附图', 'image')], 1):
+            fn = ''
+            for node in e.iter():
+                if node.tag == '文件名称' and (node.text or '').strip():
+                    fn = node.text.strip()
+                    break
+            if not fn and (e.get('file') or '').strip():
+                fn = e.get('file').strip()
+            label = ((e.get('figure-labels') or e.get('视图名称') or '').strip()
+                     or ('图 %d' % i))
+            if fn:
+                out.append((label, fn))
+        return out
+
+    def image_blob(inner_dir, fn):
+        base = fn.replace('\\', '/').split('/')[-1]
+        if inner_dir:
+            direct = entries.get(inner_dir + '/' + base)
+            if direct is not None:
+                return direct
+        for inner, blob in entries.items():
+            if inner.split('/')[-1] == base:
+                return blob
+        return None
+
+    def as_display_bytes(blob, name):
+        """TIFF / BMP 等 Qt 不一定认识的格式先转 PNG。"""
+        low = (name or '').lower()
+        if not low.endswith(_PDF_IMG_EXT):
+            return blob
+        try:
+            im = Image.open(io.BytesIO(blob))
+            if im.mode not in ('RGB', 'L'):
+                im = im.convert('RGB')
+            buf = io.BytesIO()
+            im.save(buf, 'PNG')
+            return buf.getvalue()
+        except Exception:
+            return blob
+
+    docs = {'title': (title or '').strip(), 'abstract': [], 'claims': [],
+            'description': [], 'figures': [], 'request': None}
+
+    # 摘要
+    inner, root = doc_of('100004')
+    if root is not None:
+        docs['abstract'] = [t for _, t in blocks(root, heads=False)]
+
+    # 权利要求书
+    inner, root = doc_of('100001')
+    if root is not None:
+        docs['claims'] = claims_of(root)
+
+    # 说明书（标题取根节点属性，没有就用前端传进来的发明名称）
+    inner, root = doc_of('100002')
+    if root is not None:
+        for attr in ('发明名称', '名称', '发明创造名称'):
+            if (root.get(attr) or '').strip():
+                docs['title'] = docs['title'] or root.get(attr).strip()
+                break
+        docs['description'] = blocks(root, heads=True)
+
+    # 说明书附图
+    inner, root = doc_of('100003')
+    if root is not None:
+        inner_dir = inner.rsplit('/', 1)[0] if '/' in inner else ''
+        for label, fn in figures_of(root, inner_dir):
+            blob = image_blob(inner_dir, fn)
+            if blob:
+                docs['figures'].append((label, as_display_bytes(blob, fn)))
+
+    # 请求书（发明 110101 / 实用新型 120101 / 外观 130101）：递交顺序在最前
+    for code in ('110101', '120101', '130101'):
+        _inner, root = doc_of(code)
+        if root is not None:
+            try:
+                req = _pdf_request_from_root(root, code)
+                req['claim_count'] = len([c for c in (docs.get('claims') or []) if c])
+                docs['request'] = req
+            except Exception:
+                traceback.print_exc()
+            break
+
+    return docs
+
 
 PROBE_MARKER = b'fenrir-design-adjust'
 DEFAULT_PORT = 5000

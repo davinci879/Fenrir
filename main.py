@@ -46,10 +46,61 @@ import qtawesome as qta
 import icon_3d as _icon_3d
 import formal_checks as fc  # 专利预审形式缺陷规则引擎（src/formal_checks.py）
 import typo_detector        # 错别字识别模块：易混词表 + 同音误写（src/typo_detector.py）
-import ai_check             # 火山方舟 AI 内容校验：配置 + Ark 请求 + 结果解析
+
+class _LazyModule:
+    """把「import 重量模块」推迟到首次真正访问其属性时。
+
+    ai_check 会连带 import requests（实测 ~690ms），design_adjust_service
+    会连带 import Pillow（~260ms）；两者都只在用户打开对应功能时才用得上，
+    没有必要让每次启动都先付这笔导入成本。代理对象支持普通模块的全部
+    属性读取（函数 / 常量 / 类），``loaded`` 可在不触发导入的前提下查询。
+    """
+    __slots__ = ('_name', '_mod', '_pending')
+
+    def __init__(self, name):
+        self._name = name
+        self._mod = None
+        self._pending = {}
+
+    @property
+    def loaded(self):
+        return self._mod is not None
+
+    def lazy_call(self, name, *args, **kwargs):
+        """模块尚未加载时先记下调用，加载后补做。
+
+        用于「全量快照」这类只关心最后一次结果的旁路推送：同名调用覆盖，
+        避免启动期为了一句赋值就把整个 Pillow / requests 栈拉进来。
+        """
+        if self._mod is not None:
+            return getattr(self._mod, name)(*args, **kwargs)
+        self._pending[name] = (args, kwargs)
+        return None
+
+    def _flush_pending(self):
+        if self._mod is None or not self._pending:
+            return
+        pending, self._pending = self._pending, {}
+        for name, (args, kwargs) in pending.items():
+            try:
+                getattr(self._mod, name)(*args, **kwargs)
+            except Exception:
+                pass
+
+    def __getattr__(self, item):
+        mod = self._mod
+        if mod is None:
+            import importlib
+            mod = importlib.import_module(self._name)
+            self._mod = mod
+            self._flush_pending()
+        return getattr(mod, item)
+
+
+ai_check = _LazyModule('ai_check')  # 火山方舟 AI 内容校验：配置 + Ark 请求 + 结果解析
 from ai_settings_ui import AISettingsDialog  # 「工具 → 服务」里的 AI 接口设置
 import sound_effects as sfx  # 按键音效：全局按钮咔哒声 + 校验结果节奏提示
-from validation_ui import ScoreRing, SparkLine, level_color  # 校验面板自绘控件
+from validation_ui import ScoreRing, SparkLine  # 校验面板自绘控件
 from frameless_resizable import FramelessResizableMixin  # 无边框窗口：拖动 + 四边缩放
 import html as _html  # 完整报告语法着色时转义正文，避免把 <> 当标签
 # 统一接管全部按钮图标：qta.icon(...) 返回的仍是 QIcon，但经由 icon_3d
@@ -62,27 +113,36 @@ import threading
 import webbrowser
 import urllib.request
 import urllib.error
-from urllib.parse import quote
 import re
 import os
 import time
 import csv
 import io
+import base64
 import random
-import win32api,win32gui
-import design_adjust_service as design_service
+import math
+# win32api / win32gui 只给入口「隐藏控制台」用，挪进 __main__ 局部导入。
+design_service = _LazyModule('design_adjust_service')  # 内嵌 HTTP 服务（含 Pillow）
 import word_features as wf
+# 天气同步已关闭：右上角演出改为「离子流间隔 + 随机天气」，全程不联网。
+# src/weather_feed.py 仅作离线映射参考保留，运行时不再 import / 装配 LiveWeather。
 import draft_store as store
+import party_library as party_lib          # 申请人/发明人收藏夹（data/party_library.json）
+from party_library_ui import PartyLibraryDialog, SavePartyDialog
 import image_support as imgs
 from completer_popup import CompleterPopup
 from web_search_panel import SearchResultPanel
 from special_chars import SpecialCharPanel, PANEL_W  # 重写版特殊字符面板 + 面板宽度
 
 # 设计调整服务内嵌的功能标签页编号，与 design_adjust_service.py 内嵌页面的 tabN 对应
-DESIGN_TAB_LABELS = {1: '调整外观图', 2: '附图标注', 3: 'XML 修改', 4: '特征关系分析'}
+DESIGN_TAB_LABELS = {1: '调整外观图', 2: '附图标注', 3: 'XML 修改', 4: '特征关系分析', 5: '公式截图'}
 
 # 项目主页：帮助 / 软件更新 / 设置统一跳转
 FENRIR_HOME_URL = 'https://github.com/davinci879'
+
+# 委托书 JPG 的 base64 缓存：(路径, mtime, 大小) -> base64。
+# 推送快照会随面板输入频繁触发，缓存避免每次改字都重读几 MB 扫描件。
+_POA_B64_CACHE = {}
 
 # 分词词典，双击高亮功能用
 SPLIT_TXT_1 = r'会能并如或与及的了和置有是为以个者在于行从果到可该从前后上下内外着过将时等且已经旦括含来够而[{\(（）\)，，。；:：;,、“”"‘’\'1234567890 \n'
@@ -113,6 +173,16 @@ FORMAT_ARRAY_BASE = [
     '1.1', '1.2', '1.3', '2.1', '2.2', '2.3', '2.4', '3.1', '3.2',
 ]
 
+# 说明书固定章节标题：只有「独占一行 / 后面不紧跟标点」才算标题，才允许一键格式加粗。
+# 正文里写「技术领域，」「发明内容。」「根据背景技术，」只是引用这些章节，
+# 整段不该被当成标题加粗；标题单独成段时后面是段落分隔符(\u2029)，不受影响。
+FORMAT_SECTION_TITLES = frozenset({
+    '技术领域', '背景技术', '发明内容', '实用新型内容', '附图说明',
+    '具体实施方式', '附图标记说明', '说明书摘要',
+})
+# 章节标题后面紧跟这些标点 → 判定为正文引用，不加粗
+FORMAT_TRAILING_PUNCT = '，。、；：！？…,.;:!?）)】」》'
+
 # 文档标签页与附图标记列表一一对应。DOC_TAB_COUNT 是默认/最少的文档数，
 # 标签栏末尾的「+」可按需新增到 MAX_DOC_TAB_COUNT 个（与旧版 30 存档序号对齐）。
 # 文档数量持久化在 data/workspace.json 的名称个数里，重启后自动恢复。
@@ -141,10 +211,6 @@ class _MarkToolRow(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(6)
-
-        lab = QLabel('排序')
-        lab.setObjectName('MarkToolLabel')
-        lay.addWidget(lab)
 
         seg = QWidget(self)
         seg.setObjectName('MarkSegmented')
@@ -209,6 +275,947 @@ class _BookTabBar(QTabBar):
 
 
 # ============ Word 2019 风格功能区 ============
+class _AuroraRibbonPage(QWidget):
+    """功能区页面：QSS 渐变背景之上，分组右侧空白区绘制不定时极光。
+
+    形态是沿波浪曲线延伸的「发光丝带」而非填满矩形的光幕：丝带上下都
+    是透明背景，只有曲线附近有光；再叠加中心向两侧渐隐的水平包络与
+    垂直柔化遮罩，四边都不出现硬分界。曲线随时间起伏、传播，呈现极光
+    帘幕的动态波浪感。内联在 paintEvent 里，避免半透明子控件引发整页重绘。
+    """
+    # 采样密度：在半分辨率缓冲里每段约 6px，双线性放大后仍平滑。批量路径
+    # 提交后这个值只影响曲线精度，不再是主要开销，画质档可独立调节。
+    RIBBON_SEG = 36         # 主丝带 / 亮芯的横向采样段数
+
+    # 一条连续的横向色相：青绿 → 青 → 蓝 → 紫 → 青绿，QPainter 线性插值，
+    # 所有丝带共用，颜色之间不存在独立色块的硬分界。
+    STOPS = ((0.00, (44, 190, 168)), (0.16, (36, 206, 186)),
+             (0.32, (54, 224, 158)), (0.50, (88, 168, 236)),
+             (0.66, (132, 104, 224)), (0.84, (44, 200, 200)),
+             (1.00, (54, 224, 158)))
+    # 三条丝带：(基准高度, 长波幅, 短波幅, 相位, 亮度权重, 基础厚度)
+    # 高度与振幅都按空白区高度归一，波峰可触及顶边、波谷落到中部，
+    # 因此上边界始终是一条起伏曲线，不会拉成贴着边框的水平直线。
+    RIBBONS = ((0.19, 0.130, 0.058, 0.0, 0.62, 0.34),
+               (0.33, 0.170, 0.082, 1.7, 1.00, 0.30),
+               (0.51, 0.112, 0.052, 3.5, 0.56, 0.36))
+    # 丝带羽化：由外到内 5 层，逐层收窄、alpha 平缓递增，
+    # 单层的边界跳变足够小，再经垂直软滤波后不留下台阶。
+    FEATHER = ((1.00, 0.14), (0.72, 0.16), (0.46, 0.18),
+               (0.26, 0.20), (0.10, 0.24))
+    # 水平包络：中心最亮，向两侧连续淡出到完全透明（左右无竖直分界）。
+    H_ENVELOPE = ((0.00, 0.00), (0.10, 0.05), (0.26, 0.44),
+                  (0.42, 0.84), (0.50, 1.00), (0.58, 0.84),
+                  (0.74, 0.44), (0.90, 0.05), (1.00, 0.00))
+    # 垂直包络：顶部柔和淡入而非硬切，底部渐隐收束成帘幕拖尾。
+    V_ENVELOPE = ((0.00, 0.38), (0.10, 0.80), (0.30, 1.00),
+                  (0.58, 0.84), (0.82, 0.32), (1.00, 0.00))
+    # 雷暴：每道闪击 = 主脉冲 + 170ms 后的二次回闪 + 短余晖
+    STORM_FLASH_W = 0.055       # 主脉冲高斯宽度（秒）
+    STORM_REFLASH = (0.17, 0.58)  # (延迟秒, 亮度倍率)
+
+    @staticmethod
+    def storm_count(level):
+        """一次演出的闪击总数：等级越高闪得越密（6~9 道）。"""
+        return 5 + max(1, min(4, int(level or 2)))
+
+    @staticmethod
+    def _storm_time(seed, k):
+        """第 k 道闪击时刻：前三道沿用旧公式，新增的按 seed 铺满整场。"""
+        if k < 3:
+            return 0.35 + 1.25 * k + 0.22 * math.sin(seed * 2.3 + k * 1.7)
+        return 0.62 + (k - 3) * 0.62 + 0.30 * math.sin(seed * 1.9 + k * 2.7)
+
+    @staticmethod
+    def _bolt_scale(seed, k):
+        """每道闪电的尺寸/亮度倍率 0.55~1.45：大小随机且逐帧稳定。"""
+        return 0.55 + 0.90 * _AuroraRibbonPage._whash(k * 19 + 5, seed, 61.0)
+    # 其它天气：都用同一块天气缓冲、同一套淡入淡出与包络。天气演出是
+    # **纯天气**，不叠原离子流（离子流只在自己的场次出现）。
+    WEATHER_KINDS = ('storm', 'rain', 'blizzard', 'hail', 'fog', 'wind')
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._aurora_t = 0.0
+        self._aurora_alpha = 0.0
+        self._aurora_seed = 0.0
+        self._aurora_buf = QImage()
+        self._storm_buf = QImage()        # 天气层独立缓冲（闪电/雨雪雾风）
+        # 一次随机演出只演一种：'ion' 原离子流，或一种纯天气。
+        self._effect_mode = 'ion'
+        self._effect_level = 2      # 强度档 1..4：小 / 中 / 大 / 暴雨·暴雪
+        # 色相渐变按时间量化缓存：wob 只有 0.21 rad/s，逐帧重建纯属浪费
+        self._grad_cache = {}
+        # 垂直包络与尺寸无关，缓存起来，避免每帧重复构造渐变
+        self._vg_h, self._vg2_h = -1, -1
+        self._vg = QLinearGradient()
+        self._vg2 = QLinearGradient()
+        # _empty_rect() 只在布局变化时改变，缓存起来，避免每帧都遍历全部
+        # 子控件重算右边界。
+        self._empty_cache = QRect()
+        self._empty_valid = False
+
+    def resizeEvent(self, event):
+        self._empty_valid = False
+        super().resizeEvent(event)
+
+    def showEvent(self, event):
+        self._empty_valid = False
+        super().showEvent(event)
+
+    def _empty_rect(self):
+        if self._empty_valid and self._empty_cache.width() > 0:
+            return self._empty_cache
+        x = 8
+        for ch in self.children():
+            if isinstance(ch, QWidget) and ch.isVisible():
+                x = max(x, ch.geometry().right() + 8)
+        # 上下贴满绘制区；顶部由垂直包络柔和淡入，不留空白也不产生硬边
+        r = QRect(int(x), 0, max(0, self.width() - int(x)), self.height())
+        self._empty_cache = r
+        self._empty_valid = True
+        return r
+
+    def set_aurora(self, t, alpha, seed):
+        self._aurora_t, self._aurora_alpha, self._aurora_seed = t, alpha, seed
+        r = self._empty_rect()
+        if r.width() > 40:
+            self.update(r)
+
+    def set_effect(self, kind, level=2):
+        """本次演出：类型 + 强度档。
+
+        换演出时先把上一次的画面**同步擦掉**：天气层是半透明叠加，若
+        backing store 上还留着上一场离子流的丝带，就会被叠进天气画面里，
+        看起来像「天气里混着极光」。alpha 归零 + repaint 让 Qt 重擦背景，
+        任何主题/驱动下都不会留残影。
+        """
+        kind = (kind if kind in ('ion',) + self.WEATHER_KINDS else 'ion')
+        if kind != self._effect_mode:
+            self._aurora_alpha = 0.0
+            self._effect_mode = kind
+            try:
+                self.repaint(self._empty_rect())
+            except Exception:
+                self.update()
+        else:
+            self._effect_mode = kind
+        self._effect_level = max(0, min(4, int(level)))
+
+    def set_effect_mode(self, mode):
+        """兼容旧调用 / 测试：只指定类型，强度用默认中档。"""
+        self.set_effect(mode, 2)
+
+    # ---- 雷暴 ---------------------------------------------------------
+    @staticmethod
+    def _storm_pulse(t, seed, k):
+        """第 k 道闪电在 t 时刻的亮度 0..1：主闪 + 回闪 + 余晖。
+
+        闪击时刻由 seed 决定（每次演出都不同），但几何与时序都是确定性
+        函数——不逐帧 random()，闪电不会每帧换位置乱跳。
+        """
+        ts = _AuroraRibbonPage._storm_time(seed, k)
+        d = t - ts
+        if d < -0.15 or d > 1.6:
+            return 0.0
+        main = math.exp(-(d / _AuroraRibbonPage.STORM_FLASH_W) ** 2)
+        lag, amp = _AuroraRibbonPage.STORM_REFLASH
+        second = amp * math.exp(-((d - lag) / 0.048) ** 2)
+        tail = 0.15 * math.exp(-max(0.0, d) / 0.30)
+        return min(1.0, main + second + tail)
+
+    def _bolt_points(self, w, h, seed, k, branch=0):
+        """一条锯齿闪电的折线点；branch>0 时从中段斜向分叉出去。"""
+        if branch:
+            base = self._bolt_points(w, h, seed, k)
+            j = 6 if branch == 1 else 10
+            ox, oy = base[j].x(), base[j].y()
+            pts = [QPointF(ox, oy)]
+            direct = 1.0 if branch == 1 else -1.0
+            for i in range(1, 8):
+                u = i / 7.0
+                jitter = self._noise(k * 7 + branch + 20,
+                                     i * 2.6 + seed * 4.0, 0.0)
+                pts.append(QPointF(
+                    ox + direct * u * w * 0.075
+                    + jitter * w * 0.022 * math.sin(math.pi * u),
+                    oy + u * h * 0.34))
+            return pts
+        # 落点与长度都由 (seed, k) 确定性散列决定：每道闪电位置、大小随机，
+        # 但同一场演出里逐帧稳定，不会乱跳。
+        h1 = self._whash(k * 17 + 3, seed, 41.0)
+        h2 = self._whash(k * 23 + 9, seed, 47.0)
+        scale = self._bolt_scale(seed, k)
+        x0 = w * (0.12 + 0.74 * h1)
+        y0 = -h * 0.04
+        y1 = h * (0.44 + 0.34 * min(1.4, scale) + 0.10 * h2)
+        pts = []
+        for i in range(16):
+            u = i / 15.0
+            jitter = self._noise(k * 3 + 1, i * 2.9 + seed * 5.0, 0.0)
+            taper = math.sin(math.pi * u) ** 0.6
+            pts.append(QPointF(
+                x0 + u * u * w * 0.10 * math.sin(seed + k)
+                + jitter * w * 0.045 * taper * scale,
+                y0 + (y1 - y0) * u))
+        return pts
+
+    @staticmethod
+    def _poly_path(pts):
+        path = QPainterPath()
+        path.moveTo(pts[0])
+        for q in pts[1:]:
+            path.lineTo(q)
+        return path
+
+    def _draw_storm(self, p, area, t, a, seed, level=2):
+        """雷暴（纯天气）：团块状带电云 + 多道随机闪击。
+
+        闪电数量、落点、长度、粗细都由 (seed, k) 决定；画在半分辨率缓冲
+        里经双尺度 bloom 化成电光雾，再套与极光相同的水平/垂直包络，
+        四边不出现硬分界。此模式不绘制任何离子流。
+        """
+        w, h = area.width(), area.height()
+        bw, bh = max(1, (w + 1) // 2), max(1, (h + 1) // 2)
+        if self._storm_buf.width() != bw or self._storm_buf.height() != bh:
+            self._storm_buf = QImage(bw, bh, QImage.Format_ARGB32_Premultiplied)
+        img = self._storm_buf
+        img.fill(Qt.transparent)
+        bp = QPainter(img)
+        bp.scale(bw / w, bh / h)
+        bp.setRenderHint(QPainter.Antialiasing, True)
+
+        # ① 带电云层：团块状冷紫软斑，缓慢横移。刻意不用连续起伏的长飘带，
+        #    否则在深底上很容易被看成「天气里混进了极光丝带」。
+        bp.setPen(Qt.NoPen)
+        for ci in range(9):
+            hx = self._whash(ci * 11 + 1, seed, 13.0)
+            hy = self._whash(ci * 13 + 4, seed, 17.0)
+            cx = ((w * (0.04 + 0.92 * hx) + t * (5.0 + 4.0 * hy))
+                  % (w * 1.24)) - w * 0.12
+            cy = (h * (0.10 + 0.56 * hy)
+                  + h * 0.03 * math.sin(t * 0.22 + ci))
+            r = h * (0.15 + 0.15 * self._whash(ci, seed, 19.0))
+            cg = QRadialGradient(cx, cy, r)
+            c0 = QColor(96, 104, 186)
+            c0.setAlphaF(min(1.0, 0.13 * a))
+            c1 = QColor(96, 104, 186)
+            c1.setAlphaF(0.0)
+            cg.setColorAt(0.0, c0)
+            cg.setColorAt(1.0, c1)
+            bp.fillRect(QRectF(cx - r, cy - r, r * 2.0, r * 2.0),
+                        QBrush(cg))
+
+        # ② 闪击：只有脉冲亮起时才描闪电，空闲帧省掉全部描边开销
+        pulses = [self._storm_pulse(t, seed, k)
+                  for k in range(self.storm_count(level))]
+        best = max(pulses) if pulses else 0.0
+        if best > 0.012:
+            for k, pulse in enumerate(pulses):
+                if pulse < 0.012:
+                    continue
+                scale = self._bolt_scale(seed, k)
+                pulse = min(1.0, pulse * (0.62 + 0.52 * scale))
+                main = self._bolt_points(w, h, seed, k)
+                # 整片电荷辉光：闪的一瞬天空亮起，随脉冲衰减
+                gx = main[5].x()
+                fg = QRadialGradient(gx, h * 0.30, w * 0.85)
+                fc = QColor(168, 186, 255)
+                fc.setAlphaF(min(1.0, 0.24 * pulse * a))
+                fg.setColorAt(0.0, fc)
+                fc2 = QColor(120, 140, 230)
+                fc2.setAlphaF(0.0)
+                fg.setColorAt(1.0, fc2)
+                bp.setPen(Qt.NoPen)
+                bp.fillRect(0, 0, w, h, QBrush(fg))
+                paths = [self._poly_path(main)]
+                for br in (1, 2):
+                    paths.append(self._poly_path(
+                        self._bolt_points(w, h, seed, k, br)))
+                # 三层描边：外层蓝紫晕 → 中层冷蓝 → 内层近白亮芯
+                for wd, al, rgb in ((max(5.0, h * 0.060), 0.22, (110, 132, 255)),
+                                    (max(2.4, h * 0.024), 0.46, (176, 202, 255)),
+                                    (max(1.4, h * 0.011), 1.00, (248, 251, 255))):
+                    col = QColor(*rgb)
+                    col.setAlphaF(min(1.0, al * pulse * a))
+                    pen = QPen(col, wd * scale, Qt.SolidLine,
+                               Qt.RoundCap, Qt.RoundJoin)
+                    for pi, path in enumerate(paths):
+                        if pi:
+                            pen.setWidthF(max(1.0, wd * 0.55))
+                        bp.setPen(pen)
+                        bp.drawPath(path)
+                bp.setPen(Qt.NoPen)
+
+        # ③ 与极光同款包络：左右淡出、上下柔化，不切出矩形边界
+        self._fade_envelope(bp, w, h, a, cache=True)
+        bp.end()
+
+        # ④ 双尺度 bloom：闪电外溢成电光雾（只在有闪击时做，空闲帧省两次缩放）
+        if best > 0.012:
+            g1 = img.scaled(max(1, bw // 3), max(1, bh // 3),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            g1 = g1.scaled(bw, bh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            g2 = img.scaled(max(1, bw // 7), max(1, bh // 7),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            g2 = g2.scaled(bw, bh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            bp2 = QPainter(img)
+            bp2.setCompositionMode(QPainter.CompositionMode_Screen)
+            bp2.setOpacity(0.30)
+            bp2.drawImage(0, 0, g1)
+            bp2.setOpacity(0.20)
+            bp2.drawImage(0, 0, g2)
+            bp2.end()
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(area), img)
+
+    # ---- 其它天气（雨 / 暴雪 / 冰雹 / 雾 / 风） ------------------------
+    @staticmethod
+    def _whash(i, seed, salt):
+        """确定性伪随机 0..1：粒子位置只由编号+seed 决定，逐帧不闪不跳。"""
+        v = math.sin(i * 127.1 + seed * 311.7 + salt * 74.7) * 43758.5453
+        return v - math.floor(v)
+
+    @staticmethod
+    def _noise(key, x, t):
+        """平滑确定性伪随机：闪电锯齿的横向抖动，空间低频、逐帧不闪。"""
+        k = math.floor(x)
+        f = x - k
+        f = f * f * (3.0 - 2.0 * f)
+
+        def h(a, b):
+            v = math.sin(a * 12.9898 + b * 78.233) * 43758.5453
+            return 2.0 * (v - math.floor(v)) - 1.0
+
+        base = h(key, k) * (1.0 - f) + h(key, k + 1) * f
+        return base * (0.75 + 0.25 * math.sin(t * 1.1 + key * 1.7))
+
+    def _fade_envelope(self, bp, w, h, a, keep_bottom=0.0, cache=False):
+        """离子流 / 雷暴 / 其它天气共用的水平 + 垂直柔化包络。
+
+        keep_bottom > 0 时抬高底边亮度（暴雪的积雪要看得见）；cache=True
+        时复用与高度绑定的 _vg（雷暴和离子流每帧都要用，现构 6 个色标
+        纯属浪费）。两者互斥：留底渐变是定制的，绝不能进缓存串到下一场。
+        """
+        bp.setRenderHint(QPainter.Antialiasing, False)
+        bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        hg = QLinearGradient(0, 0, w, 0)
+        for pos, al in self.H_ENVELOPE:
+            c = QColor(0, 0, 0)
+            c.setAlphaF(min(1.0, al * a))
+            hg.setColorAt(pos, c)
+        bp.fillRect(0, 0, w, h, QBrush(hg))
+        use_cache = cache and not keep_bottom
+        if use_cache and self._vg_h == h:
+            vg = self._vg
+        else:
+            vg = QLinearGradient(0, 0, 0, h)
+            for pos, al in self.V_ENVELOPE:
+                if pos >= 1.0:
+                    al = max(al, keep_bottom)
+                elif pos >= 0.82:
+                    al = max(al, keep_bottom * 0.85)
+                c = QColor(0, 0, 0)
+                c.setAlphaF(min(1.0, al))
+                vg.setColorAt(pos, c)
+            if use_cache:
+                self._vg, self._vg_h = vg, h
+        bp.fillRect(0, 0, w, h, QBrush(vg))
+
+    def _draw_rain_lightning(self, bp, w, h, t, a, seed):
+        """暴雨叠加：雨幕里零星劈下几道细闪电（复用雷暴的时序与几何）。"""
+        s2 = seed * 0.73 + 3.1
+        for k in range(4):
+            pulse = self._storm_pulse(t, s2, k)
+            if pulse < 0.03:
+                continue
+            pts = self._bolt_points(w, h, s2, k)
+            path = self._poly_path(pts)
+            # 打闪的一瞬整片雨幕被照亮，才看得出「暴雨 = 大雨 + 雷暴」。
+            # 只在主脉冲够亮时铺全屏径向辉光，余晖帧省掉这次填充。
+            if pulse > 0.10:
+                gx = pts[5].x()
+                fg = QRadialGradient(gx, h * 0.30, w * 0.72)
+                fc = QColor(150, 175, 255)
+                fc.setAlphaF(min(1.0, 0.17 * pulse * a))
+                fg.setColorAt(0.0, fc)
+                fg.setColorAt(1.0, QColor(150, 175, 255, 0))
+                bp.setPen(Qt.NoPen)
+                bp.fillRect(0, 0, w, h, QBrush(fg))
+            for wd, al, rgb in ((max(3.0, h * 0.038), 0.20, (120, 145, 255)),
+                                (max(1.2, h * 0.010), 0.90, (226, 238, 255))):
+                col = QColor(*rgb)
+                col.setAlphaF(min(1.0, al * pulse * a))
+                bp.setPen(QPen(col, wd, Qt.SolidLine,
+                               Qt.RoundCap, Qt.RoundJoin))
+                bp.drawPath(path)
+        bp.setPen(Qt.NoPen)
+
+    def _draw_snow_drift(self, bp, w, h, t, a, seed):
+        """暴雪叠加：地面起伏的积雪带 + 一道雪脊亮边。"""
+        base = h * (0.84 + 0.012 * math.sin(t * 0.16))
+        rise = h * (0.075 + 0.022 * math.sin(t * 0.21 + 1.0))
+        ys = []
+        for i in range(25):
+            x = w * i / 24.0
+            ys.append(base - rise * (0.5 + 0.5 * math.sin(
+                x / w * 8.0 + seed + i * 0.12)))
+        bank = QPainterPath()
+        bank.moveTo(0, h)
+        for i, y in enumerate(ys):
+            bank.lineTo(w * i / 24.0, y)
+        bank.lineTo(w, h)
+        bank.closeSubpath()
+        g = QLinearGradient(0, base - rise, 0, h)
+        c0 = QColor(232, 242, 255)
+        c0.setAlphaF(min(1.0, 0.78 * a))
+        c1 = QColor(190, 214, 248)
+        c1.setAlphaF(min(1.0, 0.42 * a))
+        g.setColorAt(0.0, c0)
+        g.setColorAt(1.0, c1)
+        bp.setPen(Qt.NoPen)
+        bp.fillPath(bank, QBrush(g))
+        edge = QPainterPath()
+        edge.moveTo(0, ys[0])
+        for i in range(1, len(ys)):
+            edge.lineTo(w * i / 24.0, ys[i])
+        ce = QColor(248, 252, 255)
+        ce.setAlphaF(min(1.0, 0.75 * a))
+        bp.setPen(QPen(ce, max(1.0, h * 0.010),
+                       Qt.SolidLine, Qt.RoundCap))
+        bp.drawPath(edge)
+        bp.setPen(Qt.NoPen)
+
+    def _draw_precip(self, bp, w, h, t, a, seed, kind, level=2):
+        """降水三型：雨 / 雪 / 冰雹。雨与雪按 small→大分 4 档。"""
+        H = lambda i, s: self._whash(i, seed, s)
+        level = max(1, min(4, int(level or 2)))
+        if kind == 'rain':
+            count = (95, 220, 320, 360)[level - 1]
+            spd_mul = (0.70, 1.00, 1.28, 1.55)[level - 1]
+            len_mul = (0.66, 1.00, 1.22, 1.42)[level - 1]
+            a_mul = (0.70, 1.00, 1.12, 1.20)[level - 1]
+            splash_n = (10, 22, 34, 44)[level - 1]
+            far, near, splash = QPainterPath(), QPainterPath(), QPainterPath()
+            for i in range(count):
+                spd = (620.0 + 360.0 * H(i, 3)) * spd_mul
+                ln = h * (0.16 + 0.20 * H(i, 4)) * len_mul
+                span = w + 90.0
+                x = (H(i, 1) * span + t * spd * 0.10) % span - 45.0
+                y = (H(i, 2) * (h + ln) + t * spd) % (h + ln) - ln
+                q = near if i % 6 == 0 else far
+                q.moveTo(x, y)
+                q.lineTo(x - ln * 0.20, y + ln)
+            c = QColor(158, 196, 245)
+            c.setAlphaF(min(1.0, 0.52 * a * a_mul))
+            bp.setPen(QPen(c, max(0.9, h * 0.011) * (0.8 + 0.2 * level),
+                           Qt.SolidLine, Qt.RoundCap))
+            bp.drawPath(far)
+            c2 = QColor(214, 232, 255)
+            c2.setAlphaF(min(1.0, 0.74 * a * a_mul))
+            bp.setPen(QPen(c2, max(1.1, h * 0.014) * (0.8 + 0.2 * level),
+                           Qt.SolidLine, Qt.RoundCap))
+            bp.drawPath(near)
+            for i in range(splash_n):
+                x = (H(i, 9) * (w + 40.0) + t * 18.0) % (w + 40.0) - 20.0
+                y = h * (0.72 + 0.14 * H(i, 10))
+                splash.moveTo(x - 5.0, y)
+                splash.lineTo(x + 5.0, y)
+            cs = QColor(190, 215, 255)
+            cs.setAlphaF(min(1.0, 0.46 * a * a_mul))
+            bp.setPen(QPen(cs, max(0.8, h * 0.009),
+                           Qt.SolidLine, Qt.RoundCap))
+            bp.drawPath(splash)
+            return
+
+        if kind == 'blizzard':
+            gust = math.sin(t * 0.9) * (0.55, 1.00, 1.40, 1.80)[level - 1]
+            streaks = QPainterPath()
+            for i in range((12, 30, 46, 62)[level - 1]):
+                y = h * (0.10 + 0.80 * H(i, 2))
+                ln = w * (0.045 + 0.09 * H(i, 4))
+                x = (H(i, 1) * (w + ln) + t * (150.0 + 120.0 * H(i, 1))) \
+                    % (w + ln) - ln
+                # 两截短划线：长连续斜线在深底上会被看成极光丝带
+                slope = ln * 0.12 * (1.0 + gust * 0.4)
+                for u in (0.0, 0.62):
+                    streaks.moveTo(x + ln * u, y - slope * u)
+                    streaks.lineTo(x + ln * (u + 0.30),
+                                   y - slope * (u + 0.30))
+            cs = QColor(184, 212, 255)
+            cs.setAlphaF(min(1.0, 0.17 * a))
+            bp.setPen(QPen(cs, max(1.0, h * 0.013),
+                           Qt.SolidLine, Qt.RoundCap))
+            bp.drawPath(streaks)
+            pts = []
+            for i in range((110, 260, 360, 430)[level - 1]):
+                spd = 90.0 + 150.0 * H(i, 3)
+                x = (H(i, 1) * (w + 30.0) + t * (120.0 + gust * 90.0)
+                     + math.sin(t * 1.6 + i) * w * 0.02) % (w + 30.0) - 15.0
+                y = (H(i, 2) * (h + 20.0) + t * spd) % (h + 20.0) - 10.0
+                pts.append(QPointF(x, y))
+            cf = QColor(226, 240, 255)
+            cf.setAlphaF(min(1.0, 0.80 * a))
+            bp.setPen(QPen(cf, max(1.4, h * 0.020),
+                           Qt.SolidLine, Qt.RoundCap))
+            bp.drawPoints(QPolygonF(pts))
+            # 近处大雪花：少量柔光团，给雪一点纵深
+            bp.setPen(Qt.NoPen)
+            for i in range(6 + 2 * level):
+                r = h * (0.030 + 0.035 * H(i, 6))
+                x = (H(i, 7) * w + t * 65.0) % w
+                y = (H(i, 8) * h + t * 55.0) % h
+                cg = QRadialGradient(x, y, r)
+                cg.setColorAt(0.0, QColor(230, 242, 255, int(120 * a)))
+                cg.setColorAt(1.0, QColor(230, 242, 255, 0))
+                bp.setBrush(QBrush(cg))
+                bp.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
+            return
+
+        # hail：亮冰粒 + 短促下落尾迹
+        trail, pts = QPainterPath(), []
+        for i in range(140):
+            spd = 780.0 + 420.0 * H(i, 3)
+            ln = h * (0.10 + 0.10 * H(i, 4))
+            x = (H(i, 1) * (w + 40.0) + t * spd * 0.08) % (w + 40.0) - 20.0
+            y = (H(i, 2) * (h + ln) + t * spd) % (h + ln) - ln
+            trail.moveTo(x, y)
+            trail.lineTo(x - ln * 0.10, y + ln)
+            pts.append(QPointF(x, y))
+        ct = QColor(176, 210, 255)
+        ct.setAlphaF(min(1.0, 0.24 * a))
+        bp.setPen(QPen(ct, max(0.9, h * 0.010),
+                       Qt.SolidLine, Qt.RoundCap))
+        bp.drawPath(trail)
+        bp.setPen(QPen(QColor(240, 248, 255, int(225 * a)),
+                       max(2.0, h * 0.026), Qt.SolidLine, Qt.RoundCap))
+        bp.drawPoints(QPolygonF(pts))
+
+    def _draw_fog(self, bp, w, h, t, a, seed, level=2):
+        """大雾：几团缓慢横移的圆形雾bank，径向渐变到 0，没有硬边。"""
+        H = lambda i, s: self._whash(i, seed, s)
+        level = max(1, min(4, int(level or 2)))
+        dense = (0.70, 1.05, 1.35, 1.60)[level - 1]
+        bp.setPen(Qt.NoPen)
+        for i in range(3 + level):
+            r = w * (0.20 + 0.12 * H(i, 3))
+            cx = ((H(i, 1) * (w + 2 * r) + t * (14.0 + 10.0 * H(i, 3)))
+                  % (w + 4 * r)) - r
+            cy = h * (0.25 + 0.5 * H(i, 2)) + h * 0.05 * math.sin(t * 0.35 + i)
+            cg = QRadialGradient(cx, cy, r)
+            cg.setColorAt(0.0, QColor(178, 196, 226,
+                                      min(255, int(58 * a * dense))))
+            cg.setColorAt(0.55, QColor(178, 196, 226,
+                                       min(255, int(30 * a * dense))))
+            cg.setColorAt(1.0, QColor(178, 196, 226, 0))
+            bp.setBrush(QBrush(cg))
+            bp.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+    def _draw_wind(self, bp, w, h, t, a, seed, level=2):
+        """狂风：气流线段 + 被卷起的碎屑 + 随风翻滚的残叶。"""
+        H = lambda i, s: self._whash(i, seed, s)
+        level = max(1, min(4, int(level or 2)))
+        flow = QPainterPath()
+        for i in range((6, 10, 13, 16)[level - 1]):
+            yb = 0.10 + 0.085 * i
+            for j in range(7):
+                x0 = ((j / 7.0) * (w + 180.0)
+                      + t * (110.0 + 28.0 * i + 40.0 * H(i, 1))) \
+                    % (w + 180.0) - 90.0
+                seg = w * (0.04 + 0.09 * H(i * 7 + j, 2))
+                drift = h * 0.02 * math.sin(t * 1.7 + i)
+                y0 = h * (yb + 0.07 * math.sin(
+                    x0 / w * 6.0 + t * 1.1 + i)) + drift
+                y1 = h * (yb + 0.07 * math.sin(
+                    (x0 + seg) / w * 6.0 + t * 1.1 + i)) + drift
+                flow.moveTo(x0, y0)
+                flow.lineTo(x0 + seg, y1)
+        # 短促的阵风：刻意不再画横贯整片空白区的长线（那条太像极光丝带），
+        # 改成两三截错开的短划线，读起来是「一阵风刮过」而不是一条光带。
+        for i in range(4 + 2 * level):
+            ln = w * (0.07 + 0.09 * H(i, 11))
+            x = (H(i, 12) * (w + ln) + t * (260.0 + 90.0 * H(i, 13))) \
+                % (w + ln) - ln
+            y = h * (0.14 + 0.72 * H(i, 14))
+            for seg in range(3):
+                u0, u1 = seg / 3.0, seg / 3.0 + 0.22
+                flow.moveTo(x + ln * u0, y - h * 0.045 * u0)
+                flow.lineTo(x + ln * u1, y - h * 0.045 * u1)
+        cf = QColor(130, 205, 225)
+        cf.setAlphaF(min(1.0, 0.38 * a))
+        bp.setPen(QPen(cf, max(1.0, h * 0.012),
+                       Qt.SolidLine, Qt.RoundCap))
+        bp.drawPath(flow)
+        pts = []
+        for i in range((35, 70, 100, 130)[level - 1]):
+            x = (H(i, 5) * (w + 40.0) + t * (210.0 + 160.0 * H(i, 6))) \
+                % (w + 40.0) - 20.0
+            y = h * (0.10 + 0.80 * H(i, 7)) \
+                + h * 0.03 * math.sin(t * 2.2 + i)
+            pts.append(QPointF(x, y))
+        cp = QColor(196, 232, 240)
+        cp.setAlphaF(min(1.0, 0.44 * a))
+        bp.setPen(QPen(cp, max(1.0, h * 0.012),
+                       Qt.SolidLine, Qt.RoundCap))
+        bp.drawPoints(QPolygonF(pts))
+        self._draw_leaves(bp, w, h, t, a, seed, level)
+
+    def _draw_leaves(self, bp, w, h, t, a, seed, level=2):
+        """大风叠加：几片秋色残叶沿风场横向翻滚、自转、忽上忽下。"""
+        H = lambda i, s: self._whash(i, seed, s)
+        palette = ((198, 146, 74), (174, 106, 62), (206, 168, 88),
+                   (150, 122, 76), (186, 128, 68))
+        for i in range(5 + 5 * level):
+            spd = (120.0 + 110.0 * H(i, 31)) * (0.7 + 0.18 * level)
+            x = (H(i, 32) * (w + 80.0) + t * spd) % (w + 80.0) - 40.0
+            y = (h * (0.10 + 0.72 * H(i, 33))
+                 + h * (0.05 + 0.05 * H(i, 34))
+                 * math.sin(t * (1.1 + 0.7 * H(i, 35)) + i * 1.7))
+            rot = (t * (120.0 + 220.0 * H(i, 36))
+                   * (1.0 if i % 2 else -1.0)) % 360.0
+            r = h * (0.038 + 0.030 * H(i, 37))
+            col = QColor(*palette[i % len(palette)])
+            col.setAlphaF(min(1.0, (0.72 + 0.07 * level) * a))
+            bp.save()
+            bp.translate(x, y)
+            bp.rotate(rot * (0.7 + 0.6 * abs(math.sin(t * 1.3 + i))))
+            leaf = QPainterPath()
+            leaf.moveTo(0.0, -r)
+            leaf.quadTo(r * 0.85, 0.0, 0.0, r)
+            leaf.quadTo(-r * 0.85, 0.0, 0.0, -r)
+            bp.setPen(Qt.NoPen)
+            bp.fillPath(leaf, QBrush(col))
+            vein = QColor(255, 236, 200)
+            vein.setAlphaF(min(1.0, 0.35 * a))
+            bp.setPen(QPen(vein, max(0.6, h * 0.004)))
+            bp.drawLine(QPointF(0.0, -r * 0.8), QPointF(0.0, r * 0.8))
+            bp.restore()
+        bp.setPen(Qt.NoPen)
+
+    def _draw_weather(self, p, area, t, a, seed, kind, level=2):
+        """天气层统一入口：与雷暴共用缓冲/包络，内容按类型 + 强度档变化。"""
+        w, h = area.width(), area.height()
+        bw, bh = max(1, (w + 1) // 2), max(1, (h + 1) // 2)
+        if self._storm_buf.width() != bw or self._storm_buf.height() != bh:
+            self._storm_buf = QImage(bw, bh, QImage.Format_ARGB32_Premultiplied)
+        img = self._storm_buf
+        img.fill(Qt.transparent)
+        bp = QPainter(img)
+        bp.scale(bw / w, bh / h)
+        bp.setRenderHint(QPainter.Antialiasing, True)
+        try:
+            level = max(1, min(4, int(level or 2)))
+            if kind == 'fog':
+                self._draw_fog(bp, w, h, t, a, seed, level)
+            elif kind == 'wind':
+                self._draw_wind(bp, w, h, t, a, seed, level)
+            else:
+                self._draw_precip(bp, w, h, t, a, seed, kind, level)
+            # 暴雨 = 大雨叠雷暴闪电；暴雪 = 大雪叠地面积雪。
+            if kind == 'rain' and level >= 4:
+                self._draw_rain_lightning(bp, w, h, t, a, seed)
+            if kind == 'blizzard' and level >= 4:
+                self._draw_snow_drift(bp, w, h, t, a, seed)
+            self._fade_envelope(
+                bp, w, h, a,
+                keep_bottom=0.62 if (kind == 'blizzard' and level >= 4) else 0.0)
+        finally:
+            bp.end()
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(area), img)
+
+    def _ribbon_y(self, x, w, h, t, seed, yb, a1, a2, phase):
+        """一条离子流线：两组不同频率的行波叠加，随时间起伏并横向传播。"""
+        u = x / max(1.0, w)
+        return h * (yb
+                    + a1 * math.sin(u * 6.4 + t * 0.72 + seed + phase)
+                    + a2 * math.sin(u * 12.8 - t * 0.95 + seed * 1.3 + phase * 1.6)
+                    + 0.016 * math.sin(t * 0.31 + phase))
+
+    def _color_gradient(self, w, t, seed, alpha, index):
+        """横向连续色相；alpha 由丝带权重与羽化层共同决定。
+
+        色相抖动的时间尺度只有 0.21 rad/s（每帧相位变化约 0.007），逐帧
+        重建三条 QLinearGradient 纯属浪费。量化到 0.25s 一档并复用对象，
+        实测每帧省下约 2ms；QLinearGradient 被 QBrush 复制使用，缓存安全。
+        """
+        key = (w, seed, alpha, index, int(t * 4.0))
+        cached = self._grad_cache.get(key)
+        if cached is not None:
+            return cached
+        g = QLinearGradient(0, 0, w, 0)
+        prev = -0.001
+        last = len(self.STOPS) - 1
+        for i, (pos, rgb) in enumerate(self.STOPS):
+            wob = (0.0 if i in (0, last) else
+                   0.022 * math.sin(t * 0.21 + seed * 0.4 + i * 1.3 + index * 0.9))
+            q = min(max(pos + wob, prev + 0.002), 1.0)
+            prev = q
+            c = QColor(*rgb)
+            c.setAlphaF(min(1.0, alpha))
+            g.setColorAt(q, c)
+        if len(self._grad_cache) > 24:
+            self._grad_cache.clear()
+        self._grad_cache[key] = g
+        return g
+
+    def _draw_aurora(self, p, area, t, a, seed):
+        """连续的气体电离发光场：波浪丝带主体 + 双尺度 bloom 弥散。
+
+        不再绘制任何一颗颗独立的柔光尘 / 柔光柱精灵——那些在 1:1 显示下
+        就是可见的大颗粒。空气感与体积完全由两层低频 bloom（Screen 叠加）
+        提供，得到连续、无颗粒、无可数光团的离子化极光。
+        """
+        w, h = area.width(), area.height()
+        # 半分辨率缓冲：像素量降 4 倍，双线性插值顺带抹平羽化层阶梯。
+        bw, bh = max(1, (w + 1) // 2), max(1, (h + 1) // 2)
+        if self._aurora_buf.width() != bw or self._aurora_buf.height() != bh:
+            self._aurora_buf = QImage(bw, bh, QImage.Format_ARGB32_Premultiplied)
+        img = self._aurora_buf
+        img.fill(Qt.transparent)
+        bp = QPainter(img)
+        bp.scale(bw / w, bh / h)          # 之后仍按全尺寸坐标书写
+        bp.setRenderHint(QPainter.Antialiasing, True)
+
+        # ① 三条波浪丝带：每条由外到内五层羽化，只有曲线附近有光。
+        #    曲线点每帧只算 36 段（半分辨率缓冲里每段约 6px，双线性放大后
+        #    依旧平滑）；路径改用 QPolygonF 一次 addPolygon 批量提交，取代
+        #    近百次 Python→C++ lineTo —— 后者是逐帧绘制最大的一处调用开销。
+        seg = self.RIBBON_SEG
+        xs = [w * i / seg for i in range(seg + 1)]
+        ys_by_ri = {}
+        for ri, (yb, a1, a2, phase, weight, thick) in enumerate(self.RIBBONS):
+            ys = [self._ribbon_y(x, w, h, t, seed, yb, a1, a2, phase)
+                  for x in xs]
+            ys_by_ri[ri] = ys
+            brush = QBrush(self._color_gradient(w, t, seed, 1.0, ri))
+            rev = list(zip(reversed(xs), reversed(ys)))
+            for mul, falpha in self.FEATHER:
+                th = h * thick * mul * 0.5
+                poly = QPolygonF(
+                    [QPointF(x, y - th) for x, y in zip(xs, ys)]
+                    + [QPointF(x, y + th) for x, y in rev])
+                path = QPainterPath()
+                path.addPolygon(poly)
+                path.closeSubpath()
+                bp.setOpacity(min(1.0, weight * falpha))
+                bp.fillPath(path, brush)
+            bp.setOpacity(1.0)
+            # 帘幕拖尾：以同一条波浪曲线为顶缘，向下铺一层很淡的光，
+            # 给丝带向下的体积；左右/底边仍由包络淡出，不会变成色块。
+            if ri == 1:
+                tail = QPainterPath()
+                tail.addPolygon(QPolygonF(
+                    [QPointF(x, y) for x, y in zip(xs, ys)]
+                    + [QPointF(w, h), QPointF(0, h)]))
+                tail.closeSubpath()
+                bp.setOpacity(min(1.0, weight * 0.085))
+                bp.fillPath(tail, brush)
+                bp.setOpacity(1.0)
+
+        # ② 主丝带亮芯：与第 2 条丝带同参数同网格，直接复用它的曲线点，
+        #    省下一整组 37 次波形采样。
+        core = QPolygonF([QPointF(x, y) for x, y in zip(xs, ys_by_ri[1])])
+        pen = QPen(QColor(198, 255, 234, 66), max(1.0, h * 0.02))
+        pen.setCapStyle(Qt.RoundCap)
+        bp.setPen(pen)
+        bp.drawPolyline(core)
+
+        # ③ 二维柔化包络：连续两次 DestinationIn 让 alpha 相乘，
+        #    水平中心向两侧淡出到 0，垂直顶部柔和淡入、底部收束。
+        self._fade_envelope(bp, w, h, a, cache=True)
+        bp.end()
+
+        # ④ 双尺度 bloom（取代原离散精灵）：整幅降采样再放大得到高斯雾，
+        #    两层不同半径以 Screen 叠加，形成气体电离般的连续弥散光。
+        g1 = img.scaled(max(1, bw // 3), max(1, bh // 3),
+                        Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        g1 = g1.scaled(bw, bh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        g2 = img.scaled(max(1, bw // 7), max(1, bh // 7),
+                        Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        g2 = g2.scaled(bw, bh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        bp2 = QPainter(img)
+        bp2.setCompositionMode(QPainter.CompositionMode_Screen)
+        bp2.setOpacity(0.34)
+        bp2.drawImage(0, 0, g1)
+        bp2.setOpacity(0.22)
+        bp2.drawImage(0, 0, g2)
+        bp2.end()
+        # bloom 的 Screen 会把边缘抬亮，补一次垂直包络把底部重新收束到 0
+        # （用缓冲原生坐标 bh，否则渐变只覆盖半分辨率缓冲的前半段）。
+        bp3 = QPainter(img)
+        bp3.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        if self._vg2_h != bh:
+            vg2 = QLinearGradient(0, 0, 0, bh)
+            for pos, al in self.V_ENVELOPE:
+                c = QColor(0, 0, 0)
+                c.setAlphaF(min(1.0, al))
+                vg2.setColorAt(pos, c)
+            self._vg2, self._vg2_h = vg2, bh
+        bp3.fillRect(0, 0, bw, bh, QBrush(self._vg2))
+        bp3.end()
+
+        # ⑤ 半分辨率缓冲平滑放大到目标绘制区
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(area), img)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        a = self._aurora_alpha
+        if a <= 0.002:
+            return
+        area = self._empty_rect()
+        if area.width() < 40 or area.height() < 20:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setClipRect(area)
+        # 常规半透明叠加：Plus 合成在浅色底上会过曝成白
+        mode = self._effect_mode
+        if mode == 'ion':
+            # 原离子流：完整亮度、原样绘制，不与任何天气同帧出现。
+            self._draw_aurora(p, area, self._aurora_t, a, self._aurora_seed)
+        elif mode == 'storm':
+            self._draw_storm(p, area, self._aurora_t, a, self._aurora_seed,
+                             self._effect_level or 2)
+        elif mode in self.WEATHER_KINDS:
+            self._draw_weather(p, area, self._aurora_t, a,
+                               self._aurora_seed, mode,
+                               self._effect_level or 2)
+        p.end()
+
+
+class _AuroraDirector(QObject):
+    """极光调度：切换选项卡后较快出现，之后按随机间隔不定时重播。
+
+    单个定时器驱动；空闲时 400ms 检查调度，演出期间 40ms（25fps）推进帧。
+    单帧绘制经路径批量提交与渐变缓存优化后约 11~13ms（原 33ms）。极光只做
+    不定时自动重播，与鼠标无关。
+    每次触发按 MODE_TABLE 从「原离子流 / 雷暴 / 雨 / 暴雪 / 冰雹 / 雾 / 风」
+    中随机择一，全部复用同一个定时器和同一块天气缓冲。不联网、不查询当地
+    天气：天气类型与强度档完全由随机表 + 本场 seed 决定。天气不与离子流
+    同帧混合；**两次天气之间必定夹一次离子流**，不会连着两场天气。
+    只更新当前页，功能区折叠 / 隐藏时自动停演。
+    """
+    SHOW_SEC = (3.8, 6.5)
+    GAP_SEC = (8.0, 18.0)
+    AFTER_SWITCH_SEC = (0.6, 2.0)
+    FRAME_MS = 40
+    # 每次随机触发从全部演出里择一。离子流仍占最大头（原始效果不能被淹没），
+    # 雷暴/雨/雪/冰雹/雾/风分摊余下概率；调这张表即可改各天气出现频率。
+    # 顺序刻意让 random()→0 落在雷暴、→1 落在离子流（兼容旧行为与测试）。
+    MODE_TABLE = (('storm', 0.10), ('rain', 0.15), ('blizzard', 0.12),
+                  ('hail', 0.06), ('fog', 0.10), ('wind', 0.09),
+                  ('ion', 0.38))
+    IDLE_MS = 400
+
+    def __init__(self, tabs, parent=None):
+        super().__init__(parent)
+        self.tabs = tabs
+        self.timer = QTimer(self)
+        # PreciseTimer 避开 Windows 默认 ~15.6ms 的粗粒度量化，帧间隔更均匀
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(self.IDLE_MS)
+        self.timer.timeout.connect(self._tick)
+        self._showing = False
+        self._page = None
+        self._t0 = 0.0
+        self._dur = 0.0
+        self._seed = 0.0
+        self._mode = 'ion'          # 本次演出：'ion' / 某种天气
+        self._level = 0            # 强度档 1..4：小 / 中 / 大 / 暴雨·暴雪
+        # 上一场是不是天气：是则本场强制离子流，保证天气之间必有间隔。
+        self._last_was_weather = False
+        self._next = time.monotonic() + random.uniform(*self.AFTER_SWITCH_SEC)
+        self.timer.start()
+
+    def _current_page(self):
+        w = self.tabs.currentWidget()
+        page = w.widget() if isinstance(w, QScrollArea) else None
+        if isinstance(page, _AuroraRibbonPage) and page.isVisible():
+            return page
+        return None
+
+    def _pick_effect(self):
+        """→ (kind, level)：纯随机抽一场演出，不查天气、不联网。
+
+        MODE_TABLE 决定七种演出（离子流 + 六种天气）的出现频率；强度档
+        1..4 = 小 / 中 / 大 / 暴雨·暴雪，由本场 seed 派生，不额外消耗
+        random（同一 seed + 同一随机值必然得到同一场，便于回归测试）。
+        ion 恒为 0 档。上一场若为天气，_tick 会直接改播离子流，因此
+        天气之间必有离子流间隔。
+        """
+        r, acc = random.random(), 0.0
+        kind = 'ion'
+        for mode, weight in self.MODE_TABLE:
+            acc += weight
+            if r < acc:
+                kind = mode
+                break
+        level = (1 + int(self._seed * 7.31) % 4) if kind != 'ion' else 0
+        return kind, level
+
+    def _pick_mode(self):
+        """兼容旧调用 / 测试：只取演出类型。"""
+        return self._pick_effect()[0]
+
+    def _set_interval(self, ms):
+        """QTimer.setInterval 会重启计时，只有间隔真的变了才设。"""
+        if self.timer.interval() != ms:
+            self.timer.setInterval(ms)
+
+    def on_tab_changed(self, _index):
+        self._stop()
+        self._next = time.monotonic() + random.uniform(*self.AFTER_SWITCH_SEC)
+        self._set_interval(self.IDLE_MS)
+
+    def _stop(self):
+        if self._page is not None:
+            self._page.set_effect_mode('ion')
+            self._page.set_aurora(0.0, 0.0, self._seed)
+        self._page = None
+        self._showing = False
+        self._mode = 'ion'
+        self._set_interval(self.IDLE_MS)
+
+    def _tick(self):
+        now = time.monotonic()
+        # ① 正在演出：推进淡入淡出，到时 / 页面失效就收场并排下一场
+        if self._showing:
+            t = now - self._t0
+            page = self._page
+            if (t >= self._dur or page is None or not page.isVisible()
+                    or self._current_page() is not page):
+                self._stop()
+                self._next = now + random.uniform(*self.GAP_SEC)
+                return
+            fade = min(1.0, t / 1.0, (self._dur - t) / 1.3)
+            page.set_aurora(t, max(0.0, fade), self._seed)
+            return
+        # ② 到点了：随机开一场新演出
+        if now < self._next:
+            return
+        page = self._current_page()
+        if page is None:
+            self._next = now + 1.0
+            return
+        self._showing = True
+        self._t0 = now
+        self._dur = random.uniform(*self.SHOW_SEC)
+        self._seed = random.random() * 100.0
+        # 随机抽一场（离子流 / 六种天气 + 强度档）；上一场若是天气，
+        # 本场强制回到离子流 —— 天气之间必须间隔，也不与离子流同帧混合。
+        if self._last_was_weather:
+            self._mode, self._level = 'ion', 0
+        else:
+            self._mode, self._level = self._pick_effect()
+        self._last_was_weather = (self._mode != 'ion')
+        self._page = page
+        page.set_effect(self._mode, self._level)
+        self._set_interval(self.FRAME_MS)
+        page.set_aurora(0.0, 0.0, self._seed)
+
+
 class _RibbonGroup(QWidget):
     """功能区分组：上方按钮区，底部分组名，右侧细分隔线（Word 风格竖线）。"""
     def __init__(self, title, parent=None):
@@ -704,9 +1711,6 @@ QToolButton#RibbonCollapse:hover { background: $hover2; color: $white; }
    旧版三个独立立体按钮 + hover 浮出，视觉重且看不出前两个是互斥选项。
    现在未选中一律透明描边，只有生效项着色：常显也不抢编辑区注意力。 */
 QWidget#MarkToolRow { background: transparent; }
-QLabel#MarkToolLabel {
-    background: transparent; color: $text_mute; font-size: 11px; padding: 0;
-}
 QWidget#MarkSegmented {
     background: $raised; border: 1px solid $border; border-radius: 5px;
 }
@@ -801,11 +1805,15 @@ QMainWindow::separator:hover { background-color: $line_hi; }
    DocTabs 为 0（真正可点的是右上角常驻按钮），MarkTabs 为 30px 的普通「+」页。
    这里绝不能再写 QTabBar::tab:last：横向滚动后 Qt 会把 :last 判给「可视区
    最后一个标签」，样式就会误套到倒数第二个真实文档/列表标签上。 */
+/* 右上角「+」由 _position_doc_add_btn() 手动定位：高度严格取文档标签高度，
+   下沿与标签下边沿平齐，因此不写 max-width / margin-right（会把它挤窄，
+   重新露出一条缝）。背景不透明，波浪覆盖层从它的下沿接着往下画。
+   纵向 padding 必须为 0，否则 minimumSizeHint 会把按钮撑得比标签高。 */
 QToolButton#DocAddTab {
     color: $link; font-size: 15px; font-weight: bold;
     background: $raised; border: 1px solid $border; border-bottom: none;
     border-top-left-radius: 4px; border-top-right-radius: 4px;
-    min-width: 26px; max-width: 30px; padding: 4px 6px; margin-right: 1px;
+    min-width: 30px; padding: 0 4px; margin: 0;
 }
 QToolButton#DocAddTab:hover { background: $accent_soft; color: $white; }
 /* 统一右键菜单 / 提示条 / 原生弹窗的观感 */
@@ -898,7 +1906,7 @@ QFrame#ValidationScoreCard {
     border: 1px solid $border; border-radius: 7px;
 }
 QLabel#ValidationSummary { color: $text; font-size: 14px; font-weight: bold; background: transparent; }
-QLabel#ValidationMeta { color: $text_dim; font-size: 11px; }
+QLabel#ValidationMeta { color: $text_dim; font-size: 12px; }
 QToolButton#ValidationLevelChip {
     background: $raised; color: $text_mid; border: 1px solid $border;
     border-radius: 10px; padding: 2px 9px; font-size: 12px;
@@ -909,7 +1917,7 @@ QToolButton#ValidationLevelChip:checked {
 QToolButton#ValidationLevelChip:hover { border-color: $accent_hi; }
 QToolButton#ValidationIgnoredChip {
     background: transparent; color: $text_dim; border: 1px dashed $border;
-    border-radius: 4px; padding: 2px 7px; font-size: 11px;
+    border-radius: 4px; padding: 2px 7px; font-size: 12px;
 }
 QToolButton#ValidationIgnoredChip:checked {
     background: $hover2; color: $white; border: 1px solid $mid;
@@ -921,15 +1929,14 @@ QToolButton#ValidationDisclosure {
 QToolButton#ValidationDisclosure:hover { color: $white; }
 QToolButton#ValidationGhostButton {
     background: transparent; color: $text_mid; border: 1px solid $border;
-    border-radius: 4px; padding: 3px 8px; font-size: 11px;
+    border-radius: 4px; padding: 3px 8px; font-size: 12px;
 }
 QToolButton#ValidationGhostButton:hover { background: $hover2; color: $white; }
 QLineEdit#ValidationSearch {
     background: $bg; color: $text; border: 1px solid $border;
-    border-radius: 4px; padding: 3px 8px; font-size: 12px;
+    border-radius: 4px; padding: 3px 8px; font-size: 13px;
 }
 QLineEdit#ValidationSearch:focus { border-color: $accent_hi; }
-QComboBox#ValidationSort { font-size: 11px; padding: 2px 6px; }
 QLabel#ValidationIssuesEmpty {
     color: $text_dim; font-size: 13px; padding: 18px 8px;
     background: $bg; border: 1px dashed $border; border-radius: 5px;
@@ -1085,6 +2092,37 @@ QLabel#TopDocTitle {
     background: transparent; color: $text;
     font-size: 13px; font-weight: 600; padding: 0 6px;
 }
+
+/* ================= 正文三栏（权利要求书 / 说明书 / 说明书摘要） ================= */
+/* 段头是一条 26px 的窄条：左侧 3px 色条 + 段名（同色）。
+   目的：三段各写各的时候，一眼看出「这是哪一段、写了多少字」。 */
+QWidget#DocPaneStack, QWidget#PaneSplitHost, QWidget#PaneBox { background: $bg; }
+/* 段头的底（段色渐变 + 粒子流）由 _PaneHead 自绘，样式表只管边框归零，
+   否则会和自绘的渐变换成「先铺一层纯色再盖渐变」，边缘发灰。 */
+QWidget#PaneHead { background: transparent; border: none; }
+/* qdarkstyle 的全局 `QLabel { background-color: #19232d }` 会在段头条（$panel2，
+   更浅）上给段名和字数各刷一块深色小方块，看着像两个浮起来的标签。
+   段头本身已经承担了底色，文字一律透明贴在条上。 */
+QLabel#PaneTitle {
+    background: transparent; border: none;
+    font-size: 12px; font-weight: 500; padding: 0px;
+}
+QToolButton#PaneBtn {
+    background: rgba(255, 255, 255, 16); border: 1px solid rgba(255, 255, 255, 20);
+    color: $text_mid; font-size: 11px; padding: 0px; border-radius: 4px;
+}
+QToolButton#PaneBtn:hover { background: $hover; color: $text; border-color: $mid; }
+QToolButton#PaneBtn:pressed { background: $hover2; }
+/* 分隔条由 _PaneSplitHandle 自绘（4px 热区里只画 1px 细线）：
+   QSS 这层必须彻底清干净，否则 qdarkstyle 的 5px 高 + 1px padding + 贴图
+   会先糊出一条粗带，再被自绘盖一半，缝隙里露出浅色。 */
+QSplitter#PaneSplit::handle,
+QSplitter#PaneSplit::handle:hover,
+QSplitter#PaneSplit::handle:vertical,
+QSplitter#PaneSplit::handle:horizontal {
+    background: transparent; border: none; image: none;
+    padding: 0px; margin: 0px; min-width: 0px; min-height: 0px;
+}
 """).substitute(_QSS_TOKENS)
 
 
@@ -1119,6 +2157,114 @@ class _UrlProbe(QObject):
         except Exception as e:                # 超时/拒绝连接/DNS 失败都算不可达
             ok, err = False, str(e) or type(e).__name__
         self.finished.emit(ok, err)
+
+
+# ============ 正文编辑器：分段展开与跨段下标 ============
+# 右侧正文切成「上中下」三栏时，active_textcomponent 是 DocEditorPanes 复合
+# 容器：toPlainText() 返回三段拼接的聚合全文（含「权利要求书\n…」段名），
+# 而 document() / textCursor() / setExtraSelections() 经 __getattr__ 只落到
+# 「当前有焦点的那一段」。早期定位代码把聚合全文的字符下标直接交给子文档的
+# QTextCursor.setPosition，于是高亮整体错位、且只画在当前段 —— 这就是三栏
+# 模式下「左侧附图标记列表选中后标记定位错误」的根因。
+# 统一做法：任何可能拿到复合容器的地方，都先展开成真实 QTextEdit，并在各段
+# 自己的文本 / 文档里计算下标。
+
+def text_editors_of(component):
+    """把编辑器展开成真实 QTextEdit 列表；普通编辑器返回 [自身]。"""
+    if component is None:
+        return []
+    if hasattr(component, 'each_editor'):
+        try:
+            return [e for e in component.each_editor() if e is not None]
+        except Exception:
+            return []
+    return [component]
+
+
+def iter_text_spans(component, needle, case_sensitive=False, limit=4000,
+                    literal=True):
+    """逐段查找 needle，产出 (编辑器, 段内起点, 段内终点)。
+
+    下标始终相对该段自己的 document()，可直接用于 QTextCursor.setPosition。
+    """
+    raw = (needle or '').replace('\u2029', '\n')
+    if not raw or raw == '.':
+        return
+    try:
+        pattern = re.escape(raw) if literal else raw
+        rx = re.compile(pattern, re.S | (0 if case_sensitive else re.I))
+    except re.error:
+        return
+    n = 0
+    for ed in text_editors_of(component):
+        try:
+            text = ed.toPlainText().replace('\u2029', '\n')
+            for m in rx.finditer(text):
+                yield ed, m.start(), m.end()
+                n += 1
+                if n >= limit:
+                    return
+        except Exception:
+            continue
+
+
+def set_spans_extra_selections(component, spans, color):
+    """把 (编辑器, 起点, 终点) 列表做成分段 ExtraSelections 临时高亮。
+
+    未命中的段也会被清空，避免上一次点击的旧高亮残留在别的栏里。
+    返回 {编辑器: [ExtraSelection...]}，供调用方维护 _extra。
+    """
+    grouped = dict((ed, []) for ed in text_editors_of(component))
+    fmt = QTextCharFormat()
+    fmt.setBackground(QColor(color))
+    fmt.setForeground(QColor('#ffffff'))
+    for ed, start, end in spans:
+        cur = QTextCursor(ed.document())
+        cur.setPosition(start)
+        cur.setPosition(end, QTextCursor.KeepAnchor)
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = cur
+        sel.format = fmt
+        grouped.setdefault(ed, []).append(sel)
+    applied = {}
+    for ed, sels in grouped.items():
+        try:
+            ed.setExtraSelections(sels)
+            applied[ed] = sels
+        except Exception:
+            pass
+    return applied
+
+
+def locate_aggregate_pos(component, pos):
+    """把 DocEditorPanes.toPlainText() 的聚合下标映射回 (段编辑器, 段内下标)。
+
+    校验面板里的正则是在聚合全文上跑的，得到的是聚合下标；这里按各段正文在
+    聚合全文中的实际位置反推，避免把下标套到错误的段上。
+    """
+    eds = text_editors_of(component)
+    if not eds:
+        return None, -1
+    if len(eds) == 1:
+        return eds[0], pos
+    try:
+        whole = component.toPlainText().replace('\u2029', '\n')
+        search_from = 0
+        for ed in eds:
+            raw = ed.toPlainText().replace('\u2029', '\n')
+            body = raw.strip('\n')
+            if not body.strip():
+                continue
+            i = whole.find(body, search_from)
+            if i < 0:
+                continue
+            search_from = i + len(body)
+            if i <= pos < search_from:
+                lead = len(raw) - len(raw.lstrip('\n'))
+                return ed, (pos - i) + lead
+    except Exception:
+        pass
+    return eds[-1], -1
 
 
 class MainWindow(QMainWindow):
@@ -1514,6 +2660,9 @@ class MainWindow(QMainWindow):
         self._wire_edge_bar(self._edge_bars[1], 'right')
         self._wire_edge_bar(self._edge_bars[2], 'up')
         self._position_edge_bars()
+        # 窗口右缘「边框带」上的波浪覆盖层：与 editor viewport 兄弟，波形真正
+        # 骑在窗口最右边框上（不再浮在文本框内）。单个实例服务所有文档页。
+        self._border_wave_layer = _BorderWaveLayer(self)
         self.status.setToolTip('点击状态栏可刷新字数；双击标题栏可最大化窗口')
         self.status.mousePressEvent = self.count_words
         # 状态栏横跨底部、盖住两个下角。不自己设光标就会继承 MainWindow 上一次
@@ -1801,7 +2950,15 @@ class MainWindow(QMainWindow):
                                          not self._overwrite_mode), 'Insert')
         self.action_clearscreen = _act('mdi6.delete-sweep-outline', '清空文档',
                                        self.fn_clearscreen,
-                                       tip='清空当前文档正文与附图标记列表，并重置文档名称')
+                                       tip='清空当前文档正文、附图标记列表与申请人/发明人信息，并重置文档名称')
+        # 正文两种模式：分栏（权要 / 说明书 / 摘要三块分开写）/ 单框（整篇连续写）
+        self.action_panemode = _act(
+            'mdi6.view-split-vertical', '分栏 / 单框',
+            self.fn_set_pane_mode, 'Ctrl+Alt+M',
+            '正文分区模式：\n分栏 —— 权利要求书 / 说明书 / 说明书摘要 三块分开编辑，可拖高度\n'
+            '单框 —— 原有的一个主文本框，整篇连续编辑（Ctrl+Alt+M 切换）')
+        self.action_panemode.setCheckable(True)
+        self.action_panemode.setChecked(True)
 
         # 辅助工具
         self.tools_toolbar = QToolBar("常用工具")
@@ -1820,6 +2977,11 @@ class MainWindow(QMainWindow):
         self.tool_xmlmodify = QAction(QIcon(qta.icon('mdi6.xml')),"XML修改", self)
         self.tool_xmlmodify.triggered.connect(self.fn_show_xmlmodify)
         self.tool_xmlmodify.setToolTip('打开「XML 修改」标签页（申请 ZIP 字段批量改写）')
+
+        # 公式转图：设计调整服务的第 5 个标签页（Word 公式原位转图片并导出 .docx）
+        self.tool_formula = QAction(QIcon(qta.icon('mdi6.square-root')),"公式转图", self)
+        self.tool_formula.triggered.connect(lambda: self.fn_open_design_tab(5))
+        self.tool_formula.setToolTip('公式转图片：把 Word 中公式原地替换为图片并导出 .docx')
 
         # 服务信息：查看内嵌处理服务的端口与局域网地址
         self.tool_designservice = QAction(QIcon(qta.icon('mdi6.server')),"服务信息", self)
@@ -1850,6 +3012,7 @@ class MainWindow(QMainWindow):
         self.tools_toolbar.addAction(self.tool_figeditor)
         self.tools_toolbar.addAction(self.tool_adjustfigs)
         self.tools_toolbar.addAction(self.tool_xmlmodify)
+        self.tools_toolbar.addAction(self.tool_formula)
         self.tools_toolbar.addAction(self.tool_designservice)
         self.tools_toolbar.addAction(self.tool_eureka)
         self.tools_toolbar.addAction(self.tool_reexam)
@@ -1866,6 +3029,14 @@ class MainWindow(QMainWindow):
         self.tool_showbook = QAction(QIcon(qta.icon('fa5s.toolbox')),"文本校验(F2)")
         self.tool_showbook.triggered.connect(self.fn_showbook)
         self.tool_showbook.setShortcut('F2')
+
+        # 收藏夹：申请人 / 发明人 + 委托书 JPG，入口放在「文本校验」右侧，
+        # 与校验类工具用一条竖线隔开（见 _build_ribbon 的工具页）。
+        self.tool_partylib = QAction(QIcon(qta.icon('fa5s.bookmark')), "收藏夹", self)
+        self.tool_partylib.triggered.connect(self._party_lib_open)
+        self.tool_partylib.setToolTip(
+            '打开申请人 / 发明人收藏夹：搜索、预览，双击即套用；'
+            '可把委托书 JPG 一起收藏，导入 XML 时一并写入')
 
         self.bt_showsymbol = QAction(QIcon(qta.icon('fa5b.slack')),'特殊字符')
         self.bt_showsymbol.setToolTip('特殊字符（F3）')
@@ -1886,6 +3057,8 @@ class MainWindow(QMainWindow):
 
         self.tools_toolbar_addition.addAction(self.tool_showhelp) # 使用帮助F1
         self.tools_toolbar_addition.addAction(self.tool_showbook) # 文本校验F2
+        self.tools_toolbar_addition.addSeparator()                 # 竖线分隔收藏夹
+        self.tools_toolbar_addition.addAction(self.tool_partylib)  # 收藏夹
         self.tools_toolbar_addition.addAction(self.bt_showsymbol) # 特殊字符F3
 
         # 顶部工具栏
@@ -1936,6 +3109,15 @@ class MainWindow(QMainWindow):
             v.addLayout(h)
         v.addStretch(1)
         return box
+
+    @staticmethod
+    def _ribbon_vline(height=54):
+        """功能区内的一条竖线：用于把同一分组里的两组按钮隔开。"""
+        ln = QFrame()
+        ln.setFixedWidth(1)
+        ln.setFixedHeight(height)
+        ln.setStyleSheet('background:%s; border:none;' % PAL['border'])
+        return ln
 
     def _ribbon_button(self, action, big=False, label=None, bind=True, tip=None):
         """由 QAction 生成功能区按钮。
@@ -2189,6 +3371,11 @@ class MainWindow(QMainWindow):
         # 应用失活时浮窗是普通窗口，自动落到其它程序之后，不遮挡外部软件）
         if obj is self and event.type() == QEvent.MouseButtonPress:
             self._raise_tool_windows()
+        # 焦点不在正文编辑器时（如主窗口空白 / 工具栏）按 Esc 也要清高亮。
+        # 不吞事件，后续 QMainWindow 默认处理照常进行。
+        if (obj is self and event.type() == QEvent.KeyPress
+                and event.key() == Qt.Key_Escape):
+            self.fn_clear_all_highlights()
         edit = getattr(self, '_tab_rename_edit', None)
         if edit is not None and obj is edit:
             if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
@@ -2308,7 +3495,7 @@ class MainWindow(QMainWindow):
     def _ribbon_page(self, tabs, title):
         """每页放进横向自适应滚动容器：窗口够宽时正常铺满，
         变窄时组内按钮保持最小宽度并出现细滚动条，不再被压扁截断。"""
-        page = QWidget()
+        page = _AuroraRibbonPage()
         page.setObjectName('RibbonPage')
         # 普通 QWidget 的 QSS background 默认不绘制（grab/显示均为调色板灰），
         # 必须显式开启 WA_StyledBackground，「上深下浅」渐变才会真正画出来
@@ -2348,6 +3535,11 @@ class MainWindow(QMainWindow):
         # 用事件过滤器捕获双击与 Paint（见 MainWindow.eventFilter）
         bar.installEventFilter(self)
         tabs.currentChanged.connect(self._ribbon_keep_collapsed)
+        # 天气同步已关闭：不再装配 LiveWeather，启动 2 分钟后首次联网、
+        # 每小时刷新与 QSettings 天气缓存都不存在。演出由随机表决定。
+        # 切换选项卡后，分组右侧空白区不定时浮现极光（单定时器调度）
+        self._aurora = _AuroraDirector(tabs, self)
+        tabs.currentChanged.connect(self._aurora.on_tab_changed)
         self._ribbon_fold_btn = QToolButton()
         self._ribbon_fold_btn.setObjectName('RibbonCollapse')
         self._ribbon_fold_btn.setFixedSize(26, 22)
@@ -2571,6 +3763,9 @@ class MainWindow(QMainWindow):
         # 一键/重置格式、预设格式已移入 批处理→文本整理；「全部替换」按需求移除
         # （功能仍在 编辑(E) 菜单、右键菜单与 Ctrl+Shift+H 上）
         g.add(self._ribbon_button(self.tool_showbook, big=True, label='文本校验'))
+        # 收藏夹紧跟在文本校验后面，中间一条竖线隔开（与校验类工具区分）
+        g.add(self._ribbon_vline())
+        g.add(self._ribbon_button(self.tool_partylib, big=True, label='收藏夹'))
         lay.addWidget(g)
         # 「使用帮助」只保留 帮助(H) 菜单与 F1，避免与功能区重复
         g = _RibbonGroup('专利')
@@ -2619,6 +3814,18 @@ class MainWindow(QMainWindow):
             self._ribbon_button(self.dock_outline.toggleViewAction(), label='导航'),
             self._ribbon_button(self.dock_party.toggleViewAction(), label='申请人'),
         ])
+        lay.addWidget(g)
+
+        # 正文分区：分栏（权要 / 说明书 / 摘要分开写）↔ 单框（原有的整篇文本框）
+        g = _RibbonGroup('正文分区')
+        _pm_btn = self._ribbon_button(self.action_panemode, big=True, label='分栏/单框')
+        _pm_btn.setFixedWidth(72)
+        g.add(_pm_btn)
+        try:      # 初始选中态跟当前文档的实际模式一致（上次退出时选的模式）
+            _m0 = getattr(self.text_editor_array[0], 'mode', 'panes')
+            self.action_panemode.setChecked(_m0 == 'panes')
+        except Exception:
+            pass
         lay.addWidget(g)
         lay.addStretch(1)
 
@@ -2707,15 +3914,27 @@ class MainWindow(QMainWindow):
             targets = ['发明内容', '实用新型内容']
         else:
             targets = [keymap.get(title, title)]
-        doc = self.active_textcomponent.document()
-        cursor = QTextCursor(doc)
+        # 三栏分栏下逐段找：原来 doc.find 只搜 _active 那一段，章节落在
+        # 别的栏时会跳不过去（或跳到错误位置）。
+        spans = []
         for target in targets:
-            cursor = doc.find(target, QTextCursor(doc))
-            if not cursor.isNull():
+            spans = list(iter_text_spans(self.active_textcomponent, target,
+                                         limit=1))
+            if spans:
                 break
-        if not cursor.isNull():
-            self.active_textcomponent.setTextCursor(cursor)
-            self.active_textcomponent.ensureCursorVisible()
+        if not spans:
+            return
+        ed, start, end = spans[0]
+        cursor = QTextCursor(ed.document())
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        try:
+            if hasattr(self.active_textcomponent, '_set_active_editor'):
+                self.active_textcomponent._set_active_editor(ed)
+        except Exception:
+            pass
+        ed.setTextCursor(cursor)
+        ed.ensureCursorVisible()
     def fn_refresh_claims(self):
         """解析当前文档中的权利要求，构建层级树显示在结构导航中。
         规则：不含"根据权利要求X所述"的为独立权利要求；
@@ -2954,6 +4173,25 @@ class MainWindow(QMainWindow):
                 self.label_fontsize.setText(f'{100 - change_num}%')
             else:
                 self.label_fontsize.setText(f'{100 + change_num}%')
+    @staticmethod
+    def _apply_block_margins(ed, top, bottom):
+        """直接改块格式的段落边距，不走 toHtml→clear→setHtml 往返。
+
+        往返在三栏（上中下）模式下要把三段内容聚合成一份 HTML 再按段名
+        拆回去：正文行一旦被 doc_head_kind 误判成大标题（如摘要段的
+        「摘要。」）就被整块丢弃；搬运中途抛错时三段已被 clear，表现为
+        整篇清空。mergeBlockFormat 只动段距，字体/图片/表格零风险。
+        """
+        fmt = QTextBlockFormat()
+        fmt.setTopMargin(top)
+        fmt.setBottomMargin(bottom)
+        # mergeBlockFormat 配合整篇选区并不会覆盖到每个块，逐块应用才可靠
+        block = ed.document().firstBlock()
+        while block.isValid():
+            c = QTextCursor(block)
+            c.mergeBlockFormat(fmt)
+            block = block.next()
+
     def on_lineheight_changed(self):
         lh = round(float(self.combo_lineheight.currentText()),1)
         for ed in self.text_editor_array:
@@ -2961,14 +4199,12 @@ class MainWindow(QMainWindow):
                 ed.line_height = lh
             except Exception:
                 pass
-        ori_html = self.active_textcomponent.toHtml()
-        find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
-        for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-top:{lh*5}px')
-        find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
-        for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-bottom:{lh*5}px')
-        self.active_textcomponent.setHtml(ori_html)
+        # 段距直接改块格式（原 toHtml→setHtml 往返在三栏下会清空/丢失正文）
+        for ed in self._format_editors():
+            try:
+                self._apply_block_margins(ed, lh*5, lh*5)
+            except Exception:
+                pass
 
     def default_format(self):
         # 获取光标当前位置
@@ -2987,24 +4223,24 @@ class MainWindow(QMainWindow):
         format.setFontPointSize(12)
         self.slider_fontsize.setValue(12)
         self.label_fontsize.setText('100%')
-        cursor = self.active_textcomponent.textCursor()
-        cursor.select(QTextCursor.Document)
-        cursor.setCharFormat(format)
+        # 分栏模式要三段都重置：单框就是那一个编辑器
+        for ed in self._format_editors():
+            try:
+                cursor = QTextCursor(ed.document())
+                cursor.select(QTextCursor.Document)
+                cursor.setCharFormat(format)
+            except Exception:
+                pass
 
         format.setFontPointSize(9)
         cursor = self.active_figmark.textCursor()
         cursor.select(QTextCursor.Document)
         cursor.setCharFormat(format)
 
-        ori_html = self.active_textcomponent.toHtml()
-        find_txt = re.findall(rf'margin-top:\d\dpx',ori_html) + re.findall(rf'margin-top:\dpx',ori_html)
-        for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-top:0px')
-        find_txt = re.findall(rf'margin-bottom:\d\dpx',ori_html) + re.findall(rf'margin-bottom:\dpx',ori_html)
-        for _ in find_txt:
-            ori_html = ori_html.replace(_,f'margin-bottom:0px')
-        self.active_textcomponent.clear()
-        self.active_textcomponent.setHtml(ori_html)
+        # 段距统一由 on_lineheight_changed 设为 lh*5。
+        # 原来这里做 toHtml→clear→setHtml 往返清 margin：三栏模式下三段先被
+        # clear，再按段名拆回聚合 HTML——正文行被 doc_head_kind 误判会被整块
+        # 丢弃，搬运抛错时三段已空，表现为「全部替换后按 F6 正文被清空」。
         self.on_lineheight_changed()
         # 重新定位
         block_cursor.movePosition(QTextCursor.Start)
@@ -3046,20 +4282,31 @@ class MainWindow(QMainWindow):
 
         font_format = QTextCharFormat()
         font_format.setFontWeight(QFont.Bold)
-        cursor = self.active_textcomponent.textCursor()
-        doc_text = self.active_textcomponent.document().toPlainText().replace('\n','\u2029')
-
-        for pat_str in format_array:
-            # 判断：如果是序号正则，不escape；普通文本关键词，escape防止正则元字符干扰
-            # 简易方案：全部字面匹配，如果你需要正则再单独拆分列表
-            pattern = re.compile(re.escape(pat_str))
-            matches = pattern.finditer(doc_text)
-            for match in matches:
-                s = match.start()
-                e = match.end()
-                cursor.setPosition(s)
-                cursor.setPosition(e, QTextCursor.KeepAnchor)
-                cursor.mergeCharFormat(font_format)
+        # 全部字面匹配（关键词里有正则元字符，统一 escape）；一次编译复用多次扫描。
+        # 章节标题词加负向先行断言：后面紧跟标点说明是正文引用而非标题，跳过。
+        punct_cls = '[%s]' % re.escape(FORMAT_TRAILING_PUNCT)
+        patterns = []
+        for p in dict.fromkeys(format_array):
+            if not p:
+                continue
+            plain = p.rstrip(FORMAT_TRAILING_PUNCT)
+            if plain in FORMAT_SECTION_TITLES:
+                # 关键词自身末尾带标点（如自定义的「技术领域，」）也整条跳过
+                if plain != p:
+                    continue
+                patterns.append(re.compile(re.escape(p) + r'(?!' + punct_cls + ')'))
+            else:
+                patterns.append(re.compile(re.escape(p)))
+        # 分栏模式要三段都加粗：原来只作用于「当前段」，说明书/摘要永远是白板
+        for page_ed in self._format_editors():
+            doc = page_ed.document()
+            doc_text = doc.toPlainText().replace('\n', '\u2029')
+            cursor = QTextCursor(doc)
+            for pattern in patterns:
+                for match in pattern.finditer(doc_text):
+                    cursor.setPosition(match.start())
+                    cursor.setPosition(match.end(), QTextCursor.KeepAnchor)
+                    cursor.mergeCharFormat(font_format)
 
         self.on_lineheight_changed()
         # 光标回位
@@ -3372,12 +4619,14 @@ class MainWindow(QMainWindow):
         状态栏的 lbl_doc 仍保留数据（隐藏显示），以便其它逻辑继续读取。
         """
         name = name or '未命名'
+        # 标题栏只显示名称：「实用新型-一种切割装置.docx」→「一种切割装置」
+        disp = self._strip_kind_prefix(os.path.splitext(name)[0]) or name
         status = getattr(self, 'status', None)
         if status is not None:
-            status.set_doc_name(name)
+            status.set_doc_name(disp)
         title = getattr(self, 'top_doc_title', None)
         if title is not None:
-            title.setText(name)
+            title.setText(disp)
             title.setToolTip('当前文档：%s' % name)
 
     def _position_top_title(self):
@@ -3494,18 +4743,25 @@ class MainWindow(QMainWindow):
         reply = wf.ask(
             self, '清空当前文档', f'确定要清空「{name}」的全部内容吗？',
             [('清空', 1, False, True), ('取消', 0)],
-            detail='正文与对应的附图标记列表都会被清空，并重置文档名称。'
+            detail='正文、附图标记列表、申请人/发明人信息都会被清空，并重置文档名称。'
                    '此操作不可撤销（Ctrl+Z 可撤销正文）。',
             kind='warning', width=450)
         if reply == 1:
             self.active_textcomponent.setText('')
             self.active_figmark.setText('')
+            # 同步清空当前文档的申请人/发明人信息（面板 + 属性 + 存档），
+            # 不走 800ms 防抖，避免清空后旧信息又被写回。
+            self._reset_party_info()
             tab_index = self.tab_widget_text.currentIndex()
             self.tab_widget_text.setTabText(tab_index, f'文档{tab_index+1}')
             self.tab_name_array[tab_index] = f'文档{tab_index+1}'
             self._save_tab_names()
             self.set_doc_title(f'文档{tab_index+1}')
             self._refresh_status_bar()
+            # 把清空后的空正文 / 空标记 / 重置后的名称持久化进草稿存档。
+            # 否则当前只是内存里变空，存档里仍是旧正文，下次启动时
+            # _restore_drafts 会恢复出被清掉的旧内容（party 已落盘但正文没有）。
+            self._save_all_drafts()
             self.status.showMessage(f'> 已清空「文档{tab_index+1}」', 5000)
 
     def fn_search_keyreleaseevent(self,event):
@@ -3654,6 +4910,16 @@ class MainWindow(QMainWindow):
                 tab_index += 1
         self.active_textcomponent = self.text_editor_array[tab_index]
         self.active_figmark = self.mark_editor_array[tab_index]
+        # 右缘波形覆盖层切到当前文档页：重新对齐并唤醒它的动画
+        layer = getattr(self, '_border_wave_layer', None)
+        if layer is not None:
+            layer.place()
+            cur_ed = layer._current_editor()
+            rail = getattr(cur_ed, 'wave_rail', None) if cur_ed is not None else None
+            if rail is not None and rail._active and not rail._timer.isActive():
+                rail.resume()
+            layer.update()
+        self._position_doc_add_btn()
         try:
             self.fn_refresh_claims()
         except Exception:
@@ -3954,20 +5220,50 @@ class MainWindow(QMainWindow):
     def _create_party_dock(self):
         """创建「申请人信息」停靠面板：粘贴识别框 + 结构化字段 + 发明人表。"""
         self.dock_party = QDockWidget('')
-        w = QWidget()
+        w = PartyDropPanel()
+        w.filesDropped.connect(self._party_drop_files)
         v = QVBoxLayout(w)
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(6)
 
-        self.text_party_paste = QTextEdit()
+        # 收藏入口：申请人、发明人可以分别收藏（菜单里三选一），收藏夹本体在
+        # 工具栏「文本校验」右侧，不占这条窄面板的位置。
+        librow = QHBoxLayout()
+        librow.setSpacing(6)
+        self.btn_party_star = QPushButton('★ 收藏 ▾')
+        self.btn_party_star.setFixedHeight(24)
+        self.btn_party_star.setCursor(Qt.PointingHandCursor)
+        self.btn_party_star.setToolTip(
+            '收藏当前面板的信息：\n'
+            '· 收藏全部（申请人 + 发明人）\n'
+            '· 只收藏申请人（发明人保留原样）\n'
+            '· 只收藏发明人（申请人保留原样）')
+        party_menu = QMenu(self.btn_party_star)
+        for _label, _mode in (('收藏全部（申请人 + 发明人）', 'all'),
+                              ('只收藏申请人', 'apps'),
+                              ('只收藏发明人', 'invs')):
+            _act = party_menu.addAction(_label)
+            _act.triggered.connect(
+                lambda checked=False, m=_mode: self._party_lib_save_current(m))
+        self.btn_party_star.setMenu(party_menu)
+        librow.addWidget(self.btn_party_star)
+        librow.addStretch(1)
+        v.addLayout(librow)
+
+        self.text_party_paste = PartyPasteEdit()
         self.text_party_paste.setObjectName('PartyPaste')
         # 只说明「粘贴即可」，不在提示里罗列格式：写格式反而让人以为必须照着写。
-        self.text_party_paste.setPlaceholderText('粘贴申请人 / 发明人信息，自动识别')
+        self.text_party_paste.setPlaceholderText(
+            '粘贴申请人 / 发明人信息，自动识别\n也可把身份证图片直接拖进来')
+        self.text_party_paste.setToolTip(
+            '粘贴申请人 / 发明人信息自动识别；\n'
+            '也可以把身份证图片拖进来，识别后选择插入发明人 / 申请人 / 两处都要')
         self.text_party_paste.setFixedHeight(92)
+        self.text_party_paste.filesDropped.connect(self._party_drop_files)
         v.addWidget(self.text_party_paste)
 
         app_label = QLabel('申请人（名称 + 证件号 + 地址邮编）')
-        app_label.setStyleSheet('color:#8997a5; font-size:11px;')
+        app_label.setStyleSheet('color:#8997a5; font-size:12px;')
         v.addWidget(app_label)
         self.table_applicants = QTableWidget(0, 4)
         self.table_applicants.setHorizontalHeaderLabels(
@@ -4006,7 +5302,7 @@ class MainWindow(QMainWindow):
         v.addLayout(abtns)
 
         inv_label = QLabel('发明人（姓名 + 身份证号）')
-        inv_label.setStyleSheet('color:#8997a5; font-size:11px;')
+        inv_label.setStyleSheet('color:#8997a5; font-size:12px;')
         v.addWidget(inv_label)
         self.table_inventors = QTableWidget(0, 2)
         self.table_inventors.setHorizontalHeaderLabels(['姓名', '身份证号'])
@@ -4053,12 +5349,19 @@ class MainWindow(QMainWindow):
         self._party_save_timer.setSingleShot(True)
         self._party_save_timer.setInterval(800)
         self._party_save_timer.timeout.connect(self._flush_party_info)
+        # 正文快照防抖：改完正文 1.5s 后再切分推送（切全文要走一遍所有行，
+        # 不适合每次按键都做）。打开「XML 修改」页时也会立即推一次。
+        self._doc_snap_timer = QTimer(self)
+        self._doc_snap_timer.setSingleShot(True)
+        self._doc_snap_timer.setInterval(1500)
+        self._doc_snap_timer.timeout.connect(self._push_party_snapshot)
         self.text_party_paste.textChanged.connect(
             self._party_paste_timer.start)
         self.table_applicants.cellChanged.connect(self._save_party_info)
         self.table_inventors.cellChanged.connect(self._save_party_info)
         # 首次载入当前文档已存的信息
         self._load_party_info()
+        self._party_lib_refresh()
 
     def _apply_party_paste(self):
         """把粘贴框内容解析成结构化字段并填充（自动识别）。"""
@@ -4106,6 +5409,159 @@ class MainWindow(QMainWindow):
         if got and not info['inventors']:
             msg += '（未识别到发明人，可点「+ 添加发明人」手动填）'
         self.status.showMessage(msg, 4000)
+
+    # ------- 身份证拖入：OCR → 识别 → 让用户选插入位置 -------
+    # 姓名后面可能直接跟下一个标签（OCR 常把「姓名张三性别男」粘成一行），
+    # 用前瞻在这些词处截断，避免把「性别男」当成名字的一部分。
+    _ID_NAME_CUT = r'(?=[\s\d]|性别|民族|出生|住址|地址|公民|身份|签发|有效|$)'
+
+    @staticmethod
+    def _parse_id_card_text(text):
+        """从身份证 OCR 文本里抽 (姓名, 身份证号)。
+
+        刻意**不**在这里取住址：住址由 _id_card_address() 单独按需提取，
+        这样选择「插入发明人」时根本不会去识别地址（发明人表只有姓名和号码）。
+        号码用「第 7~14 位是合法生日」校验，避免把别的 18 位数字当成身份证号。
+        """
+        out = {'name': '', 'idno': ''}
+        s = MainWindow._norm_party_text(text)
+        if not s.strip():
+            return out
+        for m in re.finditer(r'(?<!\d)(\d{17}[\dXx])(?![\dXx])', s):
+            cand = m.group(1).upper()
+            birth = cand[6:14]
+            try:
+                y, mo, d = int(birth[:4]), int(birth[4:6]), int(birth[6:8])
+            except ValueError:
+                continue
+            if 1900 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
+                out['idno'] = cand
+                break
+        m = re.search(r'姓\s*名[ \t:：]*([\u4e00-\u9fa5·]{2,10}?)'
+                      + MainWindow._ID_NAME_CUT, s)
+        if not m:
+            # 标签独占一行、名字在下一行
+            m = re.search(r'姓\s*名[ \t]*\n[ \t]*([\u4e00-\u9fa5·]{2,10}?)'
+                          + MainWindow._ID_NAME_CUT, s)
+        if m and m.group(1) not in MainWindow._PARTY_NAME_STOP:
+            out['name'] = m.group(1)
+        return out
+
+    @staticmethod
+    def _id_card_address(text):
+        """从身份证 OCR 文本里抽住址。只在「插入申请人」时调用。"""
+        s = MainWindow._norm_party_text(text)
+        m = re.search(r'(?:住\s*址|地\s*址)[ \t:：]*', s)
+        if not m:
+            return ''
+        rest = s[m.end():]
+        cut = re.search(r'公民身份号码|公民身份证号|身份号码|身份证号'
+                        r'|出生|性别|签发机关|有效期限', rest)
+        if cut:
+            rest = rest[:cut.start()]
+        # 住址常被 OCR 折成多行，中文地址直接接起来，不留空格
+        addr = re.sub(r'\s*\n\s*', '', rest).strip(' :：,，、')
+        addr = re.sub(r'\s{2,}', ' ', addr)
+        return addr[:80]
+
+    def _party_drop_files(self, paths):
+        """粘贴框拖入文件：交给 OCR 线程，结果回来再问插到哪里。"""
+        path = (paths or [''])[0]
+        if not path:
+            return
+        # 上一个识别还没跑完就再拖一个，会让 QThread 被回收时仍在运行（崩溃）；
+        # 直接提示稍候，比排队更符合直觉。
+        prev = getattr(self, '_party_ocr_thread', None)
+        if prev is not None and prev.isRunning():
+            self.status.showMessage('上一个文件还在识别，请稍候再拖入', 3000)
+            return
+        self.status.showMessage('正在识别「%s」…' % os.path.basename(path))
+        self._party_ocr_thread = Worker_Ocr(path)
+        self._party_ocr_thread.progress.connect(self._party_ocr_done)
+        self._party_ocr_thread.start()
+
+    def _party_ocr_done(self, text):
+        """OCR 结果分派：像身份证就弹窗选位置，不像就按普通粘贴文本识别。"""
+        text = (text or '').strip()
+        if not text:
+            # OCR 线程会把失败原因写进 err_msg（缺密钥 / 网络 / 接口报错），
+            # 比笼统的「未识别到文字」有用得多。
+            err = getattr(getattr(self, '_party_ocr_thread', None), 'err_msg', '')
+            self.status.showMessage(
+                err or '未识别到文字（请检查网络或 OCR 配置），可改为手动粘贴', 6000)
+            return
+        info = self._parse_id_card_text(text)
+        if not (info['name'] or info['idno']):
+            # 不是身份证（可能是委托书 / 请求书）：走原有的粘贴识别逻辑
+            self.text_party_paste.setPlainText(text)
+            self.status.showMessage('已按粘贴文本识别（未识别到身份证号）', 5000)
+            return
+        preview = []
+        if info['name']:
+            preview.append('姓名：' + info['name'])
+        if info['idno']:
+            preview.append('身份证号：' + info['idno'])
+        reply = wf.ask(
+            self, '身份证信息', '　'.join(preview) or '未识别到完整信息',
+            [('插入发明人', 1, True), ('插入申请人', 2),
+             ('同时作为两个', 3), ('取消', 0)],
+            detail='插入发明人只取姓名和身份证号，不识别住址；插入申请人会一并识别'
+                   '身份证上的住址填到地址列。列表里已有相同信息会自动跳过。',
+            kind='question', width=470)
+        if reply not in (1, 2, 3):
+            self.status.showMessage('已取消插入', 3000)
+            return
+        added = []
+        if reply in (1, 3) and self._party_append_inventor(
+                info['name'], info['idno']):
+            added.append('发明人')
+        if reply in (2, 3):
+            # 只有要当申请人才去识别住址，发明人用不上
+            addr = self._id_card_address(text)
+            if self._party_append_applicant(info['name'], info['idno'], addr):
+                added.append('申请人')
+        if not added:
+            self.status.showMessage('相同信息已在列表中，未重复插入', 4000)
+            return
+        self._save_party_info()
+        self.status.showMessage('已插入到：' + '、'.join(added), 4000)
+
+    def _party_append_inventor(self, name, idno):
+        """按姓名/号码去重后追加一行发明人；返回是否真的插入。"""
+        name = (name or '').strip()
+        idno = (idno or '').strip().upper()
+        if not (name or idno):
+            return False
+        for nm, num in self._table_pairs(self.table_inventors):
+            if (name and nm.strip() == name) or (idno and num.strip().upper() == idno):
+                return False
+        self._party_loading = True
+        try:
+            r = self.table_inventors.rowCount()
+            self.table_inventors.insertRow(r)
+            for c, val in ((0, name), (1, idno)):
+                it = QTableWidgetItem(val)
+                it.setToolTip(val)
+                self.table_inventors.setItem(r, c, it)
+        finally:
+            self._party_loading = False
+        return True
+
+    def _party_append_applicant(self, name, cert, addr=''):
+        """按名称/证件号去重后追加一行申请人；返回是否真的插入。"""
+        name = (name or '').strip()
+        cert = (cert or '').strip().upper()
+        if not (name or cert):
+            return False
+        for nm, num, _a, _z in self._read_applicants():
+            if (name and nm == name) or (cert and num.upper() == cert):
+                return False
+        self._party_loading = True
+        try:
+            self._insert_applicant_row(name, cert, (addr or '').strip(), '')
+        finally:
+            self._party_loading = False
+        return True
 
     def _party_add_inventor(self):
         r = self.table_inventors.rowCount()
@@ -4217,15 +5673,523 @@ class MainWindow(QMainWindow):
         self._party_loading = False
         self._save_party_info()
 
+    # ---------------- 收藏夹：收藏 / 调用 ----------------
+    # 收藏夹按「档案」存：一条档案 = 一套申请人 + 一套发明人（都可单独收藏）、
+    # 外加若干张委托书 JPG（data/poa/）。数据层见 src/party_library.py，
+    # 界面见 src/party_library_ui.py（独立窗口，非模态）。这里只负责面板互转
+    # 与把委托书路径写进当前文档的 party_info，供网页端快照取用。
+
+    def _party_lib_refresh(self):
+        """刷新收藏夹入口的提示（条数、最近用法）；按钮文字保持固定。"""
+        act = getattr(self, 'tool_partylib', None)
+        try:
+            n = len(party_lib.load())
+        except Exception:
+            n = 0
+        if act is not None:
+            act.setToolTip(
+                '打开收藏夹（已收藏 %d 条）：搜索、预览，双击即套用；'
+                '委托书 JPG 可在这里增删，导入 XML 时一并写入' % n
+                if n else
+                '收藏夹还是空的：填好申请人/发明人后点「★ 收藏」')
+
+    def _party_lib_save_current(self, only='all'):
+        """把当前面板的信息收藏进收藏夹。
+
+        only='apps' / 'invs' 只收藏申请人或发明人（同名档案时另一侧原样保留），
+        only='all' 整套收藏。委托书 JPG 在收藏夹弹窗里单独增删。
+        """
+        only = only if only in ('all', 'apps', 'invs') else 'all'
+        info = self._collect_party_info()
+        apps, invs = party_lib.normalize(info)
+        if only == 'apps':
+            if not apps:
+                self.status.showMessage('面板里还没有申请人，无法只收藏申请人', 4000)
+                return
+            save_info = {'applicants': apps, 'inventors': []}
+        elif only == 'invs':
+            if not invs:
+                self.status.showMessage('面板里还没有发明人，无法只收藏发明人', 4000)
+                return
+            save_info = {'applicants': [], 'inventors': invs}
+        else:
+            if party_lib.is_empty(apps, invs):
+                self.status.showMessage(
+                    '面板里还没有申请人 / 发明人信息，先粘贴或手动填写再收藏', 4000)
+                return
+            save_info = info
+        dlg = SavePartyDialog(self, mode='save', only=only,
+                              name=party_lib.suggest_name(save_info),
+                              info=save_info)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        exist = party_lib.find(dlg.name)
+        if exist is not None:
+            keep = []
+            if only in ('all', 'apps'):
+                keep.append('%d 个申请人' % len(exist.get('applicants') or []))
+            if only in ('all', 'invs'):
+                keep.append('%d 位发明人' % len(exist.get('inventors') or []))
+            code = wf.ask(
+                self, '已有同名档案',
+                '收藏夹里已经有一条「%s」，要用当前面板的内容覆盖它吗？' % dlg.name,
+                [('覆盖', 1), ('取消', 0)], kind='warning', width=470,
+                detail=('覆盖后原档案里的 %s 会被替换；'
+                        % '、'.join(keep) if keep else '') +
+                       ('另一侧与委托书 JPG 保持不变。' if only != 'all'
+                        else '档案里的委托书 JPG 保持不变。') +
+                       '想两条都留着就取消，换个名字再收藏。')
+            if code != 1:
+                return
+            party_lib.upsert(dlg.name, save_info, dlg.note,
+                             item_id=exist['id'], only=only)
+            msg = '已覆盖档案'
+        else:
+            party_lib.upsert(dlg.name, save_info, dlg.note, only=only)
+            msg = '已收藏'
+        self._party_lib_refresh()
+        # 收藏夹窗口开着时同步刷新列表（新收藏 / 覆盖后立刻能看到）
+        open_dlg = getattr(self, '_party_lib_dlg', None)
+        if open_dlg is not None and open_dlg.isVisible():
+            open_dlg.refresh_after_external_change()
+        if only == 'apps':
+            got = '申请人 %d 个（发明人未改动）' % len(apps)
+        elif only == 'invs':
+            got = '发明人 %d 人（申请人未改动）' % len(invs)
+        else:
+            got = '申请人 %d 个、发明人 %d 人' % (len(apps), len(invs))
+        self.status.showMessage(
+            '%s「%s」：%s（收藏夹共 %d 条）'
+            % (msg, dlg.name, got, len(party_lib.load())), 5000)
+
+    def _party_lib_open(self):
+        """打开收藏夹（独立窗口：可拖动、缩放、吸附主窗口）。
+
+        非模态，再次点入口只是把它提到前面；窗口内容保持上次的位置和大小。
+        """
+        dlg = getattr(self, '_party_lib_dlg', None)
+        if dlg is None:
+            dlg = PartyLibraryDialog(self)
+            dlg.applyRequested.connect(self._party_lib_apply)
+            self._party_lib_dlg = dlg
+        else:
+            dlg.refresh_after_external_change()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _party_lib_apply(self, mode, item):
+        """把收藏夹里选中的档案写进当前文档面板（由收藏夹窗口发信号触发）。"""
+        if not item:
+            return
+        # 窗口可能开了很久：按 id 重新取一次，拿到最新的申请人 / 委托书
+        fresh = next((x for x in party_lib.load()
+                      if x.get('id') == item.get('id')), None)
+        item = fresh or item
+        mode = mode or 'all'
+        apps, invs = party_lib.normalize(item)
+
+        # 目标表格非空时问一句：替换还是追加（两个表的当前行数分别判断）
+        cur_apps = self._read_applicants()
+        cur_invs = self._table_pairs(self.table_inventors)
+        busy = []
+        if mode in ('all', 'apps') and apps and cur_apps:
+            busy.append('申请人')
+        if mode in ('all', 'invs') and invs and cur_invs:
+            busy.append('发明人')
+        merge = False
+        if busy:
+            code = wf.ask(
+                self, '面板里已有内容',
+                '当前文档已有%s信息，要怎么放？' % '和'.join(busy),
+                [('替换', 1), ('追加到末尾', 2), ('取消', 0)],
+                kind='question', width=460,
+                detail='「替换」会清掉原有行；「追加」保留原有行，只在末尾补上'
+                       '档案里还没出现的人（重复的会自动跳过）。')
+            if code == 0:
+                return
+            merge = (code == 2)
+
+        added = self._party_lib_fill(apps, invs, mode, merge)
+        # 委托书 JPG 只随「调用全部」走：记到当前文档，等网页端
+        # 「导入所有信息」时一起写进 ZIP 的 100007 目录
+        poa_note = self._party_apply_poa(item) if mode == 'all' else ''
+        party_lib.touch(item['id'])
+        self._party_lib_refresh()
+        self._save_party_info()
+        parts = []
+        if mode in ('all', 'apps') and apps:
+            parts.append('申请人 %d 个' % len(apps))
+        if mode in ('all', 'invs') and invs:
+            parts.append('发明人 %d 人' % len(invs))
+        self.status.showMessage(
+            '已从收藏夹套用「%s」：%s%s%s'
+            % (item.get('name') or '', '、'.join(parts) or '无内容',
+               ('，新增 %d 行' % added) if merge else '', poa_note), 6000)
+
+    def _party_apply_poa(self, item):
+        """把档案里的委托书路径记进当前文档，返回状态提示（没有则不提示）。"""
+        ed = self.active_textcomponent
+        if not hasattr(ed, 'setProperty'):
+            return ''
+        paths = party_lib.poa_files(item)
+        info = self._collect_party_info()
+        info['poa'] = paths
+        ed.setProperty('party_info', info)
+        if not paths:
+            return ''
+        return '；已带委托书 %d 张（在「XML 修改 → 导入所有信息」时写入 ZIP）' % len(paths)
+
+    def _party_poa_snapshot(self, paths):
+        """把委托书 JPG 读成 base64 交给网页端（带 mtime 缓存，避免反复读盘）。"""
+        out = []
+        total = 0
+        for p in paths or []:
+            try:
+                if not p or not os.path.isfile(p):
+                    continue
+                st = os.stat(p)
+                key = (p, int(st.st_mtime), st.st_size)
+                b64 = _POA_B64_CACHE.get(key)
+                if b64 is None:
+                    if st.st_size > 12 * 1024 * 1024:
+                        continue
+                    with open(p, 'rb') as f:
+                        b64 = base64.b64encode(f.read()).decode('ascii')
+                    if len(_POA_B64_CACHE) > 60:
+                        _POA_B64_CACHE.clear()
+                    _POA_B64_CACHE[key] = b64
+                if total + len(b64) > 40 * 1024 * 1024:
+                    break
+                out.append({'name': os.path.basename(p), 'dataB64': b64})
+                total += len(b64)
+            except Exception:
+                continue
+        return out
+
+    def _party_lib_fill(self, apps, invs, mode, merge):
+        """把档案写进面板表格，返回新增行数。走 _party_loading 防止逐行落盘。"""
+        added = 0
+        have_apps = {tuple(r[:4]) for r in self._read_applicants()}
+        have_invs = set(self._table_pairs(self.table_inventors))
+        self._party_loading = True
+        try:
+            if mode in ('all', 'apps') and apps:
+                if not merge:
+                    self.table_applicants.setRowCount(0)
+                    have_apps = set()
+                for nm, num, addr, zc in apps:
+                    key = (nm, num, addr, zc)
+                    if merge and key in have_apps:
+                        continue
+                    have_apps.add(key)
+                    self._insert_applicant_row(nm, num, addr, zc)
+                    added += 1
+            if mode in ('all', 'invs') and invs:
+                if not merge:
+                    self.table_inventors.setRowCount(0)
+                    have_invs = set()
+                for nm, num in invs:
+                    key = (nm, num)
+                    if merge and key in have_invs:
+                        continue
+                    have_invs.add(key)
+                    r = self.table_inventors.rowCount()
+                    self.table_inventors.insertRow(r)
+                    it_name = QTableWidgetItem(nm)
+                    it_num = QTableWidgetItem(num)
+                    it_name.setToolTip(nm)
+                    it_num.setToolTip(num)
+                    self.table_inventors.setItem(r, 0, it_name)
+                    self.table_inventors.setItem(r, 1, it_num)
+                    added += 1
+        finally:
+            self._party_loading = False
+        return added
+
+    def _reset_party_info(self):
+        """清空当前文档的申请人/发明人信息：停掉在途防抖、清面板、清编辑器属性、
+        立即落盘空字典。「清空文档」专用——不走 _save_party_info 的 800ms 防抖，
+        否则清空后旧的 party_info 可能在防抖到点时被重新写回存档。"""
+        # ① 清界面控件（带 loading 保护，避免 cellChanged 触发保存）。
+        #    注意 text_party_paste.clear() 会触发 textChanged → 重启 400ms 解析
+        #    定时器，所以下面在清空之后再把两个定时器一起停掉。
+        self._party_loading = True
+        try:
+            self.text_party_paste.clear()
+            self.table_applicants.setRowCount(0)
+            self.table_inventors.setRowCount(0)
+        finally:
+            self._party_loading = False
+        # ② 停掉清空前在途的 + 清空动作刚重启的定时器，防止异步写回旧信息
+        for timer in (getattr(self, '_party_paste_timer', None),
+                      getattr(self, '_party_save_timer', None)):
+            if timer is not None:
+                timer.stop()
+        # ③ 清编辑器动态属性，并立即写空存档
+        ed = self.active_textcomponent
+        empty = {'name': '', 'cert': '', 'address': '', 'postcode': '',
+                 'applicants': [], 'inventors': [], 'poa': []}
+        if ed not in (None, '') and hasattr(ed, 'setProperty'):
+            ed.setProperty('party_info', empty)
+        idx = self._party_tab_index()
+        if idx >= 0:
+            store.set_tab_party(idx, {})
+        # 网页端快照同步清空，避免「XML 修改」页还能导入刚被清掉的旧信息
+        self._push_party_snapshot()
+
+    # ---- 正文切分：供「XML 修改」页导入专利名称 / 说明书 / 摘要 / 权利要求 ----
+    _DOC_SEC_MAXLEN = 20        # 小标题行都很短，超过这个长度只可能是正文
+
+    # 默认标签名（「文档1」「未命名」）不是专利名称，不能当名称写进请求书
+    _DEFAULT_TAB_RE = re.compile(r'^(?:文档\s*\d*|新建文档|无标题(?:文档)?|未命名)$')
+    _DOC_EXT = ('.docx', '.doc', '.txt', '.md', '.wps', '.rtf', '.pdf')
+
+    def _tab_doc_name(self):
+        """当前标签名 → 专利名称。
+
+        专利名称以**标签栏**为准：用户打开/重命名时写的就是正式名称，
+        而正文首行常常是「鸡叉骨劈…」这类随手写的草稿字，认错代价更大。
+        默认名（文档1/文档2/未命名）与空标签返回空串，交给调用方兜底。
+        """
+        try:
+            idx = self.tab_widget_text.currentIndex()
+            if idx < 0:
+                return ''
+            name = self.tab_widget_text.tabText(idx)
+        except Exception:
+            return ''
+        name = (name or '').replace('\u2029', ' ').replace('\n', ' ').strip()
+        # 去掉常见的「已修改」标记
+        name = name.strip('*·•●◆ \t')
+        if name.lower().endswith(self._DOC_EXT):
+            name = os.path.splitext(name)[0].strip()
+        name = self._strip_kind_prefix(name)
+        if not name or self._DEFAULT_TAB_RE.match(name):
+            return ''
+        return name
+
+    def _collect_doc_texts(self, text=None):
+        """把当前文档拆成 {'title','desc','abstract','claims'}。
+
+        「XML 修改」页要把这几部分写进 100002（说明书）/ 100004（摘要）/
+        100001（权利要求书）.xml，所以这里按小标题切分原文。
+        只切不改写：切不出来就返回空串，让用户在页面上自己粘贴，绝不猜。
+        结果按「编辑器 + 文档版本号」缓存，避免面板每敲一个字都重切全文。
+        """
+        ed = getattr(self, 'active_textcomponent', None)
+        if ed is None or not hasattr(ed, 'toPlainText'):
+            return {'title': '', 'desc': '', 'abstract': '', 'claims': ''}
+        # 三分区版本：每段本来就是独立文本框，直接读，不用再猜边界
+        if hasattr(ed, 'section_text'):
+            return self._with_tab_title({
+                'title': self._section_title_text(),
+                'desc': ed.section_text('desc'),
+                'abstract': ed.section_text('abs'),
+                'claims': ed.section_text('claims')})
+        key = None
+        if text is None:
+            try:
+                key = (id(ed), ed.document().revision())
+            except Exception:
+                key = None
+            cache = getattr(self, '_doc_texts_cache', None)
+            if key and cache and cache[0] == key:
+                return self._with_tab_title(cache[1])
+            try:
+                text = ed.toPlainText()
+            except Exception:
+                text = ''
+        out = self._split_doc_text(text)
+        if key:
+            self._doc_texts_cache = (key, out)
+        return self._with_tab_title(out)
+
+    def _with_tab_title(self, docs):
+        """专利名称优先取标签名；取不到才用正文里认出来的那个。
+
+        标签名与文档版本号无关（重命名不改 revision），所以缓存里只存正文，
+        每次返回前把标签名盖上去。
+        """
+        tab = self._tab_doc_name()
+        if not tab or not isinstance(docs, dict):
+            return docs
+        out = dict(docs)
+        out['title'] = tab
+        return out
+
+    @classmethod
+    def _doc_head_kind(cls, s):
+        """判断一行是不是文档级大标题，返回 'sec'/'claims'/'abstract'/'other'/''。
+
+        实现在模块函数 doc_head_kind（三分区与正文切分共用同一口径）。
+        """
+        return doc_head_kind(s, cls._DOC_SEC_MAXLEN)
+
+    @classmethod
+    def _trim_head_tail(cls, text, kinds=None):
+        """去掉正文末尾误粘上的文档大标题（如权要后面紧跟的「说明书」）。"""
+        lines = (text or '').split('\n')
+        while lines and not lines[-1].strip():
+            lines.pop()
+        while lines:
+            k = cls._doc_head_kind(lines[-1])
+            if not k or (kinds is not None and k not in kinds):
+                break
+            lines.pop()
+            while lines and not lines[-1].strip():
+                lines.pop()
+        return '\n'.join(lines).strip()
+
+    # 文档标题常被写成「实用新型-一种切割装置」「发明－一种…」，前缀不是名称一部分
+    _KIND_PREFIX_RE = re.compile(
+        r'^(?:[\(\[【（]\s*(?:发明|实用新型|外观设计)\s*[\)\]】）]\s*[-－—–~～_:：、,，.。·|]?\s*'
+        r'|(?:发明|实用新型|外观设计)(?:专利|申请|专利申请)?\s*'
+        r'[-－—–~～_:：、,，.。·|]\s*)')
+
+    @staticmethod
+    def _strip_kind_prefix(s, depth=3):
+        """去掉标题开头的「实用新型-」「发明-」等类型前缀。
+
+        只认「类型词 + 分隔符」的组合，不碰以这些字开头的正常名称；
+        反复剥（「发明-实用新型-x」）最多 depth 层。
+        """
+        t = (s or '').strip()
+        for _ in range(depth):
+            new = MainWindow._KIND_PREFIX_RE.sub('', t, count=1)
+            if new == t or not new.strip():
+                break
+            t = new.strip()
+        return t
+
+    @classmethod
+    def _split_doc_text(cls, text):
+        """按「章节小标题 / 权利要求书 / 说明书摘要」把全文切成四段。
+
+        说明书取第一个章节标题到下一个非章节边界（权利要求书、摘要等）为止，
+        所以中间的背景技术、发明内容、具体实施方式都完整保留；
+        权利要求书与摘要各自取标题之后到下一个边界为止。
+        没有任何小标题时说明书返回空串（宁可不写，也不把权要当说明书）。
+        """
+        text = (text or '').replace('\u2029', '\n').replace('\r', '\n')
+        lines = text.split('\n')
+        marks = []                     # [(行号, 类型)]，任意一条都算正文边界
+        for i, raw in enumerate(lines):
+            kind = cls._doc_head_kind(raw)
+            if kind:
+                marks.append((i, kind))
+
+        def block(start, stop_kinds=None, include_head=False):
+            """取第 start 条标记之后、下一条（指定类型的）标记之前的正文。
+
+            include_head=True 时连同该标记行一起返回——说明书的正文要带上
+            「技术领域 / 背景技术 …」这些小标题，XML 那边才好按章节逐段写入。
+            """
+            idx = marks[start][0]
+            end = len(lines)
+            for j in range(start + 1, len(marks)):
+                if stop_kinds is None or marks[j][1] in stop_kinds:
+                    end = marks[j][0]
+                    break
+            return '\n'.join(lines[idx if include_head else idx + 1:end]).strip('\n').strip()
+
+        desc = ''
+        for i, (_ln, kind) in enumerate(marks):
+            if kind == 'sec':
+                # 只在遇到权利要求书 / 摘要这类边界时收尾，别被下一个小标题截断
+                desc = block(i, ('claims', 'abstract', 'other'), include_head=True)
+                break
+        abstract = claims = ''
+        for i, (_ln, kind) in enumerate(marks):
+            if kind == 'abstract' and not abstract:
+                abstract = block(i)
+            elif kind == 'claims' and not claims:
+                claims = block(i)
+        if not claims:                 # 没写「权利要求书」标题 → 用规则引擎的切法兜底
+            claims = fc.claims_region(text).strip('\n').strip()
+        # 兜底再刮一遍尾部大标题：认不出来的写法（说明书、说明书附图…）
+        # 不能留在权要最后一行，也不能留在摘要里。
+        desc = cls._trim_head_tail(desc, ('claims', 'abstract', 'other'))
+        claims = cls._trim_head_tail(claims)
+        abstract = cls._trim_head_tail(abstract)
+        title = cls._strip_kind_prefix(fc.find_sections(text)[0].get('专利名称', '') or '')
+        # 「说明书」「技术领域」这类标题不是发明名称，别写进请求书
+        if title and (cls._doc_head_kind(title) or len(title) > 60):
+            title = ''
+        return {'title': title, 'desc': desc,
+                'abstract': abstract, 'claims': claims}
+
+    def _section_text(self, key):
+        """取某一栏正文（三分区下才有）；老的单编辑器返回空串。"""
+        ed = getattr(self, 'active_textcomponent', None)
+        if ed is None or not hasattr(ed, 'section_text'):
+            return ''
+        try:
+            return ed.section_text(key)
+        except Exception:
+            return ''
+
+    def _section_title_text(self):
+        """三分区下的发明名称：说明书段第一行（不是小标题、不过长）。"""
+        desc = self._section_text('desc')
+        lines = [ln.strip() for ln in desc.splitlines() if ln.strip()]
+        if not lines:
+            return ''
+        first = re.sub(r'^\[\d{3,5}\]\s*', '', lines[0]).strip()
+        if not first or len(first) > 40:
+            return ''
+        if self._doc_head_kind(first) or '技术领域' in first:
+            return ''
+        return self._strip_kind_prefix(first)
+
     def _collect_party_info(self):
-        """从界面控件收集当前文档的申请人/发明人信息。"""
+        """从界面控件收集当前文档的申请人/发明人信息。
+
+        委托书 JPG 不在表格里，沿用当前文档已记录的那份（由收藏夹调用写入），
+        这样任何一次「重新收集」都不会把它丢掉。
+        """
         applicants = self._read_applicants()
         inventors = self._table_pairs(self.table_inventors)
         # name/cert/address/postcode 保留为第一个申请人的值：兼容旧存档和旧脚本
         first = applicants[0] if applicants else ('', '', '', '')
-        return {'name': first[0], 'cert': first[1],
+        info = {'name': first[0], 'cert': first[1],
                 'address': first[2], 'postcode': first[3],
                 'applicants': applicants, 'inventors': inventors}
+        ed = getattr(self, 'active_textcomponent', None)
+        prev = ed.property('party_info') if hasattr(ed, 'property') else None
+        if isinstance(prev, dict) and prev.get('poa'):
+            info['poa'] = list(prev['poa'])
+        return info
+
+    def _push_party_snapshot(self):
+        """把当前文档的申请信息与正文推送给设计调整服务（模块级快照）。
+
+        「XML 修改」页跑在系统浏览器里，和主窗口没有脚本通道，所以由主程序把
+        最新数据写进服务的模块变量，页面点「导入所有信息」时按需 GET。
+        推送只是几个字符串赋值，面板每次变化都推一次不会拖慢输入；
+        正文切分按文档版本号缓存，重复推送不会重复切全文。
+        """
+        try:
+            if not hasattr(self, 'table_applicants'):
+                return
+            info = self._collect_party_info()
+            docs = self._collect_doc_texts()
+            idx = self._party_tab_index()
+            doc = self._tab_doc_name()
+            if not doc and idx >= 0:
+                doc = self._strip_kind_prefix(self.tab_widget_text.tabText(idx).strip())
+            # 惰性调用：启动时服务模块尚未加载，这里只是把最新一次全量快照
+            # 记进代理，等服务真正启动 / 首次被调用时再补推，避免为了一句
+            # 赋值在窗口显示前导入 Pillow。
+            design_service.lazy_call(
+                'set_party_snapshot',
+                doc, info.get('applicants') or [], info.get('inventors') or [],
+                title=docs['title'], desc=docs['desc'],
+                abstract=docs['abstract'], claims=docs['claims'],
+                poa=self._party_poa_snapshot(info.get('poa') or []))
+        except Exception:
+            # 推送只是给网页端用的旁路数据，任何异常都不该影响主干操作
+            pass
 
     def _save_party_info(self, *args):
         """把当前字段保存到活动文档（每个文档独立一份）。"""
@@ -4235,6 +6199,8 @@ class MainWindow(QMainWindow):
         if not hasattr(ed, 'setProperty'):
             return
         ed.setProperty('party_info', self._collect_party_info())
+        # 同步给「XML 修改」页（浏览器端一键替代用），不必等 800ms 落盘
+        self._push_party_snapshot()
         # 输入框每敲一个字都会触发这里；立刻写盘会把几 MB 的 HTML 重写一遍，
         # 800ms 防抖后再落盘。编辑器属性是即时生效的，界面不受影响。
         timer = getattr(self, '_party_save_timer', None)
@@ -4296,6 +6262,73 @@ class MainWindow(QMainWindow):
             self.table_inventors.setItem(r, 0, it_name)
             self.table_inventors.setItem(r, 1, it_num)
         self._party_loading = False
+        # 切换文档后，「XML 修改」页再取到的必须是这份文档的信息
+        self._push_party_snapshot()
+
+    # ------- 合并申请信息：面板数据 → 著录项目文本 → 插入正文 -------
+    @staticmethod
+    def _party_merge_text(applicants, inventors):
+        """把申请人/发明人表数据合成一段规范著录项目文本。
+
+        applicants: [(名称, 证件号, 地址, 邮编), ...]
+        inventors:  [(姓名, 身份证号), ...]
+        返回插入正文的纯文本（行间用 \\n，QTextEdit.insertText 会转成段落）；
+        没有任何可写内容时返回 ''。发明人与申请人一样逐条输出「标签：内容」，
+        身份证号一并写入（早期版本只输出姓名，用户反馈号码丢了）。
+        """
+        lines = []
+        for nm, cert, addr, zc in applicants:
+            nm, cert, addr, zc = (str(x).strip() for x in (nm, cert, addr, zc))
+            if nm:
+                lines.append('申请人：' + nm)
+            if cert:
+                # 身份证号与统一社会信用代码都是 18 位，纯靠位数会误判。
+                # 身份证号第 7~14 位是合法生日 YYYYMMDD，用这一点区分；
+                # 其余（含带字母的信用代码、纯数字但生日非法的码）按统一社会信用代码。
+                label = '统一社会信用代码'
+                if re.fullmatch(r'\d{17}[\dXx]', cert):
+                    birth = cert[6:14]
+                    _y, _mo, _d = int(birth[:4]), int(birth[4:6]), int(birth[6:8])
+                    if 1900 <= _y <= 2099 and 1 <= _mo <= 12 and 1 <= _d <= 31:
+                        label = '身份证号'
+                lines.append(label + '：' + cert)
+            if addr or zc:
+                seg = ('地址：' + addr) if addr else ''
+                if zc:
+                    seg += ('  ' if seg else '') + '邮编：' + zc
+                lines.append(seg)
+        for nm, num in inventors:
+            nm, num = str(nm).strip(), str(num).strip()
+            if not nm and not num:
+                continue
+            # 沿用申请人的写法：姓名一行、号码一行。逐个发明人成组，
+            # 不能像早期那样挤成「发明人：张三、李四」——那样号码没处落。
+            if nm:
+                lines.append('发明人：' + nm)
+            if num:
+                lines.append('身份证号：' + num)
+        return '\n'.join(lines)
+
+    def fn_merge_party_info(self):
+        """合并申请信息（Ctrl+Shift+M）：把当前文档的申请人 + 发明人信息合成
+        规范著录文本，插入正文光标处。信息为空时只提示、不插入。"""
+        ed = getattr(self, 'active_textcomponent', None)
+        if ed in (None, '') or not hasattr(ed, 'textCursor'):
+            self.status.showMessage('请先在正文里点一个插入位置', 3000)
+            return
+        if not hasattr(self, 'table_applicants'):
+            return
+        applicants = self._read_applicants()
+        inventors = self._table_pairs(self.table_inventors)
+        text = self._party_merge_text(applicants, inventors)
+        if not text:
+            self.status.showMessage(
+                '申请人/发明人信息为空，请先在左侧「申请人信息」面板粘贴或填写', 4000)
+            return
+        cursor = ed.textCursor()
+        cursor.insertText(text)
+        ed.setTextCursor(cursor)
+        self.status.showMessage('已合并申请人和发明人信息到正文', 4000)
 
     def fn_marktab_changed(self, *args):
         tab_index = self.tab_widget_mark.currentIndex()
@@ -4481,7 +6514,8 @@ class MainWindow(QMainWindow):
         if self.window_table:self.window_table.close() 
     def fn_open_design_tab(self, n):
         """打开进程内设计调整服务的指定标签页。
-        1=调整外观图（一键改图） / 2=附图标注（编辑图片） / 3=XML 修改。
+        1=调整外观图（一键改图） / 2=附图标注（编辑图片） / 3=XML 修改
+        / 4=特征关系分析 / 5=公式转图（Word 公式原位转图片并导出 .docx）。
         服务按需惰性启动；端口被占用时会自动复用或顺延，详见 design_adjust_service。"""
         label = DESIGN_TAB_LABELS.get(n, '设计调整')
         ok, msg = design_service.ensure_started()
@@ -4507,6 +6541,8 @@ class MainWindow(QMainWindow):
 
     def fn_show_xmlmodify(self):
         """Qt 主界面新增入口 → XML 修改（tab3）"""
+        # 打开前先推一次，保证网页端「用当前文档信息替代」拿到的是最新数据
+        self._push_party_snapshot()
         self.fn_open_design_tab(3)
 
     def fn_design_service_info(self):
@@ -4516,7 +6552,7 @@ class MainWindow(QMainWindow):
         lan = design_service.lan_url(1)
         box = wf.FenrirDialog(
             self, title='设计调整服务',
-            message='设计调整服务（附图标注 / 调整外观图 / XML 修改）',
+            message='设计调整服务（附图标注 / 调整外观图 / XML 修改 / 公式截图）',
             detail='状态：%s\n本机地址：%s\n局域网地址：%s\n\n'
                    '服务已整合进主程序，无需再单独运行 start.vbs；'
                    '关闭主程序时自动停止。'
@@ -4741,8 +6777,64 @@ class MainWindow(QMainWindow):
         # 上边条、右边条需压过顶部黑色横条 dragger_top 的右端
         bars[2].raise_()
         bars[1].raise_()
+        # 右缘波形覆盖层跟随窗口右缘 / 编辑器视口高度重新对齐
+        layer = getattr(self, '_border_wave_layer', None)
+        if layer is not None:
+            layer.place()
+            layer.raise_()
         # 状态栏宽度随窗口变化，底部抓手同步铺满整条底边
         self._position_status_grip()
+        # 右上角「+」按钮最后定位，确保它压在波浪层之上，把标签栏与波形
+        # 起点之间那块角落盖住（波浪顶部缺口的封口）。
+        self._position_doc_add_btn()
+
+    def _doc_tab_bottom(self):
+        """文档标签下边沿在 MainWindow 坐标系里的 y。
+
+        「+」按钮与波浪覆盖层共用这一个基准，两边不会出现两套公式算出的
+        偏差。用 QTabBar 自身的矩形换算：标签横滚、数量增减、字体变化都不
+        影响；取不到时返回 None，调用方回退到编辑器视口顶。
+        """
+        tabs = getattr(self, 'tab_widget_text', None)
+        if tabs is None:
+            return None
+        bar = tabs.tabBar()
+        if bar is None or bar.height() <= 0:
+            return None
+        return bar.mapTo(self, QPoint(0, 0)).y() + bar.height()
+
+    def _position_doc_add_btn(self):
+        """把「新建文档 +」按钮钉在窗口右上角，下沿与文档标签下边沿平齐。
+
+        原先按钮是 QTabWidget 的 corner widget，被限制在 tabwidget 内（右缘
+        离窗口边还有 9px 布局留白），盖不住波形顶部的缺口；改成窗口级子控件
+        后右缘贴住窗口外框。高度不再为封口一路撑到视口顶下方，而是严格取
+        标签栏高度——波浪覆盖层已把起点上移到同一条线，按钮与波浪首尾相接，
+        既没有缺口，也不会比旁边的文档标签凸出一截。
+        """
+        btn = getattr(self, '_doc_add_btn', None)
+        layer = getattr(self, '_border_wave_layer', None)
+        tabs = getattr(self, 'tab_widget_text', None)
+        if btn is None or layer is None or tabs is None:
+            return
+        ed = layer._current_editor()
+        if ed is None or not layer.isVisible():
+            btn.hide()
+            return
+        tab_top = tabs.mapTo(self, QPoint(0, 0)).y()
+        wave_top = ed.viewport().mapTo(self, QPoint(0, 0)).y()
+        bottom = self._doc_tab_bottom()
+        if bottom is None:
+            bottom = wave_top
+        # QSS 的 min-width / border 会给按钮一个 minimumSizeHint，直接
+        # setGeometry 比它窄会被 Qt 撑开、右缘越过窗口；先按它取最大值，
+        # 再用「窗口宽 - 实际宽」反推 x，右缘才会精确贴住窗口外框。
+        mw = max(1, btn.minimumSizeHint().width())
+        bw = max(layer.LAYER_W + 4, mw)
+        bh = max(1, bottom - tab_top)
+        btn.setGeometry(self.width() - bw, tab_top, bw, bh)
+        btn.raise_()
+        btn.show()
 
     def _position_status_grip(self):
         """把透明抓手贴在状态栏最底部，并压过状态栏内的按钮 / 滑块。"""
@@ -5105,6 +7197,13 @@ class MainWindow(QMainWindow):
             panel.hide()
             return
         panel.refresh_doc_name()
+        # 打开校验窗口就先对齐对应表到当前文档：即使还没点分数盘校验，
+        # 也绝不让界面残留上一个文档的对应表行/计数（文档4→文档2 串用）。
+        # 真正的校验会再走 submit_check_main() 里的同步 + 重解析兜底。
+        try:
+            panel._sync_legend_doc()
+        except Exception:
+            pass
         # 与特殊字符窗口互斥：打开校验时收起符号窗口
         other = self.window_symbol
         if other not in (None, '') and other.isVisible():
@@ -5172,13 +7271,33 @@ class MainWindow(QMainWindow):
     def _position_book_window(self, book):
         """兼容旧调用：按设计宽度定位文本校验窗口。"""
         self._position_tool_window(book, 560)
+    def _format_editors(self):
+        """「格式化 / 重置格式」的作用对象：分栏页 = 三段正文，单框页 = 那一个编辑器。
+
+        主窗口只持有一个 `active_textcomponent`，分栏后它是个容器；不展开的话
+        加粗和清格式只会落到「当前有焦点的那一段」上。
+        """
+        page = getattr(self, 'active_textcomponent', None)
+        if page is None:
+            return []
+        try:
+            if hasattr(page, 'each_editor'):
+                return [e for e in page.each_editor() if e is not None]
+        except Exception:
+            return []
+        return [page]
+
     def fn_reset_allformat(self):# 重置格式
         format = QTextCharFormat()
         format.setBackground(QColor(Qt.transparent))
-        self.active_textcomponent.setFont(QFont("SimSun", 12))
-        cursor = self.active_textcomponent.textCursor()
-        cursor.select(QTextCursor.Document)
-        cursor.mergeCharFormat(format)
+        for ed in self._format_editors():
+            try:
+                ed.setFont(QFont("SimSun", 12))
+                cursor = QTextCursor(ed.document())
+                cursor.select(QTextCursor.Document)
+                cursor.mergeCharFormat(format)
+            except Exception:
+                pass
 
         format.setFontPointSize(9)
         cursor = self.active_figmark.textCursor()
@@ -5243,6 +7362,15 @@ class MainWindow(QMainWindow):
             '插入图片（Ctrl+Shift+I）\n'
             '按「插入→图片」里选择的环绕方式放置：嵌入型 / 浮于文字上方 / 衬于文字下方\n'
             '也可以直接把图片文件拖进正文，或 Ctrl+V 粘贴截图')
+
+        # 合并申请信息：把「申请人信息」面板里的申请人 + 发明人合成著录项目文本，
+        # 插入正文光标处。用于把面板信息一键写进说明书抬头 / 著录部分。
+        self.action_mergeparty = QAction(
+            QIcon(qta.icon('mdi6.account-multiple-outline')), '合并申请信息')
+        self.action_mergeparty.setToolTip(
+            '合并申请信息（Ctrl+Shift+M）\n'
+            '把左侧「申请人信息」面板里的申请人和发明人信息合成一段规范文本，'
+            '插入当前文档光标处')
 
         
         # 1-7 只保留「编号 + 符号」，含义交给 tooltip / 功能区按钮；第 8 项改名「合并附图标记」
@@ -5344,6 +7472,12 @@ class MainWindow(QMainWindow):
         self.action_insertimage.setParent(self)
         self.addAction(self.action_insertimage)
         self.action_insertimage.setShortcutContext(Qt.ApplicationShortcut)
+        # 合并申请信息：Ctrl+Shift+M，同样全局化（焦点在面板/功能区时也生效）
+        self.action_mergeparty.setShortcut('Ctrl+Shift+M')
+        self.action_mergeparty.triggered.connect(self.fn_merge_party_info)
+        self.action_mergeparty.setParent(self)
+        self.addAction(self.action_mergeparty)
+        self.action_mergeparty.setShortcutContext(Qt.ApplicationShortcut)
         # 批量文本
         self.action_11.triggered.connect(lambda:[self.complete_marknum(0)])
         self.action_12.triggered.connect(lambda:[self.complete_marknum(1)])
@@ -5451,7 +7585,8 @@ class MainWindow(QMainWindow):
                 break
         # 3. 技术方案：独立权利要求1 或 发明内容
         claim1 = ''
-        m = re.search(r'\n\s*1[\.、]\s*(.+?)(?=\n\s*2[\.、]|\Z)', txt, re.S)
+        # 文首就是「1.…」时也要认（单框模式下权要常在第一段，前面没有换行）
+        m = re.search(r'(?:^|\n)\s*1[\.、]\s*(.+?)(?=\n\s*2[\.、]|\Z)', txt, re.S)
         if m:
             claim1 = m.group(1).strip()
         # 提取主要部件
@@ -5475,12 +7610,18 @@ class MainWindow(QMainWindow):
         if problem:
             parts.append('针对上述问题，' + problem.rstrip('。') + '。')
         if claim1:
+            claim1 = claim1.replace('\n', '').strip()
             if '其特征在于' in claim1:
                 pre, feat = claim1.split('其特征在于', 1)
-                parts.append(pre.strip().rstrip('。') + '，')
-                parts.append('其特征在于，' + feat.strip().rstrip('。'))
+                # 权要里「一种X，其特征在于，包括…」：逗号已经带在两边，
+                # 直接拼接会出现「，，」「其特征在于，，」这种双标点
+                pre = pre.strip().rstrip('，,。；;')
+                feat = feat.strip().lstrip('，,').rstrip('。；;')
+                if pre:
+                    parts.append(pre + '，')
+                parts.append('其特征在于，' + feat + '。')
             else:
-                parts.append(claim1.rstrip('。'))
+                parts.append(claim1.rstrip('。；;') + '。')
         elif feats:
             parts.append('主要包括' + '、'.join(feats[:5]) + '。')
         if effect:
@@ -5488,8 +7629,111 @@ class MainWindow(QMainWindow):
         summary = ''.join(parts)
         if len(summary) > 300:
             summary = summary[:300].rstrip('，。、；') + '。'
-        # 插入到当前光标处
-        self.active_textcomponent.textCursor().insertText(summary)
+        self._write_summary(summary)
+
+    # ---- 摘要写入位置：分栏 → 摘要栏；单框 → 全文末尾（只追加，不覆盖选区） ----
+    def _has_abstract_head(self, text):
+        """全文里是否已经有「说明书摘要」这类大标题。"""
+        for ln in (text or '').split('\n'):
+            if doc_head_kind(ln, self._DOC_SEC_MAXLEN) == 'abstract':
+                return True
+        return False
+
+    def _ask_summary_action(self):
+        """摘要栏已有内容时的三选：替换 / 追加 / 取消（默认追加，最不容易丢东西）。"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle('生成摘要')
+        box.setText('「说明书摘要」已有内容，要怎么处理这次生成的摘要？')
+        b_rep = box.addButton('替换原摘要', QMessageBox.DestructiveRole)
+        b_add = box.addButton('追加到末尾', QMessageBox.AcceptRole)
+        box.addButton('取消', QMessageBox.RejectRole)
+        box.setDefaultButton(b_add)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is b_rep:
+            return 'replace'
+        if clicked is b_add:
+            return 'append'
+        return 'cancel'
+
+    def _write_summary(self, summary):
+        """把生成的摘要写到合适的位置，绝不悄悄覆盖正文。
+
+        * 三栏模式：写进「说明书摘要」那一栏——摘要本来就是独立段；
+          该栏已有内容时问一句「替换 / 追加 / 取消」，默认追加。
+        * 单框模式：追加到整篇**末尾**（不再插到光标处：光标处有选区时会被顶掉）。
+          全文还没有「说明书摘要」标题时顺手补一行，XML 修改页再导入就能按标题认出摘要。
+        """
+        summary = (summary or '').strip()
+        if not summary:
+            return
+        ed = getattr(self, 'active_textcomponent', None)
+        if ed is None:
+            return
+        single = False
+        try:
+            if hasattr(ed, 'is_panes_mode'):
+                single = not ed.is_panes_mode()
+        except Exception:
+            single = False
+        if not single:
+            target = getattr(ed, 'editors', {}).get('abs')
+            if target is None:
+                return
+            try:                       # 摘要栏被折叠着，写进去用户看不见
+                if getattr(ed, '_folded', {}).get('abs'):
+                    ed.toggle_fold('abs')
+            except Exception:
+                pass
+            old = target.toPlainText().strip()
+            action = 'append'
+            if old:
+                action = self._ask_summary_action()
+                if action == 'cancel':
+                    return
+            cur = target.textCursor()
+            if action == 'replace':
+                cur.select(QTextCursor.Document)
+                cur.insertText(summary)
+            else:
+                cur.movePosition(QTextCursor.End)
+                if old:
+                    cur.insertBlock()
+                cur.insertText(summary)
+            target.setTextCursor(cur)
+            try:
+                ed._set_active_editor(target)
+            except Exception:
+                pass
+            target.setFocus()
+            target.ensureCursorVisible()
+            try:
+                self.status.showMessage('> 已写入「说明书摘要」', 3000)
+            except Exception:
+                pass
+            return
+        # 单框：整篇末尾追加
+        target = ed.active_editor() if hasattr(ed, 'active_editor') else ed
+        if target is None:
+            target = ed
+        body = target.toPlainText()
+        need_head = bool(body.strip()) and not self._has_abstract_head(body)
+        block = ''
+        if need_head:
+            block = '\n\n说明书摘要\n'
+        elif body.strip():
+            block = '\n\n'
+        cur = target.textCursor()
+        cur.movePosition(QTextCursor.End)          # 收起选区，避免「插入」变成「替换」
+        cur.insertText(block + summary)
+        target.setTextCursor(cur)
+        target.setFocus()
+        target.ensureCursorVisible()
+        try:
+            self.status.showMessage('> 已在文末生成摘要（%d 字）' % len(summary), 3000)
+        except Exception:
+            pass
     def fn_searchpatent(self):
         try:
             self.search_url = 'https://www.iprdb.com/s?q='
@@ -5684,6 +7928,51 @@ class MainWindow(QMainWindow):
         editor.textChanged.connect(self._on_doc_modified)
 
     def _new_text_editor(self):
+        """一个文档 = 两套正文模式，随时切换：
+        * 分栏：权利要求书 / 说明书 / 说明书摘要 三块各写各的，可拖高度；
+        * 单框：原有的一个主文本框，整篇连续编辑。
+
+        对外仍是「一个编辑器」：主窗口的格式化、撤销、插图、右键菜单、
+        查找替换都通过 DocEditorPanes 转发到当前段/当前模式，调用方无需区分。
+        """
+        panes = DocEditorPanes(self._new_sub_editor,
+                               on_layout=self._save_panes_layout)
+        try:
+            panes.restore_layout(store.panes_layout())
+        except Exception as e:
+            print('Error Code 703', e)
+        return panes
+
+    def _save_panes_layout(self, state):
+        """三分区的模式 / 高度 / 横竖排存进 settings.json。"""
+        try:
+            store.set_panes_layout(state)
+        except Exception as e:
+            print('Error Code 706', e)
+
+    def fn_set_pane_mode(self, on):
+        """「视图 → 正文分区」：全部文档统一切到分栏 / 单框模式。"""
+        mode = 'panes' if on else 'single'
+        done = 0
+        for ed in getattr(self, 'text_editor_array', []):
+            if not hasattr(ed, 'set_mode'):
+                continue
+            try:
+                ed.set_mode(mode)
+                done += 1
+            except Exception as e:
+                print('Error Code 707', e)
+        self._pane_mode = mode
+        msg = ('> 已切到「分栏」：权利要求书 / 说明书 / 说明书摘要 三块分开编辑' if on
+               else '> 已切到「单框」：整篇在一个文本框里连续编辑')
+        try:
+            self.status.showMessage(msg, 5000)
+        except Exception:
+            pass
+        return done
+
+    def _new_sub_editor(self):
+        """三分区里的单个编辑框（带行号 / 波形 / 图片 / 右键菜单）。"""
         editor = QTextEditWithLineNum()
         editor.setContextMenuPolicy(Qt.CustomContextMenu)
         editor.customContextMenuRequested.connect(self.show_context_menu)
@@ -5860,13 +8149,15 @@ class MainWindow(QMainWindow):
         # 「+」占位页会滚出可视区（左右箭头已隐藏，也滚不回去）。占位页保留，
         # 所有「最后一页 = 新建文档」的索引逻辑不变，只是 QSS 把它压成 0 宽
         # 透明；真正可点的是这个永远不会被滚走的角落按钮。
-        self._doc_add_btn = QToolButton()
+        # 它不是 QTabWidget 的 corner widget：corner widget 被限制在 tabwidget
+        # 内部，右缘离窗口边还有 9px 布局留白，盖不住右缘波形顶部的缺口。
+        # 直接挂在 MainWindow 上，由 _position_doc_add_btn() 贴住窗口右上角。
+        self._doc_add_btn = QToolButton(self)
         self._doc_add_btn.setObjectName('DocAddTab')
         self._doc_add_btn.setText('+')
         self._doc_add_btn.setToolTip('新建文档')
         self._doc_add_btn.setCursor(Qt.PointingHandCursor)
         self._doc_add_btn.clicked.connect(self.fn_add_document)
-        self.tab_widget_text.setCornerWidget(self._doc_add_btn, Qt.TopRightCorner)
 
         self.layoutwidget.addWidget(self.tab_widget_text, 1, 0, 1, 1)
         self.tab_widget_text.currentChanged.connect(self.fn_texttab_changed)
@@ -5995,6 +8286,8 @@ class MainWindow(QMainWindow):
         self._save_tab_names()
         if index == self.tab_widget_text.currentIndex():
             self.set_doc_title(new_name)
+            # 专利名称取标签名：改完名字立刻让「XML 修改」页拿到新名称
+            self._push_party_snapshot()
 
     def _tab_rename_commit(self):
         self._tab_rename_finish(apply=True)
@@ -6003,61 +8296,62 @@ class MainWindow(QMainWindow):
         self.context_menu.exec_(self.active_textcomponent.mapToGlobal(pos))
     # text_component中高亮显示mark相同的文本
     def get_same_markindex(self,mark,input_component,highlight_color):
+        """高亮正文中所有相同文本；三栏分栏时逐段各自算下标，不再用聚合全文的偏移。"""
         if mark == '.' or not mark:
-            return
+            return 0
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(highlight_color))
+        match_num = 0
         try:
-            mark = re.escape(mark.replace('\u2029','\n'))
-            all_txt = input_component.toPlainText().replace('\u2029','\n')
-            if not getattr(self, '_case_sensitive', False): # 默认不区分大小写（原复选框未勾选行为）
-                all_txt = all_txt.lower()
-                mark = mark.lower()
-            matches = re.finditer(mark, all_txt, re.S)
-            format = QTextCharFormat()
-            format.setBackground(QColor(highlight_color))
-            # 循环查找文档
-            match_num = 0
-            for match in matches:
-                match_num += 1
-                index = match.start()
-                cursor = input_component.textCursor()
-                cursor.setPosition(index)
-                bracket_count = len(re.findall(r'\\(|\\)|\\{|\\}|\\[|\\]',mark))
-                if index - len(mark) < 0:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
-                else:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark) - bracket_count)
-                cursor.mergeCharFormat(format)  # 改变文本的背景颜色
-            self.status.showMessage(f"共匹配到{match_num}个结果")
-            return match_num
+            case_sensitive = bool(getattr(self, '_case_sensitive', False))
+            grouped = {}
+            for ed, start, end in iter_text_spans(
+                    input_component, mark, case_sensitive=case_sensitive):
+                grouped.setdefault(ed, []).append((start, end))
+            for ed, spans in grouped.items():
+                # 同一段的多处高亮合并成一个撤销块，避免逐处撑爆 undo 栈
+                cursor = QTextCursor(ed.document())
+                cursor.beginEditBlock()
+                try:
+                    for start, end in spans:
+                        cursor.setPosition(start)
+                        cursor.setPosition(end, QTextCursor.KeepAnchor)
+                        cursor.mergeCharFormat(fmt)
+                finally:
+                    cursor.endEditBlock()
+                match_num += len(spans)
+            self._track_mark_highlight(grouped)
         except Exception as e:
             print('Error Code 206',e)
+            return 0
+        self.status.showMessage(f"共匹配到{match_num}个结果")
+        return match_num
     
     def get_same_markindex_1(self,mark,input_component,highlight_color):
 
         if mark == '.' or not mark:
             return
         try:
-            mark = re.escape(mark.replace('\u2029','\n'))
-            all_txt = input_component.toPlainText().replace('\u2029','\n')
-            if not getattr(self, '_case_sensitive', False): # 默认不区分大小写（原复选框未勾选行为）
-                all_txt = all_txt.lower()
-                mark = mark.lower()
-            matches = re.finditer(mark, all_txt, re.S)
-            format = QTextCharFormat()
-            format.setBackground(QColor(highlight_color))
-            # 循环查找文档
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor(highlight_color))
+            # 与 get_same_markindex 一致：三栏分栏下按各段自己的文档算下标
+            case_sensitive = bool(getattr(self, '_case_sensitive', False))
+            grouped = {}
+            for ed, start, end in iter_text_spans(
+                    input_component, mark, case_sensitive=case_sensitive):
+                grouped.setdefault(ed, []).append((start, end))
             match_num = 0
-            for match in matches:
-                match_num += 1
-                index = match.start()
-                cursor = input_component.textCursor()
-                cursor.setPosition(index)
-                bracket_count = len(re.findall(r'\\(|\\)|\\{|\\}|\\[|\\]',mark))
-                if index - len(mark) < 0:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark))
-                else:
-                    cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(mark) - bracket_count)
-                cursor.mergeCharFormat(format)  # 改变文本的背景颜色
+            for ed, spans in grouped.items():
+                cursor = QTextCursor(ed.document())
+                cursor.beginEditBlock()
+                try:
+                    for start, end in spans:
+                        cursor.setPosition(start)
+                        cursor.setPosition(end, QTextCursor.KeepAnchor)
+                        cursor.mergeCharFormat(fmt)
+                finally:
+                    cursor.endEditBlock()
+                match_num += len(spans)
             if match_num == 1 and self.db_flag == False:
                 self.reset_textcomponentformat()
             all_txt = self.active_textcomponent.toPlainText()
@@ -6200,7 +8494,7 @@ class MainWindow(QMainWindow):
         self.mark_editor_array = [self._new_mark_editor() for _ in range(self.doc_count)]
         self.active_figmark = self.mark_editor_array[0]
         # 原「标记补全 *共N个标记」计数标签按需求删除；底部工具行改为
-        # 常显的排序分段器 + 同步开关，只保留一个「排序」小标签。
+        # 常显的排序分段器 + 同步开关，不显示额外文字标签。
         for idx, editor in enumerate(self.mark_editor_array):
             self.tab_widget_mark.addTab(editor, f'列表{idx + 1}')
         self._add_plus_tab(self.tab_widget_mark)
@@ -6262,40 +8556,38 @@ class MainWindow(QMainWindow):
         insert_cursor.select(insert_cursor.LineUnderCursor)
         self.active_figmark.setTextCursor(insert_cursor)
         select_mark = insert_cursor.selectedText().strip(' \n').split(' ')[-1]
+        self._apply_mark_foreground(select_mark)
 
-        font_format = QTextCharFormat()
-        font_format.setForeground(QColor(self.font_color))
-        cursor = self.active_textcomponent.textCursor()
-        re_search = QRegExp(select_mark)
-        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
-        # 循环查找文档
-        match_num = 0
-        for match in matches:
-            match_num += 1
-            index = match.start()
-            cursor.setPosition(index)
-            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(select_mark))
-            cursor.mergeCharFormat(font_format)
+    def _apply_mark_foreground(self, mark):
+        """左侧列表双击：给正文里所有同名标记改前景色（逐段各自算下标）。
+
+        原来用 QRegExp(...).pattern() 当正则，标记里的 (1) 会被当成捕获组；
+        同时只搜「当前激活段」的 document()。这里改字面匹配 + 三段全搜。
+        """
+        if not mark:
+            return
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(self.font_color))
+        grouped = {}
+        for ed, start, end in iter_text_spans(self.active_textcomponent, mark):
+            grouped.setdefault(ed, []).append((start, end))
+        for ed, spans in grouped.items():
+            cursor = QTextCursor(ed.document())
+            cursor.beginEditBlock()
+            try:
+                for start, end in spans:
+                    cursor.setPosition(start)
+                    cursor.setPosition(end, QTextCursor.KeepAnchor)
+                    cursor.mergeCharFormat(fmt)
+            finally:
+                cursor.endEditBlock()
 
     def userwords_dbclick_event(self,event):
         insert_cursor = self.text_genword.textCursor()
         insert_cursor.select(insert_cursor.LineUnderCursor)
         self.text_genword.setTextCursor(insert_cursor)
         select_userword = insert_cursor.selectedText().strip(' \n')
-
-        font_format = QTextCharFormat()
-        font_format.setForeground(QColor(self.font_color))
-        cursor = self.active_textcomponent.textCursor()
-        re_search = QRegExp(select_userword)
-        matches = re.finditer(re_search.pattern(), self.active_textcomponent.document().toPlainText().replace('\n','\u2029'))
-        # 循环查找文档
-        match_num = 0
-        for match in matches:
-            match_num += 1
-            index = match.start()
-            cursor.setPosition(index)
-            cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(select_userword))
-            cursor.mergeCharFormat(font_format)
+        self._apply_mark_foreground(select_userword)
 
     def markeditor_dropEvent(self,event):
         if event.mimeData().hasUrls():
@@ -6408,27 +8700,88 @@ class MainWindow(QMainWindow):
             self.get_same_markindex(select_txt,self.text_genword,self.highlight_color)
     # 初始化active_figmark的格式
     def reset_figmarkformat(self):
-        format = QTextCharFormat()
-        format.setFontPointSize(9)
-        format.setBackground(QColor(Qt.transparent))
+        """清左侧标记框 / 关键词框的高亮。
 
-        cursor = self.active_figmark.textCursor()
-        cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
-        cursor.mergeCharFormat(format)
+        原来用「正文聚合全文长度」去移动左侧框的游标，长度来源就是错的；
+        直接对各自文档全选，语义明确且不受分栏影响。
+        """
+        fmt = QTextCharFormat()
+        fmt.setFontPointSize(9)
+        fmt.setBackground(QColor(Qt.transparent))
+        for ed in (self.active_figmark, self.text_genword):
+            try:
+                cursor = QTextCursor(ed.document())
+                cursor.select(QTextCursor.Document)
+                cursor.mergeCharFormat(fmt)
+            except Exception:
+                pass
 
-        cursor = self.text_genword.textCursor()
-        cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
-        cursor.mergeCharFormat(format)
-    # 初始化active_figmark的格式
+    def _track_mark_highlight(self, grouped):
+        """记录哪些正文段被写过标记背景，供 reset_textcomponentformat 定点清除。
+
+        mergeCharFormat 会触发 textChanged（把文档标脏 / 触发自动保存），而方向键
+        每次按键都会走一遍 reset；只清真正高亮过的段，无高亮时就是纯 no-op。
+        """
+        body = set(text_editors_of(getattr(self, 'active_textcomponent', None)))
+        eds = getattr(self, '_mark_hl_eds', None)
+        if eds is None:
+            eds = set()
+            self._mark_hl_eds = eds
+        eds.update(ed for ed in grouped if ed in body)
+
+    # 初始化正文格式
     def reset_textcomponentformat(self):
-        format = QTextCharFormat()
-        format.setBackground(QColor(Qt.transparent))
-        cursor = self.active_textcomponent.textCursor()
-        cursor.setPosition(0)
-        cursor.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor, len(self.active_textcomponent.toPlainText()))
-        cursor.mergeCharFormat(format)
+        """清正文标记高亮；三栏分栏时高亮过哪几段就清哪几段，避免残留。"""
+        eds = getattr(self, '_mark_hl_eds', None)
+        if not eds:
+            return
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(Qt.transparent))
+        for ed in list(eds):
+            try:
+                cursor = QTextCursor(ed.document())
+                cursor.select(QTextCursor.Document)
+                cursor.mergeCharFormat(fmt)
+            except Exception:
+                pass
+        self._mark_hl_eds = set()
+
+    def fn_clear_all_highlights(self):
+        """ESC 统一入口：清掉正文 / 标记框里所有来源的临时高亮。
+
+        覆盖三类来源：
+        1. 标记列表点击写入字符格式的背景（reset_textcomponentformat +
+           reset_figmarkformat，后者清左侧标记框和关键词框）；
+        2. 拖选关键词的 ExtraSelections（正文三段 + 标记框）；
+        3. 文本校验面板的 ExtraSelections（可能分散在正文三段同时清掉状态）。
+        只清高亮，不改字号 / 颜色 / 字形等真实格式。
+        """
+        eds = set()
+        try:
+            eds.update(text_editors_of(getattr(self, 'active_textcomponent', None)))
+        except Exception:
+            pass
+        for e in (getattr(self, 'active_figmark', None),
+                  getattr(self, 'text_genword', None)):
+            if e is not None and hasattr(e, 'setExtraSelections'):
+                eds.add(e)
+        for e in eds:
+            try:
+                e.setExtraSelections([])
+            except Exception:
+                pass
+        for fn in (self.reset_textcomponentformat, self.reset_figmarkformat):
+            try:
+                fn()
+            except Exception:
+                pass
+        wb = getattr(self, 'window_notebook', None)
+        if wb not in (None, '') and hasattr(wb, '_clear_highlights'):
+            try:
+                wb._clear_highlights()
+            except Exception:
+                pass
+
     def fn_textmark_focusout_autosave(self,event):
         """标记编辑器失焦 / 切换排序方式时的统一入口，带防重入。"""
         if getattr(self, '_mark_refreshing', False):
@@ -6650,6 +9003,7 @@ class MainWindow(QMainWindow):
         self.context_menu.addAction(self.action_04)
         self.context_menu.addSeparator()
         self.context_menu.addAction(self.action_insertimage)
+        self.context_menu.addAction(self.action_mergeparty)
         # 批量文本：多份文本批量处理 → 多文本框图标（原「星球」与功能无关）
         self.menu_1 = self.context_menu.addMenu(
             QIcon(qta.icon('mdi6.text-box-multiple-outline')), "批量文本(E)")
@@ -6684,48 +9038,65 @@ class MainWindow(QMainWindow):
 
         使用 ExtraSelections 实现——不写入文档字符格式，选区折叠/清除时自动还原，
         与「标记列表点击高亮」（mergeCharFormat 版 get_same_markindex）互不干扰。
+
+        三栏（上中下）模式：高亮/清除都要覆盖全部三段。selectionChanged 只从
+        发生选择的那个子编辑器发出（editor 是单个子段），只清它自己的话，
+        别的段上残留的临时高亮永远不会消失（点空白处高亮还在）。
         """
+        mark_editor = getattr(self, 'active_figmark', None)
         if editor is None:
             editor = getattr(self, 'active_textcomponent', None)
         if editor is None or not hasattr(editor, 'textCursor'):
             return
-        mark_editor = getattr(self, 'active_figmark', None)
-        targets = [e for e in (editor, mark_editor)
-                   if e is not None and hasattr(e, 'setExtraSelections')]
+        page = getattr(self, 'active_textcomponent', None) or editor
+        body_eds = [e for e in text_editors_of(page)
+                    if e is not None and hasattr(e, 'setExtraSelections')]
         kw = editor.textCursor().selectedText().replace('\u2029', '\n').strip()
-        # 空选区 / 跨行选区 / 过长选区：清除高亮
+        # 空选区 / 跨行选区（Ctrl+A 全选）/ 过长选区：三段 + 标记框全清
         if not kw or '\n' in kw or len(kw) > 60:
-            for e in targets:
-                e.setExtraSelections([])
+            for e in body_eds:
+                try:
+                    e.setExtraSelections([])
+                except Exception:
+                    pass
+            if mark_editor is not None and hasattr(mark_editor, 'setExtraSelections'):
+                try:
+                    mark_editor.setExtraSelections([])
+                except Exception:
+                    pass
+            # 顺带清标记列表点击写入文档格式的背景高亮（无记录时是 no-op）
+            try:
+                self.reset_textcomponentformat()
+            except Exception:
+                pass
             return
-        for e in targets:
+        # 拖选了词：三段各算各的下标高亮，标记框也高亮
+        for e in body_eds:
             self._selection_highlight_pattern(e, kw)
+        if mark_editor is not None and hasattr(mark_editor, 'textCursor'):
+            self._selection_highlight_pattern(mark_editor, kw)
 
     def _selection_highlight_pattern(self, editor, kw):
-        """在单个文本控件内以 ExtraSelections 临时高亮 kw 的全部出现位置。"""
+        """以 ExtraSelections 临时高亮 kw 的全部出现位置（按段各自算下标）。"""
         try:
-            text = editor.toPlainText().replace('\u2029', '\n')
-            if not getattr(self, '_case_sensitive', False):
-                text_l, kw_l = text.lower(), kw.lower()
-            else:
-                text_l, kw_l = text, kw
-            hits = list(re.finditer(re.escape(kw_l), text_l, re.S))[:400]
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor('#2f5d9e'))   # 主题蓝，贴合深色风格
+            fmt.setForeground(QColor('#ffffff'))
+            case_sensitive = bool(getattr(self, '_case_sensitive', False))
+            grouped = dict((ed, []) for ed in text_editors_of(editor))
+            for ed, start, end in iter_text_spans(
+                    editor, kw, case_sensitive=case_sensitive, limit=400):
+                cur = QTextCursor(ed.document())
+                cur.setPosition(start)
+                cur.setPosition(end, QTextCursor.KeepAnchor)
+                sel = QTextEdit.ExtraSelection()
+                sel.cursor = cur
+                sel.format = fmt
+                grouped.setdefault(ed, []).append(sel)
+            for ed, sels in grouped.items():
+                ed.setExtraSelections(sels)
         except Exception as e:
             print('Error Code 207', e)
-            return
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor('#2f5d9e'))   # 主题蓝，贴合深色风格
-        fmt.setForeground(QColor('#ffffff'))
-        selections = []
-        for m in hits:
-            cur = QTextCursor(editor.document())
-            cur.setPosition(m.start())
-            cur.setPosition(m.end(), QTextCursor.KeepAnchor)
-            sel = QTextEdit.ExtraSelection()
-            sel.cursor = cur
-            sel.format = fmt
-            selections.append(sel)
-        editor.setExtraSelections(selections)
 
     def add_action(self,editor):
         self.bt_bold.toggled.connect(lambda x: editor.setFontWeight(QFont.Bold if x else QFont.Normal))
@@ -6784,6 +9155,10 @@ class MainWindow(QMainWindow):
         self.status.set_saved(False)
         if self._status_timer is not None:
             self._status_timer.start()
+        # 正文改动后延迟同步给「XML 修改」页（该页可能正开着）
+        snap = getattr(self, '_doc_snap_timer', None)
+        if snap is not None:
+            snap.start()
 
     def _refresh_status_bar(self):
         ed = getattr(self, 'active_textcomponent', None)
@@ -6811,7 +9186,26 @@ class MainWindow(QMainWindow):
         ed = self.active_textcomponent
         stats = wf.collect_text_stats(ed.toPlainText(),
                                      ed.textCursor().selectedText())
-        wf.WordCountDialog(self, stats).exec_()
+        wf.WordCountDialog(self, stats, self._section_word_stats(ed)).exec_()
+
+    def _section_word_stats(self, doc):
+        """三段各自的字数，给「字数统计」窗口里的「分栏字数」用。
+
+        单框模式下由 DocEditorPanes.section_text 按标题反推，切了模式也不会
+        少了这三项；拿不到正文时按 0 算，不让统计窗口开不出来。
+        """
+        out = []
+        for key, label, color, _ph in PANE_SPECS:
+            try:
+                text = doc.section_text(key)
+            except Exception:
+                text = ''
+            try:
+                n = wf.collect_text_stats(text)['字数']
+            except Exception:
+                n = 0
+            out.append((label, n, color))
+        return out
 
     def fn_set_overwrite_mode(self, on):
         self._overwrite_mode = bool(on)
@@ -6907,18 +9301,23 @@ class MainWindow(QMainWindow):
         不依赖 document().isEmpty()：Qt 解析存档里的 <li><br /></li> 时可能
         给出一个只有换行的块，isEmpty() 为假，但本质上仍是空文档。
         """
-        doc = editor.document()
-        if doc.toPlainText().strip():
-            return False
-        cursors = []
-        block = doc.begin()
-        while block.isValid():
-            if block.textList() is not None:
-                cursors.append(QTextCursor(block))
-            block = block.next()
-        for c in cursors:
-            c.setBlockFormat(QTextBlockFormat())
-        return bool(cursors)
+        # 分栏模式下要逐个正文区清理（每段各有自己的 document）
+        docs = ([e.document() for e in editor.each_editor()]
+                if hasattr(editor, 'each_editor') else [editor.document()])
+        touched = False
+        for doc in docs:
+            if doc.toPlainText().strip():
+                continue
+            cursors = []
+            block = doc.begin()
+            while block.isValid():
+                if block.textList() is not None:
+                    cursors.append(QTextCursor(block))
+                block = block.next()
+            for c in cursors:
+                c.setBlockFormat(QTextBlockFormat())
+            touched = touched or bool(cursors)
+        return touched
 
     def _clear_empty_list_at_cursor(self):
         """退格 / Delete 落在空列表项行首时，取消列表格式而不是删字符。
@@ -7115,7 +9514,10 @@ class MainWindow(QMainWindow):
             printer = QPrinter(QPrinter.HighResolution)
             printer.setOutputFormat(QPrinter.PdfFormat)
             printer.setOutputFileName(path)
-            editor.document().print_(printer)
+            if hasattr(editor, 'print_all'):
+                editor.print_all(printer)
+            else:
+                editor.document().print_(printer)
         else:  # .txt / .md / 其它
             open(path, 'w', encoding='utf-8').write(editor.toPlainText())
 
@@ -7200,7 +9602,11 @@ class MainWindow(QMainWindow):
         dlg = QPrintDialog(printer, self)
         dlg.setWindowTitle('打印')
         if dlg.exec_() == QDialog.Accepted:
-            self.active_textcomponent.document().print_(printer)
+            ed = self.active_textcomponent
+            if hasattr(ed, 'print_all'):
+                ed.print_all(printer)
+            else:
+                ed.document().print_(printer)
             self.status.showMessage('> 已发送到打印机', 5000)
 
     def fn_export_pdf(self):
@@ -7437,19 +9843,22 @@ class MainWindow(QMainWindow):
         # 统一括号为全角
         cleaned = cleaned.replace('(', '（').replace(')', '）')
         # 提取标记：{标号: 名称}，同一标号取最长名称
-        # 截词符：动词/介词，匹配到的名称按截词符分割，只保留后半部分
-        # 如 "还包括壳体" → "壳体"，"通过绑带" → "绑带"
+        # 隔断词（截词符）：遇到即按它 split，名称里不允许残留任何隔断词。
+        # 如 "还包括壳体" → "壳体"，"固定设置的壳体" → "壳体"，"远离电机的一侧" → "一侧"
+        # 按词长降序组成并集正则，保证「所述的」先于「所述」、「远离」先于单字命中，
+        # 避免只切第一个词时后半段仍残留其它隔断词。
         split_words = ('还包括','包括','通过','设有','设置','具有','所述的','所述','根据','与','和',
                        '用于','在于','于',
-                        '以上','以下','上述','中的')
+                       '以上','以下','上述','中的',
+                       '远离','有','的','将','且','着')
+        _split_re = re.compile('|'.join(
+            re.escape(w) for w in sorted(split_words, key=len, reverse=True)))
+
         def extract_name(raw):
-            for sw in split_words:
-                if sw in raw:
-                    tail = raw.split(sw)[-1].strip()
-                    if 2 <= len(tail) <= 8:
-                        return tail
-                    return None
-            return raw
+            # 按全部隔断词的并集切分：任一片段天然不含隔断词。
+            # 取最靠近标号的一段（正则匹配的原文紧邻标号），即真正的技术特征。
+            parts = [p.strip() for p in _split_re.split(raw) if p.strip()]
+            return parts[-1] if parts else None
         marks = {}
         # 模式1：名称（标号）  如 壳体（1）、绑带（11）
         for m in re.finditer(r'([\u4e00-\u9fa5]{2,15})（(\d{1,3}[a-zA-Z]?)）', cleaned):
@@ -7577,9 +9986,12 @@ class MainWindow(QMainWindow):
         return select_txt.replace('\n', '\u2029').replace(select_txt, new_txt).replace('。。', '。')
 
     def _tab_title(self):
-        """当前文档标签名去掉「实用新型-」「发明-」前缀。"""
+        """当前文档标签名去掉「实用新型-」「发明-」等类型前缀。"""
+        name = self._tab_doc_name()
+        if name:
+            return name
         idx = self.tab_widget_text.currentIndex()
-        return self.tab_widget_text.tabText(idx).replace('实用新型-', '').replace('发明-', '')
+        return self._strip_kind_prefix(self.tab_widget_text.tabText(idx))
 
     def get_totalkeys(self):
         try:
@@ -7881,7 +10293,7 @@ class MainWindow(QMainWindow):
                 cursor.movePosition(QTextCursor.Up, n=20)
                 self.active_textcomponent.setTextCursor(cursor)
             elif event.key() == Qt.Key_Escape:
-                self.reset_textcomponentformat()
+                self.fn_clear_all_highlights()
                 self.fn_hide_completion()
                 for window in [self.window_search, self.window_show,
                             self.window_rep, self.window_table]:
@@ -8028,6 +10440,9 @@ class MainWindow(QMainWindow):
         find_txt = self.text_rep_left.toPlainText().strip().split('\n')[0]
         if not find_txt:
             return
+        pane = getattr(self, 'active_textcomponent', None)
+        if hasattr(pane, 'find_backward') and pane.find_backward(find_txt):
+            return
         cursor = self.active_textcomponent.textCursor()
         doc = self.active_textcomponent.document()
         found = doc.find(find_txt, cursor, QTextDocument.FindBackward)
@@ -8041,6 +10456,9 @@ class MainWindow(QMainWindow):
     def fn_find_next(self):
         find_txt = self.text_rep_left.toPlainText().strip().split('\n')[0]
         if not find_txt:
+            return
+        pane = getattr(self, 'active_textcomponent', None)
+        if hasattr(pane, 'find_forward') and pane.find_forward(find_txt):
             return
         cursor = self.active_textcomponent.textCursor()
         doc = self.active_textcomponent.document()
@@ -8352,6 +10770,11 @@ class WindowBook(FramelessResizableMixin, QWidget):
         self._legend_from = ''
         self._legend_loading = False
         self._legend_manual = False
+        # 对应表按文档严格隔离：先校验文档4再校验文档2时，绝不能让文档4的
+        # 附图标记列表被当成文档2的对应表使用。_legend_doc 记录当前加载的
+        # 是哪一个编辑器；_legend_cache 只保存用户手动编辑过的对应表。
+        self._legend_doc = None
+        self._legend_cache = {}
         self._last_report = ''
         self.score = 100
 
@@ -8472,7 +10895,7 @@ class WindowBook(FramelessResizableMixin, QWidget):
         tb.setExpanding(False)
         tb.setUsesScrollButtons(True)
 
-        # ① 问题清单：搜索 / 排序 / 忽略 / 右键菜单
+        # ① 问题清单：搜索 / 忽略 / 右键菜单
         issues_page = QWidget()
         issues_page.setObjectName('ValidationIssuesPage')
         iv = QVBoxLayout(issues_page)
@@ -8489,13 +10912,6 @@ class WindowBook(FramelessResizableMixin, QWidget):
         self.edit_issue_filter.setClearButtonEnabled(True)
         self.edit_issue_filter.setFixedHeight(26)
         self.edit_issue_filter.textChanged.connect(self._apply_issue_filter)
-        self.combo_sort = QComboBox()
-        self.combo_sort.setObjectName('ValidationSort')
-        self.combo_sort.addItems(['按原文顺序', '按扣分优先', '按类别分组'])
-        self.combo_sort.setFixedWidth(102)
-        self.combo_sort.setToolTip('问题清单排序方式')
-        # 连接延后到 __init__ 末尾：addItems 会立刻发 currentIndexChanged，
-        # 此刻 table_issues 还没创建，_render_issues 会踩空。
         self.btn_show_ignored = QToolButton()
         self.btn_show_ignored.setObjectName('ValidationIgnoredChip')
         self.btn_show_ignored.setText('已忽略 0')
@@ -8509,7 +10925,6 @@ class WindowBook(FramelessResizableMixin, QWidget):
             '把清单中所有带「建议修改」的问题一次性写回正文；Ctrl+Z 可一次撤销')
         self.btn_apply_all.clicked.connect(self.fn_apply_all_fixes)
         fl.addWidget(self.edit_issue_filter, 1)
-        fl.addWidget(self.combo_sort)
         fl.addWidget(self.btn_show_ignored)
         fl.addWidget(self.btn_apply_all)
         iv.addWidget(fbar)
@@ -8730,7 +11145,6 @@ class WindowBook(FramelessResizableMixin, QWidget):
         v.addWidget(opts)
 
         self.combo_sep.currentTextChanged.connect(self._on_sep_mode_changed)
-        self.combo_sort.currentIndexChanged.connect(self._render_issues)
         self.framewidget_1()
 
     # 动态绑定主窗口的当前编辑器 / 状态栏，切换文档后不失效
@@ -8829,15 +11243,10 @@ class WindowBook(FramelessResizableMixin, QWidget):
                 % (head, meta, body, fix_html, PAL['text_dim']))
 
     def _render_issues(self, *_):
-        """按排序方式重建表格；每行用 UserRole 记住 _issues 里的原始下标。"""
+        """重建问题表格；每行用 UserRole 记住 _issues 里的原始下标。"""
         if not hasattr(self, 'table_issues'):
             return
         order = list(range(len(self._issues)))
-        mode = self.combo_sort.currentIndex()
-        if mode == 1:                       # 扣分优先（最严重的排最前）
-            order.sort(key=lambda i: (self._issues[i][4], i))
-        elif mode == 2:                     # 按类别 + 位置分组
-            order.sort(key=lambda i: (self._issues[i][1], self._issues[i][2], i))
         self.table_issues.setRowCount(len(order))
         for r, i in enumerate(order):
             level, cat, loc, msg, sc = self._issues[i]
@@ -9064,6 +11473,12 @@ class WindowBook(FramelessResizableMixin, QWidget):
         self._fix_map = {}
         self.text_checkresult.clear()
         self.table_issues.setRowCount(0)
+        # 切文档后同步对应表上下文：清掉/恢复按文档隔离的对应表，绝不让上一条
+        # 文档的附图标记列表残留到当前文档（先校验文档4再校验文档2的问题）。
+        try:
+            self._sync_legend_doc()
+        except Exception:
+            pass
         self.refresh_doc_name()
         self.score_ring.markPending()
         self.lbl_summary.setText('尚未校验 — 点击分数盘开始')
@@ -9141,56 +11556,61 @@ class WindowBook(FramelessResizableMixin, QWidget):
 
     # ---------------- 非破坏性高亮 ----------------
     def _clear_highlights(self):
-        ed = self.active_textcomponent
+        """三栏分栏时高亮可能分散在三段，必须逐段清，不能只清 _active。"""
         self._extra = []
-        if ed is not None:
+        self._extra_by_ed = {}
+        for ed in text_editors_of(self.active_textcomponent):
             try:
                 ed.setExtraSelections([])
             except Exception:
                 pass
 
     def _add_highlight(self, start, length, color):
-        ed = self.active_textcomponent
-        if ed is None or length <= 0 or start < 0:
+        """校验里传的是聚合全文下标，先映射回具体段 / 段内下标。
+
+        按段归集 ExtraSelections：原来所有 selection 一股脑设到 _active 上，
+        三栏模式下会串段，且后一次调用会覆盖前一次的高亮。
+        """
+        if length <= 0 or start < 0:
+            return
+        ed, local = locate_aggregate_pos(self.active_textcomponent, start)
+        if ed is None or local < 0:
             return
         doc = ed.document()
-        if start + length > doc.characterCount():
+        if local + length > doc.characterCount():
             return
         cur = QTextCursor(doc)
-        cur.setPosition(start)
-        cur.setPosition(start + length, QTextCursor.KeepAnchor)
+        cur.setPosition(local)
+        cur.setPosition(local + length, QTextCursor.KeepAnchor)
         sel = QTextEdit.ExtraSelection()
         sel.cursor = cur
-        sel.format.setBackground(QColor(color))
-        sel.format.setForeground(QColor('#ffffff'))
-        self._extra.append(sel)
-        if len(self._extra) <= 600:
-            ed.setExtraSelections(list(self._extra))
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(color))
+        fmt.setForeground(QColor('#ffffff'))
+        sel.format = fmt
+        by_ed = getattr(self, '_extra_by_ed', None)
+        if by_ed is None:
+            by_ed = {}
+            self._extra_by_ed = by_ed
+        group = by_ed.setdefault(ed, [])
+        total = sum(len(v) for v in by_ed.values())
+        if total >= 600:
+            return
+        group.append(sel)
+        self._extra = [s for v in by_ed.values() for s in v]
+        ed.setExtraSelections(list(group))
 
     def _highlight_pattern(self, editor, needle, color, literal=True):
-        """把命中的字符串做成临时高亮，不写入文档格式。"""
+        """把命中的字符串做成临时高亮（逐段算下标），不写入文档格式。"""
         if editor is None or not needle or needle == '.':
-            return
-        try:
-            needle = needle.replace('\u2029', '\n')
-            pattern = re.escape(needle) if literal else needle
-            text = editor.toPlainText().replace('\u2029', '\n')
-            hits = list(re.finditer(pattern, text, re.S))[:400]
-        except Exception:
-            return
-        selections = []
-        for m in hits:
-            cur = QTextCursor(editor.document())
-            cur.setPosition(m.start())
-            cur.setPosition(m.end(), QTextCursor.KeepAnchor)
-            sel = QTextEdit.ExtraSelection()
-            sel.cursor = cur
-            sel.format.setBackground(QColor(color))
-            sel.format.setForeground(QColor('#ffffff'))
-            selections.append(sel)
-        editor.setExtraSelections(selections)
+            return 0
+        spans = list(iter_text_spans(editor, needle, case_sensitive=True,
+                                     limit=400, literal=literal))
+        applied = set_spans_extra_selections(editor, spans, color)
         if editor is self.active_textcomponent:
-            self._extra = list(selections)
+            self._extra_by_ed = applied
+            self._extra = [s for sels in applied.values() for s in sels]
+        return len(spans)
 
     def fn_clear_highlight(self):
         self._clear_highlights()
@@ -9689,12 +12109,19 @@ class WindowBook(FramelessResizableMixin, QWidget):
             needles.append(loc)
         needles.append(cat)
         self._clear_highlights()
-        pos = self._highlight_all(needles, self.LEVEL_COLORS.get(level, '#4a8ae8'))
-        if pos >= 0:
-            cur = QTextCursor(editor.document())
+        hit_ed, pos = self._highlight_all(
+            needles, self.LEVEL_COLORS.get(level, '#4a8ae8'))
+        if hit_ed is not None and pos >= 0:
+            cur = QTextCursor(hit_ed.document())
             cur.setPosition(pos)
-            editor.setTextCursor(cur)
-            editor.ensureCursorVisible()
+            # 把激活段切到真正命中那一栏，再设光标 / 滚动，否则三栏下会滚错栏
+            try:
+                if hasattr(editor, '_set_active_editor'):
+                    editor._set_active_editor(hit_ed)
+            except Exception:
+                pass
+            hit_ed.setTextCursor(cur)
+            hit_ed.ensureCursorVisible()
             try:
                 self.mw.activateWindow()
             except Exception:
@@ -9810,32 +12237,75 @@ class WindowBook(FramelessResizableMixin, QWidget):
         if hasattr(self, 'lbl_legend'):
             QTimer.singleShot(0, lambda: self._reparse_legend(force=True))
 
-    def _collect_legend_source(self):
-        """优先当前文档的「附图说明」，其次其它文档标签，最后回退左侧标记列表。
+    def _legend_doc_key(self):
+        """当前文档标识：用编辑器对象本身，切标签 / 增删标签都不会串。"""
+        try:
+            return self.active_textcomponent
+        except Exception:
+            return None
 
-        论文的软件界面同时有权利要求书 / 说明书两个区域；Fenrir 是多个文档
-        标签页，所以跨标签找附图说明才能对权利要求书做对应关系校验。
+    def _sync_legend_doc(self):
+        """确保对应表上下文与当前文档一致（切文档后先调用）。
+
+        对应表只属于某一个文档：在文档间切换时，把上一文档的手动对应表存入
+        _legend_cache，再恢复/重建当前文档的对应表。这样先校验文档4再校验
+        文档2时，文档2绝不会用到文档4的附图标记列表。
+        """
+        key = self._legend_doc_key()
+        if key is self._legend_doc:
+            return
+        # 离开旧文档：仅当用户手动编辑过才值得缓存，自动解析的结果下次可重算
+        old = self._legend_doc
+        if old is not None and self._legend_manual:
+            self._legend_cache[old] = {
+                'rows': [dict(r) for r in self._legend_rows],
+                'warnings': list(self._legend_warnings),
+                'from': self._legend_from,
+            }
+        self._legend_doc = key
+        cached = self._legend_cache.get(key)
+        if cached:
+            self._legend_rows = [dict(r) for r in cached['rows']]
+            self._legend_warnings = list(cached['warnings'])
+            self._legend_from = cached['from']
+            self._legend_manual = True
+        else:
+            self._legend_rows = []
+            self._legend_warnings = []
+            self._legend_from = ''
+            self._legend_manual = False
+        # 用当前文档正文立刻重绘对应表与状态，避免界面仍显示上一文档的行/计数
+        try:
+            cur_text = key.toPlainText() if key is not None else ''
+        except Exception:
+            cur_text = ''
+        self._fill_legend_table(cur_text)
+        try:
+            self.lbl_legend_badge.setText('%d 条' % len(self._legend_rows))
+            self.lbl_legend_status.setText(
+                '来源：%s' % (self._legend_from or '未解析')
+                + ('（手动编辑）' if self._legend_manual else ''))
+            self.tab_widget_book.setTabText(2, '对应表 (%d)' % len(self._legend_rows))
+        except Exception:
+            pass
+
+    def _collect_legend_source(self):
+        """只取【当前文档】的「附图说明」，其次当前文档左侧标记列表。
+
+        早期实现会跨所有文档标签去找附图说明，导致先校验文档4、再校验文档2
+        时把文档4的对应表误当成文档2的。这里是多文档校验隔离的关键：来源
+        严格限定在当前编辑器，不读任何其它标签。
         返回 (章节文本, 来源说明, 回退解析出的行)。
         """
-        eds = list(getattr(self.mw, 'text_editor_array', []) or [])
         cur = self.active_textcomponent
-        ordered = ([cur] if cur is not None else []) + [e for e in eds if e is not cur]
-        for ed in ordered:
-            try:
-                text = ed.toPlainText()
-            except Exception:
-                continue
-            sections, _, _, heads = fc.find_sections(text)
-            legend = sections.get('附图说明', '')
-            if legend and re.search(r'\d', legend):
-                if ed is cur:
-                    label = '当前文档'
-                else:
-                    try:
-                        label = '文档%d' % (eds.index(ed) + 1)
-                    except ValueError:
-                        label = '其它文档'
-                return legend, label, []
+        try:
+            text = cur.toPlainText() if cur is not None else ''
+        except Exception:
+            text = ''
+        sections, _, _, heads = fc.find_sections(text)
+        legend = sections.get('附图说明', '')
+        if legend and re.search(r'\d', legend):
+            return legend, '当前文档', []
         raw = ''
         try:
             raw = self.active_figmark.toPlainText()
@@ -9861,10 +12331,15 @@ class WindowBook(FramelessResizableMixin, QWidget):
                 rows.append({'num': num, 'name': name, 'raw': num + name})
         return rows
 
-    def _fill_legend_table(self):
-        """渲染对应表；前两列可编辑，计数列只读。"""
+    def _fill_legend_table(self, text=None):
+        """渲染对应表；前两列可编辑，计数列只读。
+
+        text 可显式传入当前文档正文；切文档同步对应表时用它避免读到上一份
+        文档残留的 all_txt，使计数与高亮都基于当前文档。
+        """
         rows = self._legend_rows
-        text = getattr(self, 'all_txt', '') or ''
+        if text is None:
+            text = getattr(self, 'all_txt', '') or ''
         if not text:
             try:
                 text = self.active_textcomponent.toPlainText()
@@ -9916,12 +12391,13 @@ class WindowBook(FramelessResizableMixin, QWidget):
         self._legend_warnings = warns
         self._legend_from = label
         self._legend_manual = False
-        self._fill_legend_table()
         body = ''
         try:
             body = self.active_textcomponent.toPlainText()
         except Exception:
             pass
+        # 计数基于当前文档正文，不依赖可能仍是上一文档残留的 all_txt
+        self._fill_legend_table(body)
         gaps = fc.legend_gaps(rows, body) if rows else []
         missing = [g for g in gaps if g.category == '对应表遗漏']
         hint = '对应表 %d 条 · 来源：%s' % (len(rows), label)
@@ -9962,10 +12438,18 @@ class WindowBook(FramelessResizableMixin, QWidget):
     def _doc_title(self):
         """取文档首行作为发明名称（权利要求书首行很长时不算名称）。"""
         try:
-            first = self.active_textcomponent.toPlainText().strip().splitlines()[0]
+            src = ''
+            try:                      # 分栏模式：发明名称在说明书段第一行
+                src = self.mw._section_title_text()
+            except Exception:
+                src = ''
+            if not src:
+                src = self.active_textcomponent.toPlainText()
+            first = src.strip().splitlines()[0]
         except Exception:
             return ''
         first = re.sub(r'^\d+\s*[.、．]\s*', '', first).strip()
+        first = self._strip_kind_prefix(first)
         if not first or len(first) > 40 or '技术领域' in first:
             return ''
         # 权利要求书在前时首行是权利要求正文（可能带「权利要求书」标题或
@@ -10027,35 +12511,27 @@ class WindowBook(FramelessResizableMixin, QWidget):
         self.dataframe_list = legacy
 
     def _highlight_all(self, needles, color):
-        """高亮某个词句在正文里的全部出现，返回首个命中位置。"""
-        ed = self.active_textcomponent
-        if ed is None:
-            return -1
-        text = ed.toPlainText()
-        selections, first = [], -1
+        """高亮某个词句在正文里的全部出现，返回 (命中段编辑器, 段内位置)。
+
+        三栏分栏下必须逐段查找：聚合全文的下标不属于任何一个子文档。
+        """
+        root = self.active_textcomponent
+        if root is None:
+            return None, -1
+        spans = []
         for needle in needles:
             if not needle:
                 continue
-            try:
-                hits = list(re.finditer(re.escape(needle), text))[:400]
-            except Exception:
-                continue
-            if not hits:
-                continue
-            first = hits[0].start()
-            for m in hits:
-                cur = QTextCursor(ed.document())
-                cur.setPosition(m.start())
-                cur.setPosition(m.end(), QTextCursor.KeepAnchor)
-                sel = QTextEdit.ExtraSelection()
-                sel.cursor = cur
-                sel.format.setBackground(QColor(color))
-                sel.format.setForeground(QColor('#ffffff'))
-                selections.append(sel)
-            break
-        ed.setExtraSelections(selections)
-        self._extra = list(selections)
-        return first
+            spans = list(iter_text_spans(root, needle, case_sensitive=True,
+                                         limit=400))
+            if spans:
+                break
+        applied = set_spans_extra_selections(root, spans, color)
+        self._extra_by_ed = applied
+        self._extra = [s for sels in applied.values() for s in sels]
+        if spans:
+            return spans[0][0], spans[0][1]
+        return None, -1
 
     def submit_check_main(self):
         """执行一轮完整校验。任何单项异常都记录为提示，不中断整轮检查。"""
@@ -10077,6 +12553,12 @@ class WindowBook(FramelessResizableMixin, QWidget):
         # 分数盘是自绘控件、不在按钮音效的覆盖面里，这里补一声，保证从
         # 任何入口（分数盘 / 快捷键 / 外部调用）触发校验都有按下的反馈。
         sfx.play('click')
+        # 校验前再次对齐对应表到当前文档：无论切文档时窗口是否可见，都保证
+        # 本轮用的是当前文档自己的附图标记列表，而不是上一个文档的缓存。
+        try:
+            self._sync_legend_doc()
+        except Exception:
+            pass
         self.textsplit_array = []
         self.dataframe_list = []
         self.error_array = []
@@ -10817,6 +13299,43 @@ class WindowBook(FramelessResizableMixin, QWidget):
             self.extract_claim_tree()
 
 
+# 百度智能云「文字识别」应用密钥：控制台 → 文字识别 → 应用列表。
+# 换 access_token 必须 API Key（client_id）+ Secret Key（client_secret）成对使用，
+# 只填一个会在调用前就被拦下并提示缺哪个。开源发布前把这两行清空即可。
+OCR_API_KEY = '4dS07QkGwFnXCH15GA3Ia5dx'
+OCR_SECRET_KEY = 'uaXtCWB99PzlffMIOhgdhLgqWNG0OqXT'
+
+# access_token 百度给 30 天有效期。原实现每识别一张图都重新换一次 token，
+# 白白多一个来回（实测一张身份证 6~8 秒里有一部分花在这上面），这里按 25 天
+# 保守缓存；换 key 或过期自动重取。
+_OCR_TOKEN = {'key': '', 'token': '', 'exp': 0.0}
+_OCR_TOKEN_LOCK = threading.Lock()
+
+
+def _ocr_access_token(api_key, secret_key):
+    import requests
+    key = api_key + '|' + secret_key
+    now = time.time()
+    with _OCR_TOKEN_LOCK:
+        if (_OCR_TOKEN['key'] == key and _OCR_TOKEN['token']
+                and _OCR_TOKEN['exp'] > now):
+            return _OCR_TOKEN['token']
+    url = ('https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials'
+           '&client_id=%s&client_secret=%s' % (api_key, secret_key))
+    # 一定要带 timeout：requests 默认没有超时，接口卡住会把线程永远挂在那里
+    resp = requests.get(url, headers={'Content-Type':
+                                      'application/json; charset=UTF-8'},
+                        timeout=15).json()
+    token = resp.get('access_token') or ''
+    if not token:
+        raise RuntimeError(resp.get('error_description')
+                           or resp.get('error') or 'access_token 获取失败')
+    with _OCR_TOKEN_LOCK:
+        _OCR_TOKEN.update({'key': key, 'token': token,
+                           'exp': now + 25 * 86400})
+    return token
+
+
 class Worker_Ocr(QThread):
     """OCR 后台线程：调用百度 OCR API 识别 PDF/Word/图片中的文字。
     避免阻塞 UI 线程。"""
@@ -10824,6 +13343,7 @@ class Worker_Ocr(QThread):
     def __init__(self,strPathFile):
         super().__init__()
         self.out_ocr_txt = ''
+        self.err_msg = ''      # 失败原因：调用方用它给出比「未识别到文字」更有用的提示
         self.strPathFile = strPathFile
     def run(self):
         if self.strPathFile:
@@ -10831,14 +13351,18 @@ class Worker_Ocr(QThread):
             self.progress.emit(self.out_ocr_txt)
     def image_ocr(self):
         import requests, base64
-        self.api_key = ''
-        self.secret_key = ''
+        self.api_key = OCR_API_KEY
+        self.secret_key = OCR_SECRET_KEY
         self.access_token = ''
+        if not (self.api_key and self.secret_key):
+            # 少一个都换不到 token，直接说清楚缺什么，别让它表现成「识别失败」
+            self.err_msg = ('OCR 密钥未配置完整：' +
+                            ('缺少 Secret Key' if self.api_key
+                             else ('缺少 API Key' if self.secret_key
+                                   else '缺少 API Key 和 Secret Key')))
+            return
         try:
-            url=f'https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id={self.api_key}&client_secret={self.secret_key}'
-            headers={'Content-Type': 'application/json; charset=UTF-8'}
-            response = requests.get(url,headers).json()
-            self.access_token = response['access_token']
+            self.access_token = _ocr_access_token(self.api_key, self.secret_key)
             if '.pdf' in self.strPathFile:
                 self.get_pdftxt(self.strPathFile)
             elif '.txt' in self.strPathFile:
@@ -10852,8 +13376,14 @@ class Worker_Ocr(QThread):
                 params = {"image":img}
                 url = url + "?access_token=" + self.access_token
                 headers = {'content-type': 'application/x-www-form-urlencoded'}
-                response = requests.post(url, data=params, headers=headers)
-                img_data = response.json()['words_result']
+                response = requests.post(url, data=params, headers=headers,
+                                         timeout=30)
+                data = response.json()
+                if 'words_result' not in data:
+                    # 常见为 QPS 超限 / 图片过大，把接口原话带给用户
+                    raise RuntimeError(data.get('error_msg')
+                                       or data.get('error_code') or '接口返回异常')
+                img_data = data['words_result']
                 for _ in img_data:
                     mark = _['words']
                     marks_array.append(mark)
@@ -10863,6 +13393,7 @@ class Worker_Ocr(QThread):
                 self.out_ocr_txt = ''
         except Exception as e:
             print('Error Code 501',e)
+            self.err_msg = 'OCR 调用失败：' + str(e)[:120]
             self.out_ocr_txt = ''
     def get_pdftxt(self,file_path):
         try:
@@ -10880,72 +13411,6 @@ class Worker_Ocr(QThread):
             text.append(paragraph.text)
         return '\n'.join(text)
 
-class FileDropLabel(QLabel):
-    """支持拖拽文件的 QLabel，用于接收图片/文档拖入。"""
-    def __init__(self,label_txt):
-        super().__init__()
-        self.setAcceptDrops(True)  # 设置控件接受拖放事件
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(50)
-        self.setMinimumWidth(50)
-        self.setText(label_txt)
-        self.setToolTip(label_txt)
-        self.resizeEvent = self.label_change_event
-        self.dir = ''
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.accept()  # 接受包含URLs的拖拽事件
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event: QDragMoveEvent):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event: QDropEvent):
-        if event.mimeData().hasUrls():
-            urls = [url.toLocalFile() for url in event.mimeData().urls()]
-            # 处理拖放的本地文件路径
-            self.dir = urls[0]
-            self.resize_label_img()
-            # 在这里可以对拖入的文件进行进一步操作，例如读取内容、显示文件名等
-            event.accept()
-        else:
-            event.ignore()
-    def label_change_event(self,event):
-        if 'pdf' in self.dir or 'doc' in self.dir:
-            return
-        if not self.dir:
-            return
-        img = QImage(self.dir)
-        img_w = img.width()
-        img_h = img.height()
-
-        if img_w >= img_h:
-            img_rate = img_w/self.width()
-            img_w = self.width()
-            img_h = img_h/img_rate
-        else:
-            img_rate = img_h/self.height()
-            img_h = self.height()
-            img_w = img_w/img_rate
-        result=img.scaled(int(img_w),int(img_h),Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
-        self.setPixmap(QPixmap.fromImage(result))
-    def resize_label_img(self):
-        if 'pdf' in self.dir or 'doc' in self.dir:
-            return
-        img = QImage(self.dir)
-        img_w = img.width()
-        img_h = img.height()
-
-        if img_w >= img_h:
-            img_rate = img_w/1000
-            img_w = 1000
-            img_h = img_h/img_rate
-        result = img.scaled(int(img_w),int(img_h),Qt.IgnoreAspectRatio,Qt.SmoothTransformation)
-        self.setPixmap(QPixmap.fromImage(result))
 class SwitchBtn(QWidget):
     """通用开关按钮：左上角三个开关（联想/撰写阅读/自动补全）共用。"""
     checkedChanged = pyqtSignal(bool)
@@ -11134,6 +13599,64 @@ class OcrDropTextEdit(QTextEdit):
     def update_text(self,in_txt):
         self.insertPlainText('\n' + in_txt)
 
+class _FileDropMixin:
+    """拖入本地文件的公共实现：只拦「文件拖拽」，其余交给原生处理。
+
+    放在 QTextEdit / QWidget 前面做第一基类，super() 才能落到 Qt 的实现上。
+    信号由各具体控件自己声明（混入类不是 QObject，定义不了 pyqtSignal）。
+    """
+
+    @staticmethod
+    def _drop_paths(event):
+        md = event.mimeData()
+        if md is None or not md.hasUrls():
+            return []
+        return [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+
+    def dragEnterEvent(self, event):
+        if self._drop_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._drop_paths(event):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._drop_paths(event)
+        if paths:
+            event.acceptProposedAction()
+            self.filesDropped.emit(paths)
+            return
+        super().dropEvent(event)
+
+
+class PartyPasteEdit(_FileDropMixin, QTextEdit):
+    """申请人信息面板的粘贴框：文本照常粘贴，身份证图片可直接拖进来。
+
+    文件拖入后由主窗口跑 OCR，再弹窗让用户选择把结果插到发明人、申请人
+    还是两处都要。
+    """
+    filesDropped = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+
+class PartyDropPanel(_FileDropMixin, QWidget):
+    """面板容器：表格本身不接受拖放（QTableWidget.acceptDrops() 为 False），
+    拖到表格 / 空白处的文件会冒泡到这里，整块面板都能接收身份证图片。"""
+    filesDropped = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+
 class LineNumPaint(QWidget):
     """行号绘制组件，与 QTextEditWithLineNum 配合显示左侧行号栏。"""
     def __init__(self, q_edit):
@@ -11196,6 +13719,45 @@ class LineNumPaint(QWidget):
 import math as _math
 
 
+def _wave_editor_of(page):
+    """从一个 tab 页里取出「该跟随光标的编辑器」。
+
+    单框模式 / 老页面直接就是编辑器；分栏模式下 tab 页是三分区容器，
+    必须取当前被激活的那一段——否则拿不到 viewport 与 cursor_doc_y，
+    光标高亮会停在进入分栏时那一段。
+    """
+    if page is None:
+        return None
+    if isinstance(page, QTextEditWithLineNum):
+        return page
+    fn = getattr(page, 'wave_editor', None)
+    if fn is None:
+        return None
+    try:
+        ed = fn()
+    except Exception:
+        return None
+    return ed if isinstance(ed, QTextEditWithLineNum) else None
+
+
+def _is_wave_editor(win, ed):
+    """ed 是否就是当前页面右缘波形要绘制的那一个编辑器。"""
+    if win is None or ed is None:
+        return False
+    try:
+        cur = win.tab_widget_text.currentWidget()
+    except Exception:
+        cur = None
+    if cur is ed:
+        return True
+    if cur is not None and _wave_editor_of(cur) is ed:
+        return True
+    try:
+        return _wave_editor_of(win.active_textcomponent) is ed
+    except Exception:
+        return False
+
+
 class _WaveRail(QWidget):
     """编辑器右侧「音浪 / 海浪」装饰栏的绘制控制器（卡顿修复版）。
 
@@ -11212,24 +13774,42 @@ class _WaveRail(QWidget):
         近 700 次 sin/exp；
       * 渐变、音浪柱画笔、标题锚点按 (高度, 光标, 文档版本) 缓存；
       * 按最近帧耗时自动降级（省掉雾气 / 第二道浪），慢机器也不堵输入。
-    波形形态与配色沿用旧版：x(y) = 光标能量包络 × 两条反向行波。另外叠了
+    波形形态与配色沿用旧版：x(y) = 光标能量包络 × 两条反向行波，整条带
+    贴着编辑器右缘那条 1px 细边框起伏（波峰压线、波谷向内轻探）。另外叠了
     一层「湖面水汽」（曲线到右缘的淡淡雾面 + 宽柔光），光标光点用径向
     渐变散焦，而不是硬边圆点。
     """
     TAU = 2 * _math.pi
     RAIL_W = 26
-    BASE_PAD = 0        # 波形基线距右边缘：0 = viewport 右沿
-    EDGE_INSET = 1.5    # 基线再向内 1.5px，让 2px 圆头笔触完整落在视口内
-    AMP = 18            # 最大向左振幅
+    BASE_PAD = 0        # 波形基线距右边缘：0 = viewport 右沿（= 细边框内侧）
+    # 贴边框摆位：viewport 右沿与编辑器那条 1px 细边框几乎重合（实测差 1px），
+    # 因此把波峰基线压到离右沿 1px、并收窄向左摆幅，整条波浪就「骑」在边框上，
+    # 柔光/雾面自然顶到边框线，而不再像旧版那样整条浮在文本框内侧。
+    EDGE_INSET = 1.0    # 波峰距右沿 1px：2px 亮芯刚好压住边框，又不越出视口被裁
+    AMP = 9             # 向左摆深（旧版 18 → 波谷离边框可达 19px，显成一框内光带）；
+                        # 9 时光标行波谷最多离边框 ~10px、其余几乎全程贴边，仍是波浪
     WAVE_LEN = 168.0    # 主波波长 px
     STEP = 4.0          # 曲线采样步长（旧版主波 2px / 副波 3px）
     OMEGA = 2.875       # rad/s，等价于旧版 0.115 rad / 40ms
-    INTERVAL = 16       # 目标 60fps：去掉横向短柱后单帧只剩 ~1.5ms
-    SLOW_INTERVAL = 24  # 慢机器降级到约 42fps，宁可慢也不堵输入
-    # 单帧相位上限 ≈ 一个 20ms 帧的步进。主线程偶发卡 100ms 时，恢复后
-    # 也只往前走一帧的距离——波形会「停一下再走」，但绝不会一次跳好几格。
-    MAX_STEP = 0.058
+    # 20fps：波浪是低频柔光（明带 ~110px/s，50ms 才走 5.5px），肉眼完全连续；
+    # 档位从 25fps 降到 20fps 后每帧重绘开销降 20%，空闲期主线程占用同步下降，
+    # 省下的时间留给打字。段头已改为静态缓存、无独立定时器，不再需要与之同频。
+    INTERVAL = 50
+    SLOW_INTERVAL = 75  # 慢机器降到约 13fps，宁可慢也不堵输入
+    # 单帧相位上限 ≈ 一个 50ms 帧的步进（OMEGA*0.05≈0.144，留余量取 0.16）。
+    # 主线程偶发卡 100ms 时，恢复后也只往前走一帧多一点的距离——波形会
+    # 「停一下再走」，但绝不会一次跳好几格。
+    MAX_STEP = 0.16
     BUDGET = 0.007      # 单帧绘制预算 7ms，超出自动降级
+    # 离子流拖尾（参考极光绸带的长软余辉）：拖尾取「明带过去若干相位内
+    # 亮度的指数加权平均」，数学上是行波的复数几何级数求和——得到一条
+    # 相位滞后、振幅衰减的平滑余弦。余辉连续无分节，主峰上游 ~70px 处
+    # 有次亮肩，向上游一直延伸 TAIL_SPAN 才没入底噪。
+    # 明带峰以 1/0.026≈38.5px/rad 的速度下移，TAIL_SPAN=5.5rad≈210px。
+    TAIL_STEP = 0.10     # 级数步长（rad），只进闭式推导，不影响性能
+    TAIL_TAU = 10.2       # 指数衰减常数（rad）：越大尾巴越长越匀
+    TAIL_SPAN = 20.5      # 拖尾总长（rad，≈210px）
+    TAIL_PEAK = 0.62     # 拖尾峰值亮度倍率
 
     def __init__(self, editor):
         super().__init__(editor.viewport())
@@ -11239,15 +13819,18 @@ class _WaveRail(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
         self.setFocusPolicy(Qt.NoFocus)
-        # 三条波各自的相位。必须**分别**回绕：副浪 / 第三道浪的时间系数
-        # 是 0.72 / 1.1，不是 1 的整数倍，若共用一个 total phase 再取模，
-        # 每次 2π 回绕时 sin(k*y - 0.72*ph) 会凭空跳 4.5rad（实测光标行
-        # 2.1px、整条曲线 4.7px 的突跳，就是「缺帧、突然落到最低点」）。
+        # 两条波相位必须**分别**回绕：副浪时间系数 0.72 不是 1 的整数倍，
+        # 若共用 total phase 取模，回绕时 sin(k*y - 0.72*ph) 会凭空跳 4.5rad
+        # （实测整条曲线 4.7px 突跳，就是「缺帧、突然落到最低点」）。
         # 独立累加 + 独立取模后 sin/cos 始终连续，波速不变。
         self.phase = 0.0
         self.phase2 = 0.0
-        self.phase3 = 0.0
+        self.phase3 = 0.0   # 保留：_build_cache 的 s3/c3 平滑项缓存
+        # 离子流亮度相位：沿波浪向下游走的明带，独立累加、回绕无感
+        self.flow = 0.0
         self._active = True
+        # 段带（分栏时由 _BorderWaveLayer 每帧传入）：决定浪面基色的纵向分段
+        self._bands = None
         self._clock = QElapsedTimer()
         self._clock.start()
         self._perf = QElapsedTimer()
@@ -11261,29 +13844,21 @@ class _WaveRail(QWidget):
         self._mist_img = None
         self._mist_key = None
         self._mist_phase = -99.0
-        self._title_key = None
-        self._title_ys = ()
-        # 静态画笔只建一次，避免每帧构造大量 QColor / QPen
-        _c = QColor('#4a8ae8'); _c.setAlpha(60)
-        self._pen_low = QPen(_c, 1.0, Qt.SolidLine, Qt.RoundCap)
+        # 离子流半分辨率缓冲（复用，避免每帧新建 QImage）
+        self._ion_img = None
+        # 离子流辉光主体（三层描边）缓存：形状只随相位/光标变，不变时直接复用，
+        # 每帧只贴这张缓存图 + 叠流动亮度遮罩，省掉最贵的三次曲线描边重绘。
+        self._ion_glow_img = None
+        self._ion_glow_key = None
+        self._ion_glow_phase = -99.0
+        self._flow_grad_key = None
+        self._flow_grad = None
+        # 降级画质用的静态柔光笔（离子流不可用时兜底）
         _c = QColor('#4a8ae8'); _c.setAlpha(24)
         self._pen_glow = QPen(_c, 7.0, Qt.SolidLine, Qt.RoundCap)
-        # 光标光点：用径向渐变做出「散焦」的柔光，而不是一颗硬边圆点。
-        # 渐变建在原点，绘制时 translate 过去，避免每帧重建（见 _draw_dot）。
-        self._dot_halo = QRadialGradient(QPointF(0.0, 0.0), 15.0)
-        for _p, _a in ((0.00, 88), (0.28, 60), (0.55, 30), (0.78, 12), (1.00, 0)):
-            _c = QColor('#FB8073'); _c.setAlpha(_a)
-            self._dot_halo.setColorAt(_p, _c)
-        self._dot_core = QRadialGradient(QPointF(0.0, 0.0), 6.0)
-        for _p, _a in ((0.00, 215), (0.32, 178), (0.60, 96), (0.84, 28),
-                       (1.00, 0)):
-            _c = QColor('#FFB794'); _c.setAlpha(_a)
-            self._dot_core.setColorAt(_p, _c)
-        # 段落标题锚点也做同样的散焦处理，只是更小更淡
-        self._dot_title = QRadialGradient(QPointF(0.0, 0.0), 4.2)
-        for _p, _a in ((0.00, 190), (0.45, 120), (0.78, 40), (1.00, 0)):
-            _c = QColor('#FB8073'); _c.setAlpha(_a)
-            self._dot_title.setColorAt(_p, _c)
+        # 注：波形上原有的点状橙色光点（光标行光点 + 段落标题锚点）已按需求
+        # 移除；光标所在行主浪仍按 _color_at 呈橙色并向上下平滑过渡回青蓝，
+        # 那是沿曲线的连续色带，不是脱离主线的圆点。
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.PreciseTimer)
         self._timer.setInterval(self.INTERVAL)
@@ -11297,11 +13872,35 @@ class _WaveRail(QWidget):
         # 把 10 个页签的空转定时器收敛到当前页那一个。
 
     # ---- 刷新 / 动画 ---------------------------------------------------
-    def invalidate(self):
-        """只把 26px 窄带标记为脏，绝不触发整篇文档重绘。"""
-        vp = self.ed.viewport()
-        vp.update(QRect(vp.width() - self.RAIL_W, 0,
-                        self.RAIL_W, vp.height()))
+    # 输入节流窗口（ms）：连续打字时 cursorPositionChanged / textChanged /
+    # 滚动条各会调一次 invalidate，若每次都 update 覆盖层，等于每敲一个字
+    # 都多画一帧 5~6ms 的波浪。波形本身有 40ms 定时器在推进，这里把同一
+    # 段时间内的重复请求合并掉即可，视觉上没有任何差别。
+    INVALIDATE_GAP = 32.0
+
+    def invalidate(self, force=False):
+        """让窗口右缘的波形覆盖层刷新自己那条窄带。
+
+        波形已迁出 viewport：宿主是挂在 MainWindow 上、与 viewport 兄弟的
+        _BorderWaveLayer。只 update 覆盖层自身即可，文档至多被标脏与之重叠
+        的一条窄带（无重叠时 0 次），绝不整篇重绘。覆盖层尚未创建（构造期）
+        或此编辑器不是当前可见页时，安静跳过。force=True 用于焦点切换等
+        必须立刻看到结果的场合，绕过节流。
+        """
+        win = self.ed.window()
+        layer = getattr(win, '_border_wave_layer', None) if win else None
+        if layer is None:
+            return
+        # 只有当前显示的那个编辑器的波形才画到覆盖层，避免 10 个页签抢画。
+        # 分栏模式下「当前页」是个容器，真正的宿主是被激活的那一段，
+        # 所以不能只比 currentWidget() —— 那样三栏模式下永远不会刷新。
+        if _is_wave_editor(win, self.ed):
+            now = self._now_ms()
+            # 滚动条 valueChanged 会把 int 塞进 force，故严格判断 True
+            if force is not True and now - getattr(self, '_last_invalidate', -1e9) < self.INVALIDATE_GAP:
+                return
+            self._last_invalidate = now
+            layer.update()
 
     def _now_ms(self):
         """毫秒级浮点时间。QElapsedTimer.elapsed() 是整数毫秒，16ms 帧下
@@ -11320,12 +13919,17 @@ class _WaveRail(QWidget):
             self.resume()
         else:
             self._timer.stop()
-        self.invalidate()
+        self.invalidate(force=True)
 
     def _tick(self):
         if not self._active or not self.ed.isVisible():
             # 主窗口一次会建 10 个编辑器（每个 tab 一个），只有当前页可见。
             # 不可见就彻底停表，避免 10 个 QTimer 在主线程里空转。
+            self._timer.stop()
+            return
+        # 分栏模式下三段同时可见，但只有被激活那一段的波形会被画出来；
+        # 其余两段停表，切回来时由 _sync_wave_layer / paintEvent 唤醒。
+        if not _is_wave_editor(self.ed.window(), self.ed):
             self._timer.stop()
             return
         now = self._now_ms()
@@ -11340,6 +13944,8 @@ class _WaveRail(QWidget):
         self.phase = (self.phase + dphi) % self.TAU
         self.phase2 = (self.phase2 - dphi * 0.72) % self.TAU
         self.phase3 = (self.phase3 + dphi * 1.1) % self.TAU
+        # 离子流明带以略快的速度沿波浪流动（与波形相位独立）
+        self.flow = (self.flow + dphi * 1.35) % self.TAU
         self.invalidate()
 
     # ---- 波形 ----------------------------------------------------------
@@ -11347,20 +13953,13 @@ class _WaveRail(QWidget):
         return (getattr(self.ed, 'cursor_doc_y', 0.0)
                 - self.ed.verticalScrollBar().value())
 
-    def _envelope(self, y, cy):
-        """光标处能量最高，向上下平滑衰减，远端仍保留 0.30 的基础波幅。"""
-        d = (y - cy) / 118.0
-        return 0.30 + 0.70 * _math.exp(-d * d)
-
-    def wave_x(self, y, cy):
-        k = 2 * _math.pi / self.WAVE_LEN
-        w1 = _math.sin(k * y + self.phase)
-        w2 = _math.sin(k * 0.61 * y + self.phase2 + 1.15)
-        norm = 0.62 * w1 + 0.38 * w2
-        return self._x_of(norm, self._envelope(y, cy))
-
     def _x_of(self, norm, env):
-        """归一波幅 → rail 局部 x。绘制与取点共用，避免两套公式算出偏差。"""
+        """归一波幅 → rail 局部 x。绘制与取点共用，避免两套公式算出偏差。
+
+        norm∈[-1,1] 时 (0.5+0.5*norm)∈[0,1]：波峰(norm=-1)落在 RAIL_W-
+        EDGE_INSET（离右沿/边框 1px），波谷(norm=1)最多向左探 AMP*env。
+        亮芯、光标光点、段落标题锚点都走这里，改一处即整体贴边同步。
+        """
         return (self.RAIL_W - self.BASE_PAD - self.EDGE_INSET
                 - (self.AMP * env * (0.5 + 0.5 * norm)))
 
@@ -11371,18 +13970,70 @@ class _WaveRail(QWidget):
                       int(c1.green() + (c2.green() - c1.green()) * t),
                       int(c1.blue() + (c2.blue() - c1.blue()) * t))
 
+    @staticmethod
+    def _shade(c, t):
+        """t>0 向白提亮，t<0 向黑压暗。"""
+        if t >= 0:
+            return QColor(int(c.red() + (255 - c.red()) * t),
+                          int(c.green() + (255 - c.green()) * t),
+                          int(c.blue() + (255 - c.blue()) * t))
+        return QColor(int(c.red() * (1 + t)), int(c.green() * (1 + t)),
+                      int(c.blue() * (1 + t)))
+
     def _color_at(self, y, cy, h):
-        t = y / max(1.0, h)
-        dark = QColor('#2b4a6f')
-        cyan = QColor('#7fd4f0')
-        base = self._blend(dark, cyan, 1.0 - abs(2.0 * t - 1.0) ** 1.4)
+        """浪面在 y 处的基色。
+
+        分栏模式下按三条段带的段色取色：自上而下 蓝（权要）→ 紫（说明书）
+        → 金（摘要），混合权重按「离各段带中心的距离」高斯衰减 —— 段带边界
+        两侧自然过渡、没有硬切线，段带高度变化（拖分隔条 / 收起展开）时
+        覆盖范围跟着段头走。每条段带内部仍保留「中间亮、两端沉」的立体感。
+        单框模式没有分段，沿用原来的青蓝。光标行的珊瑚橙高亮不受影响。
+        """
+        bands = self._bands
+        if bands:
+            num_r = num_g = num_b = 0.0
+            den = 0.0
+            near = None
+            nd = 1e18
+            for c, top, bot, *_rest in bands:
+                ctr = (top + bot) * 0.5
+                sg = max(24.0, (bot - top) * 0.55)
+                w = _math.exp(-(((y - ctr) / sg) ** 2))
+                num_r += c.red() * w
+                num_g += c.green() * w
+                num_b += c.blue() * w
+                den += w
+                d = abs(y - ctr)
+                if d < nd:
+                    nd = d
+                    near = (top, bot)
+            hue = QColor(int(num_r / max(den, 1e-9)),
+                         int(num_g / max(den, 1e-9)),
+                         int(num_b / max(den, 1e-9)))
+            top, bot = near
+            prof = 1.0 - abs(2.0 * (y - (top + bot) * 0.5)
+                             / max(12.0, bot - top)) ** 1.4
+            # 明暗只做「中间略亮」的立体感，底光 0.24：段带交界处颜色变、
+            # 亮度只轻轻沉一下，整条浪不会在边界断成几截
+            base = self._blend(self._shade(hue, -0.42),
+                               self._shade(hue, 0.30), 0.24 + 0.76 * prof)
+        else:
+            t = y / max(1.0, h)
+            base = self._blend(QColor('#2b4a6f'), QColor('#7fd4f0'),
+                               1.0 - abs(2.0 * t - 1.0) ** 1.4)
+        # 光标所在行按高斯权重混入珊瑚橙，向上下两侧平滑衰减回基色：
+        # 这是沿主浪连续过渡的色带（暖色只落在曲线上），不是脱离主线的点状
+        # 高光——原先那两颗径向渐变圆点（光标行 / 段落标题）已按需求移除。
         d = (y - cy) / 82.0
         return self._blend(base, QColor('#FB8073'), 0.86 * _math.exp(-d * d))
 
     # ---- 帧缓存 --------------------------------------------------------
     def _build_cache(self, h, cy):
-        """与相位无关的量全部预计算；cy 量化到 4px，避免光标抖动时反复重建。"""
-        key = (h, int(cy) >> 2)
+        """与相位无关的量全部预计算；cy 量化到 4px、段带几何量化到 8px，
+        避免光标抖动 / 拖分隔条时反复重建渐变。"""
+        fp = tuple((b[0].rgb(), int(b[1]) >> 3, int(b[2]) >> 3)
+                   for b in (self._bands or ()))
+        key = (h, int(cy) >> 2, fp)
         if self._cache_key == key and self._cache is not None:
             return self._cache
         k = 2 * _math.pi / self.WAVE_LEN
@@ -11401,31 +14052,23 @@ class _WaveRail(QWidget):
         c3 = [_math.cos(k3 * v + 0.6) for v in ys]
         env = [0.30 + 0.70 * _math.exp(-((v - cy) / 118.0) ** 2)
                for v in ys]
-        # 纵向渐变（只依赖 h / cy）
+        # 纵向连续色渐变（只依赖 h / cy）：基色「深蓝 → 青 → 深蓝」逐点采样，
+        # 再按光标高斯混入珊瑚橙——光标所在行呈橙色、向上下平滑过渡回冷色，
+        # 任意光标位置下都连续无硬边（暖色沿曲线分布，不含点状光点）。
         m = cy / max(1.0, h)
         span = min(0.20, max(0.06, 86.0 / max(1.0, h)))
-        stops = {}
-        def add(pos, col):
-            stops[round(max(0.0, min(1.0, pos)), 5)] = QColor(col)
-        add(0.0, '#2b4a6f')
-        add(0.5, '#7fd4f0')
-        add(1.0, '#2b4a6f')
-        add(m - span, '#2f6bc4')
-        add(m - span * 0.42, '#d8948a')
-        add(m, '#FB8073')
-        add(m + span * 0.42, '#d8948a')
-        add(m + span, '#2f6bc4')
-        ordered = sorted(stops.items())
-
+        N = 64
+        def color_at(y):
+            return self._color_at(y, cy, h)
         def make_grad(alpha_mul=1.0, floor_a=0):
             g = QLinearGradient(0, 0, 0, h)
-            for pos, col in ordered:
-                c = QColor(col)
+            for i in range(N + 1):
+                c = color_at(h * i / N)
                 a = int(c.alpha() * alpha_mul)
                 c.setAlpha(max(floor_a, min(255, a)))
-                g.setColorAt(pos, c)
+                g.setColorAt(i / N, c)
             return g
-
+        ion_grad = make_grad()          # 离子流共用的连续色（缓存，不随 flow 变）
         pen_main = QPen(QBrush(make_grad()), 2.0, Qt.SolidLine, Qt.RoundCap)
         # 雾：贴着曲线的两层柔光 + 曲线到右缘之间的雾面，模拟湖面上的水汽
         pen_mist_wide = QPen(QBrush(make_grad(0.18, 5)), 12.0,
@@ -11441,33 +14084,8 @@ class _WaveRail(QWidget):
         brush_mist = QBrush(mist)
         self._cache_key = key
         self._cache = (ys, s1, c1, s2, c2, s3, c3, env, pen_main,
-                       pen_mist_wide, pen_mist_near, brush_mist)
+                       pen_mist_wide, pen_mist_near, brush_mist, ion_grad)
         return self._cache
-
-    def _title_points(self, h):
-        """标题锚点的 y 坐标缓存：只有滚动 / 改文 / 改高度才重新遍历文档。"""
-        try:
-            doc = self.ed.document()
-            scroll = self.ed.verticalScrollBar().value()
-            key = (h, scroll, doc.revision())
-            if self._title_key == key:
-                return self._title_ys
-            layout = doc.documentLayout()
-            titles = getattr(self.ed, 'section_titles', ())
-            block = self.ed.cursorForPosition(QPoint(0, 0)).block()
-            found = []
-            while block.isValid():
-                by = layout.blockBoundingRect(block).top() - scroll
-                if by > h:
-                    break
-                if -8 <= by <= h and block.text().strip() in titles:
-                    found.append(by + 3.0)
-                block = block.next()
-            self._title_key = key
-            self._title_ys = tuple(found)
-            return self._title_ys
-        except Exception:
-            return ()
 
     # ---- 绘制 ----------------------------------------------------------
     def _draw_mist(self, p, xs, ys, h, xoff, pen_wide, pen_near, brush):
@@ -11479,14 +14097,14 @@ class _WaveRail(QWidget):
         sw = self.RAIL_W
         iw, ih = (sw + 1) // 2, (int(h) + 1) // 2
         img = self._mist_img
-        # 雾是慢速低对比的图形：每隔一帧重绘一次就够（每帧都重画看不到差别，
-        # 却要多花一倍主线程时间）。几何 / 光标变化时立刻重绘。
+        # 雾是慢速低对比的图形：相位每推进 ~0.13rad（约一帧）才重描一次就够，
+        # 每帧都重画看不到差别，却要多花主线程时间。几何 / 光标变化立刻重绘。
         key = (iw, ih, self._cache_key)
         dphi = abs(self.phase - self._mist_phase)
         if dphi > _math.pi:
             dphi = self.TAU - dphi
         redraw = (img is None or img.width() != iw or img.height() != ih
-                  or self._mist_key != key or dphi > 0.075)
+                  or self._mist_key != key or dphi > 0.13)
         if img is None or img.width() != iw or img.height() != ih:
             img = QImage(iw, ih, QImage.Format_ARGB32_Premultiplied)
             self._mist_img = img
@@ -11519,33 +14137,175 @@ class _WaveRail(QWidget):
         p.drawImage(QRectF(xoff, 0.0, float(sw), float(h)), img,
                     QRectF(0.0, 0.0, float(iw), float(ih)))
 
-    def paint(self, p, region=None):
-        """由 QTextEditWithLineNum.paintEvent 在文档绘制完成后调用。"""
-        # PyQt 虚拟方法中的未捕获异常会让 Qt 直接终止进程；装饰是纯视觉，
-        # 任何异常都只跳过本帧，绝不影响编辑器本体。
+    @staticmethod
+    def _ion_lum(y, ph):
+        """流动明带的亮度场（原始公式，供主亮带与拖尾共用）。"""
+        return (0.52 + 0.34 * _math.sin(y * 0.026 - ph)
+                + 0.14 * _math.sin(y * 0.061 - ph * 1.7 + 1.1))
+
+    def _draw_ion_flow(self, p, xs, ys, h, xoff, ion_grad, flow):
+        """沿波浪流动的连续电离辉光（离子流）。
+
+        不用任何一颗颗独立的「粒子光点」——那些在 1:1 下就是可见的大颗粒。
+        空气感来自三层由宽到窄的高斯辉光描边，流动感来自一次 DestinationIn
+        亮度遮罩：alpha 沿 y 呈两组行波叠加，明带随时间沿波浪向下游走，全程
+        连续、无颗粒。辉光画在 1/2 分辨率缓冲里（宽笔触 AA 成本降 4 倍、放大
+        后更柔），再叠一条全分辨率细芯找回主线锐度。
+
+        性能：三层辉光描边是这一整段最贵的操作，但「辉光形状」只随相位 / 光标
+        变化（flow 只动亮度遮罩、不动形状）。于是把三层描边烤进 _ion_glow_img，
+        相位每推进 ~0.06rad 才重描一次（视觉上仍是连续波浪），其余帧只贴这张
+        缓存图 + 叠流动遮罩，省掉每帧三次曲线描边重绘。
+        """
+        sw = self.RAIL_W
+        fw, fh = (sw + 1) // 2, (int(h) + 1) // 2
+        img = self._ion_img
+        if img is None or img.width() != fw or img.height() != fh:
+            img = QImage(fw, fh, QImage.Format_ARGB32_Premultiplied)
+            self._ion_img = img
+
+        # ---- 辉光主体（三层描边）按需重描并缓存 ----
+        dphi = abs(self.phase - self._ion_glow_phase)
+        if dphi > _math.pi:
+            dphi = self.TAU - dphi
+        glow_key = self._cache_key
+        glow_dirty = (self._ion_glow_img is None
+                      or self._ion_glow_img.width() != fw
+                      or self._ion_glow_img.height() != fh
+                      or self._ion_glow_key != glow_key
+                      or dphi > 0.06)
+        if glow_dirty:
+            self._ion_glow_key = glow_key
+            self._ion_glow_phase = self.phase
+            g = self._ion_glow_img
+            if g is None or g.width() != fw or g.height() != fh:
+                g = QImage(fw, fh, QImage.Format_ARGB32_Premultiplied)
+                self._ion_glow_img = g
+            g.fill(0)
+            gp = QPainter(g)
+            try:
+                gp.scale(fw / float(sw), fh / float(h))
+                gp.setRenderHint(QPainter.Antialiasing, True)
+                path = QPainterPath()
+                path.moveTo(QPointF(xs[0], ys[0]))
+                for i in range(1, len(ys)):
+                    path.lineTo(QPointF(xs[i], ys[i]))
+                grad = QBrush(ion_grad)
+                for wd, al in ((10.0, 0.26), (5.0, 0.42), (1.8, 0.88)):
+                    pen = QPen(grad, wd, Qt.SolidLine, Qt.RoundCap)
+                    gp.setOpacity(al)
+                    gp.setPen(pen)
+                    gp.drawPath(path)
+                gp.setOpacity(1.0)
+            finally:
+                gp.end()
+
+        # ---- 每帧：缓存辉光 → 合成缓冲 → 叠加流动亮度遮罩 ----
+        img.fill(0)
+        ip = QPainter(img)
         try:
-            self._paint_wave(p, region)
+            ip.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            ip.drawImage(QRectF(0.0, 0.0, float(fw), float(fh)),
+                         self._ion_glow_img,
+                         QRectF(0.0, 0.0, float(fw), float(fh)))
+        finally:
+            ip.end()
+
+        # 流动亮度遮罩：灰渐变 alpha 沿 y 连续起伏，明带沿波浪游走。
+        # 拖尾（极光绸带式长软余辉）：明带向下游走时，把「过去若干相位」的
+        # 亮度按指数权重做加权平均并进遮罩。行波加权和有闭式解（复数几何
+        # 级数），73 个色标只需几次三角运算——余辉是一条相位滞后、振幅
+        # 衰减的平滑余弦，主峰之后拖着 ~210px 的渐暗绸带，无分节无台阶。
+        # 用 field 原生高度 fh，保证渐变覆盖到缓冲底边（不是全尺寸 h）。
+        fq = round(flow / 0.06)
+        if self._flow_grad_key != (fq, fh):
+            self._flow_grad_key = (fq, fh)
+            fg = QLinearGradient(0, 0, 0, fh)
+            ph = fq * 0.06
+            n_t = int(self.TAIL_SPAN / self.TAIL_STEP)
+            r_t = _math.exp(-self.TAIL_STEP / self.TAIL_TAU)
+            sw_t = r_t * (1.0 - r_t ** n_t) / (1.0 - r_t)   # Σ 权重
+            zr_t = r_t * _math.cos(self.TAIL_STEP)
+            zi_t = r_t * _math.sin(self.TAIL_STEP)
+            # 主行波（ω=1）与次波纹（ω=1.7）的 Σ r^j e^{iωjΔ}，实/虚部直取
+            zp_t = complex(zr_t, zi_t)
+            zp_t = zp_t * (1.0 - zp_t ** n_t) / (1.0 - zp_t)
+            zs_t = complex(r_t * _math.cos(self.TAIL_STEP * 1.7),
+                           r_t * _math.sin(self.TAIL_STEP * 1.7))
+            zs_t = zs_t * (1.0 - zs_t ** n_t) / (1.0 - zs_t)
+            peak_t = self.TAIL_PEAK
+            for i in range(73):
+                y = h * i / 72
+                wav = self._ion_lum(y, ph)
+                # Im[e^{iθ}·Z] = sinθ·Re Z + cosθ·Im Z，θ 为该分量的行波相位
+                a1 = y * 0.026 - ph
+                a2 = y * 0.061 - ph * 1.7 + 1.1
+                s1 = _math.sin(a1) * zp_t.real + _math.cos(a1) * zp_t.imag
+                s2 = _math.sin(a2) * zs_t.real + _math.cos(a2) * zs_t.imag
+                trail = peak_t * (0.52 + (0.34 * s1 + 0.14 * s2) / sw_t)
+                if trail > wav:
+                    wav = trail
+                c = QColor(0, 0, 0)
+                c.setAlphaF(max(0.16, min(1.0, wav)))
+                fg.setColorAt(i / 72, c)
+            self._flow_grad = fg
+        bp = QPainter(img)
+        try:
+            bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            bp.fillRect(0, 0, fw, fh, QBrush(self._flow_grad))
+        finally:
+            bp.end()
+
+        # 半分辨率辉光放大贴回
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(xoff, 0.0, float(sw), float(h)), img,
+                    QRectF(0.0, 0.0, float(fw), float(fh)))
+        # 全分辨率静态细芯：找回主线锐度（渐变已缓存、不随 flow 变）
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(QPen(QBrush(ion_grad), 1.4, Qt.SolidLine, Qt.RoundCap))
+        path = QPainterPath()
+        path.moveTo(QPointF(xoff + xs[0], ys[0]))
+        for i in range(1, len(ys)):
+            path.lineTo(QPointF(xoff + xs[i], ys[i]))
+        p.drawPath(path)
+
+    def paint_to(self, p, w, h, xoff, yshift=0.0, bands=None):
+        """把波浪画到外部 painter 的 [xoff, xoff+RAIL_W) × [0, h) 区域。
+
+        由窗口级 _BorderWaveLayer 调用：波形已迁出 QTextEdit.viewport，宿主是
+        与 viewport 兄弟、贴住窗口右缘的覆盖层，因此能画到文本框之外、骑在
+        窗口右边框上，同时不与 viewport 争抢文档重绘。
+
+        p 是覆盖层的 painter；w/h 是覆盖层尺寸；xoff 是波形窄带在其中的左缘。
+        yshift 是覆盖层顶相对 viewport 顶的上移量，用于把光标行 y 平移到
+        覆盖层局部坐标（覆盖层起点锚在文档标签下沿，比 viewport 高 1px）。
+        bands 是覆盖层算好的段带 [(段色, 顶, 底)]：波浪基色自上而下
+        蓝（权要）→ 紫（说明书）→ 金（摘要），覆盖范围随三条件段头高度
+        变化；None = 单框模式沿用青蓝。
+        PyQt 虚拟方法里的未捕获异常会让 Qt 直接终止进程，装饰是纯视觉，
+        任何异常都只跳过本帧，绝不影响编辑器本体。
+        """
+        self._bands = bands
+        try:
+            self._paint_wave(p, w, h, xoff, yshift)
         except Exception:
             pass
 
-    def _paint_wave(self, p, region=None):
+    def _paint_wave(self, p, w, h, xoff, yshift=0.0):
         self._perf.start()
-        vp = self.ed.viewport()
-        h, w = vp.height(), vp.width()
-        if h <= 0 or w <= self.RAIL_W:
+        if h <= 0 or w <= 0:
             return
         p.save()
-        # 只在右缘 26px 作画；编辑器因滚动 / 输入整篇重绘时也不会越界
-        p.setClipRect(QRect(w - self.RAIL_W, 0, self.RAIL_W, h))
+        # 只在覆盖层右缘那条 RAIL_W 窄带作画
+        p.setClipRect(QRect(xoff, 0, self.RAIL_W, h))
         p.setRenderHint(QPainter.Antialiasing, True)
-        xoff = w - self.RAIL_W          # rail 局部坐标 → viewport 坐标
-        cy = self.cursor_y()
+        cy = self.cursor_y() + yshift
         (ys, s1, c1, s2, c2, s3, c3, env, pen_main,
-         pen_mist_wide, pen_mist_near, brush_mist) = self._build_cache(h, cy)
+         pen_mist_wide, pen_mist_near, brush_mist,
+         ion_grad) = self._build_cache(h, cy)
         # 三条波各有自己的相位累加器（见 _tick），回绕对波形完全无感
         cp, sp = _math.cos(self.phase), _math.sin(self.phase)
         cp2, sp2 = _math.cos(self.phase2), _math.sin(self.phase2)
-        cp3, sp3 = _math.cos(self.phase3), _math.sin(self.phase3)
 
         # 1) 主浪 / 副浪的所有 x 一次算完：每点只剩乘加，无 sin / exp
         xs = []
@@ -11565,44 +14325,22 @@ class _WaveRail(QWidget):
             self._draw_mist(p, xs, ys, h, xoff,
                             pen_mist_wide, pen_mist_near, brush_mist)
 
-        if self._quality >= 1:
-            path2 = QPainterPath()
-            for i, v in enumerate(ys):
-                x2 = xs[i] + 2.5 - 2.6 * (s3[i] * cp3 - c3[i] * sp3)
-                if i == 0:
-                    path2.moveTo(QPointF(xoff + x2, v))
-                else:
-                    path2.lineTo(QPointF(xoff + x2, v))
-            p.setPen(self._pen_low)
-            p.drawPath(path2)
+        # 3) 离子流：沿波浪流动的连续电离辉光。完整画质才叠流动明带；
+        #    降级时退化为单层柔光 + 静态细芯；最低画质只保底一条主线。
+        if self._quality >= 2:
+            self._draw_ion_flow(p, xs, ys, h, xoff, ion_grad, self.flow)
+        elif self._quality == 1:
             p.setPen(self._pen_glow)
             p.drawPath(path)
+            p.setPen(QPen(QBrush(ion_grad), 1.6, Qt.SolidLine, Qt.RoundCap))
+            p.drawPath(path)
+        else:
+            p.setPen(pen_main)
+            p.drawPath(path)
 
-        p.setPen(pen_main)
-        p.drawPath(path)
-
-        # 3) 当前行：曲线上的珊瑚红光点。用径向渐变散焦，边缘完全化开，
-        #    不再是截图里那颗硬边圆点；渐变建在原点，靠平移复用。
-        if -12 <= cy <= h + 12:
-            cx = xoff + self.wave_x(cy, cy)
-            p.setPen(Qt.NoPen)
-            p.translate(cx, cy)
-            p.setBrush(QBrush(self._dot_halo))
-            p.drawEllipse(QPointF(0.0, 0.0), 15.0, 15.0)
-            p.setBrush(QBrush(self._dot_core))
-            p.drawEllipse(QPointF(0.0, 0.0), 6.0, 6.0)
-            p.translate(-cx, -cy)
-
-        # 4) 说明书段落标题：只留曲线上的暖色光点，不再画横向亮柱
-        titles = self._title_points(h)
-        if titles:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(self._dot_title))
-            for yy in titles:
-                cx = xoff + self.wave_x(yy, cy)
-                p.translate(cx, yy)
-                p.drawEllipse(QPointF(0.0, 0.0), 4.2, 4.2)
-                p.translate(-cx, -yy)
+        # 波浪上原有的点状橙色光点（当前行光点 + 段落标题锚点）已按需求移除；
+        # 光标所在行的主浪仍按 _color_at 呈橙色并向上下平滑过渡，但那是一段
+        # 连续色带而非脱离曲线的圆点，符合「去掉光点、保留暖色渐变」的效果。
         p.restore()
 
         # 自适应：先减绘制层数，仍吃力就降帧率；反之逐级恢复。
@@ -11631,6 +14369,2191 @@ class _WaveRail(QWidget):
             self._quality_hold = 40
 
 
+class _BorderWaveLayer(QWidget):
+    """窗口最右缘「边框带」上的波浪覆盖层（单例，挂在 MainWindow）。
+
+    为什么不再画在 QTextEdit.viewport 里：viewport 的 painter 画不出自身边界，
+    波形无论怎么调都会被裁在文字输入区内，看起来永远「浮在文本框内」。早期
+    曾把半透明子控件叠进 viewport，导致 Qt 每帧把整篇文档标脏而卡顿。
+
+    现在把波形画到这个与 viewport **兄弟**的覆盖层上：它贴住窗口最右缘、
+    覆盖 editor 边框到窗口外框那段 13px 框带，亮芯（离右缘 1~10px）因此落在
+    editor 细边框之外、真正骑在窗口右边框上；宽柔光向左轻微溢出到文字区右缘
+    形成自然内晕。由于是兄弟控件，update 它至多让 Qt 把与之重叠的一条窄带
+    标脏（完全不重叠时文档 0 次重绘），不会重演整篇重绘卡顿。
+
+    单个实例服务所有文档页：每帧从当前可见编辑器取它的 _WaveRail（相位、缓存、
+    光标、画质降级状态）来画，切页/缩放时由 MainWindow 调 place() 重新对齐。
+    """
+
+    # 覆盖层总宽：RAIL_W(26) 波形带 + 左侧柔光溢出余量。
+    LEFT_PAD = 8
+    LAYER_W = _WaveRail.RAIL_W + LEFT_PAD   # 34
+    # 整层相对「窗口最右缘」向左挪出的量：波形因此离开右边框、往正文区里移。
+    SHIFT_LEFT = 4
+    # 底部渐隐长度：覆盖层止于状态栏上沿，末端让波浪平滑淡出，不硬切一刀。
+    BOTTOM_FADE = 32
+    # 顶部渐隐长度：覆盖层顶贴着文档标签下沿（「+」按钮那一行），波形在那里
+    # 本来是整条被标签栏水平截断的硬边；上端按同样思路淡入，亮芯从无到有
+    # 长出来，和下方标签栏的过渡才顺。取值略大于底部，因为顶部还压着段头。
+    TOP_FADE = 56
+    # 浪面粒子：总数封顶，单颗寿命 1~2.6s；每段按文字量决定每秒发射几颗。
+    MOTE_MAX = 84
+    MOTE_RATE = (1.5, 12.0)     # (空段, 满段) 每秒颗粒数
+    MOTE_TIER_R = (1.15, 1.6, 2.15)
+    # 射流拖尾：(回溯秒数, 残影透明度系数)。粒子以 55~185px/s 上喷，
+    # 回溯 0.05~0.12s ≈ 5~23px 的渐隐尾巴，贴着浪面曲线弯曲。
+    MOTE_TRAIL = ((0.05, 0.42), (0.12, 0.16))
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)  # 不挡边缘缩放/点击
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        self.setFocusPolicy(Qt.NoFocus)
+        # 覆盖层顶相对编辑器视口顶的上移量：波形纵坐标准确对齐光标行。
+        self._cy_shift = 0.0
+        # 离屏缓冲：底部渐隐遮罩必须作用在 QImage 上才可靠，尺寸不变时复用。
+        self._wave_buf = QImage()
+        # ---- 波浪上飘散的粒子（「粒子浪」）----
+        # 三段的段色粒子沿浪面随机飘散；密度与速度按该段文字量走，
+        # 段头粒子飞到右沿时也并进来（add_feed），左右两股合成一条回路。
+        self._motes = []
+        self._mote_sprites = {}
+        self._mote_acc = [0.0, 0.0, 0.0]     # 每段一个发射池（按段序）
+        self._mote_clock = QElapsedTimer()
+        self._mote_clock.start()
+        self._mote_last = 0.0
+        self._feed_cool = -99.0
+        self._mote_key = None
+        self.hide()   # 默认隐藏，只有当前文本页可见时才显示
+        # 让覆盖层盖在 centralWidget / tab 区之上，但不越过 4 条边缘缩放手柄
+        self.raise_()
+
+    def _current_editor(self):
+        """当前显示、且承载光标的文本编辑器。
+
+        以 `QTabWidget.currentWidget()` 为准；分栏模式下它是三分区容器，
+        再往下取「被激活的那一段」，波形才会跟着那一段的光标走。
+        """
+        win = self.window()
+        if win is None:
+            return None
+        try:
+            ed = _wave_editor_of(win.tab_widget_text.currentWidget())
+        except Exception:
+            ed = None
+        if ed is None:
+            ed = _wave_editor_of(getattr(win, 'active_textcomponent', None))
+        return ed if (ed is not None and ed.isVisible()) else None
+
+    # ---- 浪面粒子 ------------------------------------------------------
+    def _now(self):
+        return self._mote_clock.nsecsElapsed() / 1000000.0
+
+    def add_feed(self, color, y):
+        """段头粒子的交接点：在 y 处投一颗粒子，由浪接手继续飘。
+
+        段头那条束流在右沿淡到看不见，同一高度要有东西接住，否则「流进
+        粒子浪」只是一句话。这里限流，避免十几个粒子同时抵达时糊成一团。
+        """
+        try:
+            h = float(self.height())
+            if h <= 4:
+                return
+            now = self._now()
+            if now - self._feed_cool < 60.0:
+                return
+            self._feed_cool = now
+            y = max(2.0, min(h - 2.0, float(y)))
+            self._motes.append(self._new_mote(QColor(color), y, feed=True))
+            if len(self._motes) > self.MOTE_MAX:
+                del self._motes[:len(self._motes) - self.MOTE_MAX]
+        except Exception:
+            pass
+
+    def _new_mote(self, color, y, feed=False):
+        """一颗粒子：沿浪面向上**射出**（不是飘），颜色 = 段色（三成掺反色）。
+
+        旧版 vy 只有 5~26px/s，看着像悬浮的灰尘；现在提到 55~185px/s，
+        两成粒子再提速 35% 当「快束」——速度差本身就有喷射的层次感。
+        拖尾由绘制阶段沿曲线回溯的渐隐残影负责（见 _paint_motes ③）。
+        """
+        c = QColor(color)
+        inv = random.random() < 0.30
+        if inv:
+            c = QColor(255 - c.red(), 255 - c.green(), 255 - c.blue())
+        life = random.uniform(1.6, 3.4) if feed else random.uniform(1.1, 2.6)
+        vy = -random.uniform(55.0, 185.0)
+        if random.random() < 0.20:
+            vy *= 1.35                    # 少数快束，拉出速度差
+        return {
+            'y': float(y),
+            # 横向偏移相对浪面：正 = 偏向窗口外框，负 = 探进文字区
+            'x0': random.uniform(-2.5, 6.0),
+            'vx': random.uniform(-4.0, 9.0),
+            'vy': vy,                     # 主方向向上（射流）
+            'life': 1.0,
+            'decay': 1.0 / life,
+            'color': c,
+            'tier': 0 if random.random() < 0.55 else (
+                1 if random.random() < 0.72 else 2),
+            'peak': 1.0 if feed else random.uniform(0.62, 1.0),
+            'wob': random.uniform(0.25, 1.0),   # 抖动收小：射流是顺流，不是布朗运动
+            'wf': random.uniform(0.5, 1.6),
+            'wp': random.uniform(0.0, 6.283),
+        }
+
+    def _bands(self, ed, h):
+        """按 y 把波浪切成「段带」：每段一条，颜色 / 文字量各归各的。
+
+        返回 [(颜色, 顶, 底, 密度0..1)]，坐标是覆盖层局部 y。单框模式
+        没有分段，就整条给一个蓝色带，密度按整篇字数算。
+        """
+        host = getattr(ed, '_pane_host', None)
+        if host is not None and getattr(host, 'mode', 'panes') == 'panes' \
+                and getattr(host, 'stack', None) is not None \
+                and host.stack.currentWidget() is not getattr(host, 'single', None):
+            out = []
+            try:
+                base = self.mapToGlobal(QPoint(0, 0)).y()
+                horiz = host.split.orientation() == Qt.Horizontal
+            except Exception:
+                return out
+            for key in PANE_KEYS:
+                head = (getattr(host, '_heads', None) or {}).get(key)
+                box = (getattr(host, '_boxes', None) or {}).get(key)
+                if head is None or box is None or not head.isVisible():
+                    continue
+                try:
+                    if host._folded.get(key):
+                        continue
+                    top = head.mapToGlobal(QPoint(0, 0)).y() - base
+                except Exception:
+                    continue
+                top = max(0.0, float(top))
+                bottom = min(float(h), top + float(box.height()))
+                if bottom - top < 10.0:
+                    continue
+                out.append((QColor(head._color), top, bottom,
+                            float(head.intensity()), box.x()))
+            if out:
+                if horiz:
+                    # 横排时三栏并排、纵向完全重叠，且只有最右一栏贴着边框：
+                    # 取它一条铺满整高，否则三色粒子在同一段 y 上糊成杂色
+                    best = max(out, key=lambda b: b[4])
+                    return [best[:4]]
+                return [b[:4] for b in out]
+        # 单框（或拿不到分段几何）：整条带用权要的蓝，密度按全文长度
+        try:
+            chars = len(ed.toPlainText() or '')
+        except Exception:
+            chars = 0
+        return [(QColor(PANE_SPECS[0][2]), 0.0, float(h),
+                 min(1.0, (chars / 2600.0) ** 0.5))]
+
+    def _curve_x(self, y, h, cy, rail, w):
+        """浪面在某一行 y 上的局部 x（与 _WaveRail 的主浪同一条公式）。"""
+        k = 2.0 * _math.pi / rail.WAVE_LEN
+        s1 = _math.sin(k * y + rail.phase)
+        s2 = _math.sin(k * 0.61 * y + 1.15 + rail.phase2)
+        env = 0.30 + 0.70 * _math.exp(-((y - cy) / 118.0) ** 2)
+        norm = 0.62 * s1 + 0.38 * s2
+        xr = (rail.RAIL_W - rail.BASE_PAD - rail.EDGE_INSET
+              - (rail.AMP * env * (0.5 + 0.5 * norm)))
+        return (w - rail.RAIL_W) + xr
+
+    def _mote_sprite(self, color, tier):
+        """预渲染一颗浪面粒子：亮心 + 一圈极淡的光晕（比逐帧画圆快得多）。"""
+        key = (color.rgb(), tier)
+        sp = self._mote_sprites.get(key)
+        if sp is not None:
+            return sp
+        dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
+        r = self.MOTE_TIER_R[tier]
+        L = r * 2.6 * 2.0 + 4.0             # 精灵边长（逻辑像素）
+        pm = QPixmap(max(1, int(L * dpr)), max(1, int(L * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        pp = QPainter(pm)
+        try:
+            pp.setRenderHint(QPainter.Antialiasing, True)
+            cx = cy = L / 2.0
+            rg = QRadialGradient(cx, cy, r * 2.6)
+            c0 = QColor(color)
+            c0.setAlpha(255)
+            c1 = QColor(color)
+            c1.setAlpha(120)
+            c2 = QColor(color)
+            c2.setAlpha(0)
+            rg.setColorAt(0.0, c0)
+            rg.setColorAt(0.40, c1)
+            rg.setColorAt(1.0, c2)
+            pp.setPen(Qt.NoPen)
+            pp.setBrush(QBrush(rg))
+            pp.drawEllipse(QPointF(cx, cy), r * 2.6, r * 2.6)
+        finally:
+            pp.end()
+        self._mote_sprites[key] = pm
+        return pm
+
+    def _paint_motes(self, p, ed, rail, w, h, bands=None):
+        """推进并画出浪面粒子：按段带发射（密度∝字数），再逐颗绘飘散。"""
+        if h <= 4:
+            return
+        now = self._now()
+        dt = (now - self._mote_last) / 1000.0
+        self._mote_last = now
+        if dt <= 0.0 or dt > 0.25:
+            dt = 1.0 / 60.0
+        cy = rail.cursor_y() + self._cy_shift
+        if bands is None:
+            bands = self._bands(ed, h)
+
+        # ① 发射：每条段带一个池子，速率随该段文字量（0.8 → 8.5 颗/秒）
+        lo_rate, hi_rate = self.MOTE_RATE
+        for i, (_c, top, bot, k) in enumerate(bands[:3]):
+            rate = lo_rate + (hi_rate - lo_rate) * k
+            self._mote_acc[i] += rate * dt
+            while self._mote_acc[i] >= 1.0:
+                self._mote_acc[i] -= 1.0
+                self._motes.append(
+                    self._new_mote(_c, random.uniform(top, bot)))
+        if len(self._motes) > self.MOTE_MAX:
+            del self._motes[:len(self._motes) - self.MOTE_MAX]
+
+        # ② 推进
+        alive = []
+        for m in self._motes:
+            m['life'] -= m['decay'] * dt
+            if m['life'] <= 0.0:
+                continue
+            m['y'] += m['vy'] * dt
+            m['x0'] += m['vx'] * dt
+            if m['y'] < -6.0 or m['y'] > h + 6.0:
+                continue
+            alive.append(m)
+        self._motes = alive
+
+        # ③ 绘制：贴着浪面，颜色就是该段的蓝 / 紫 / 黄。
+        # 射流拖尾：粒子快速上喷，残影沿**浪面曲线**向下游（运动反方向）
+        # 回溯三级渐隐——尾巴贴着波形弯曲，不是一条直棍；残影复用同一张
+        # 精灵（只改透明度），每颗多 3 次贴图，30 颗粒子实测仍 <0.5ms。
+        p.setRenderHint(QPainter.Antialiasing, True)
+        trail = self.MOTE_TRAIL
+        for m in self._motes:
+            # 寿命两端淡入淡出，避免凭空出现 / 消失
+            a = min(1.0, m['life'] * 3.0) * min(1.0, (1.0 - m['life']) * 7.0)
+            a *= m['peak']
+            if a <= 0.03:
+                continue
+            wob = _math.sin(m['y'] * 0.05 + m['wp']) * m['wob']
+            x = (self._curve_x(m['y'], h, cy, rail, w)
+                 + m['x0'] + wob)
+            if x < 1.0 or x > w - 1.0:
+                continue
+            sp = self._mote_sprite(m['color'], m['tier'])
+            L = self.MOTE_TIER_R[m['tier']] * 2.6 * 2.0 + 4.0
+            # 残影：时间上回溯 t 秒前的位置（vy 为负，回溯点在其下方），
+            # 横向按曲线取 x，摆动也按当时的 y 重算——尾巴才会跟着浪弯
+            for dt_b, ka in trail:
+                gy = m['y'] - m['vy'] * dt_b
+                if gy < -2.0 or gy > h + 2.0:
+                    continue
+                gw = _math.sin(gy * 0.05 + m['wp']) * m['wob']
+                gx = self._curve_x(gy, h, cy, rail, w) + m['x0'] + gw
+                if gx < 1.0 or gx > w - 1.0:
+                    continue
+                p.setOpacity(a * ka)
+                p.drawPixmap(QPointF(gx - L / 2.0, gy - L / 2.0), sp)
+            p.setOpacity(a)
+            p.drawPixmap(QPointF(x - L / 2.0, m['y'] - L / 2.0), sp)
+        p.setOpacity(1.0)
+
+    def place(self):
+        """贴住窗口右缘，纵向从文档标签下沿到状态栏上沿。
+        顶部锚到 _doc_tab_bottom()，与「+」按钮下沿首尾相接，按钮得以和
+        文档标签等高；覆盖层相对 viewport 上移的量记进 _cy_shift，绘制时
+        补回光标行 y，橙色高亮不会错位。
+        底部止于状态栏上沿：编辑区底缘到状态栏之间那几像素仍由波浪补齐，
+        但状态栏（缩放 / 字数等控件所在的那一行）保持干净，不被雾带盖住；
+        末端用 BOTTOM_FADE 平滑淡出，避免竖线被硬切断。
+        """
+        win = self.window()
+        if win is None:
+            return
+        ed = self._current_editor()
+        if ed is None:
+            self.hide()
+            # 角落按钮与波形同进同退：切到「+」占位页等非文本页时别留一枚
+            # 孤零零的「+」悬在没有波形的右上角。
+            sync = getattr(win, '_position_doc_add_btn', None)
+            if sync is not None:
+                sync()
+            return
+        vp = ed.viewport()
+        # viewport 在窗口坐标系里的位置（窗口无边框，client 原点即窗口左上）
+        tl = vp.mapTo(win, QPoint(0, 0))
+        W, H = win.width(), win.height()
+        anchor = None
+        get_bottom = getattr(win, '_doc_tab_bottom', None)
+        if get_bottom is not None:
+            try:
+                anchor = get_bottom()
+            except Exception:
+                anchor = None
+        # 只允许把起点上移到标签下沿；异常几何下退回 viewport 顶，绝不画到
+        # 标签栏内部去盖住标签文字。
+        top = tl.y() if anchor is None else min(tl.y(), max(0, anchor))
+        self._cy_shift = float(tl.y() - top)
+        # 底边截到状态栏上沿。状态栏隐藏 / 几何异常时回退到窗口底边，
+        # 保证装饰层永远有合法高度。
+        bottom = H
+        status = getattr(win, 'status', None)
+        if status is not None and status.isVisible():
+            sy = status.mapTo(win, QPoint(0, 0)).y()
+            if top < sy < H:
+                bottom = sy
+        geom = QRect(W - self.LAYER_W - self.SHIFT_LEFT, top,
+                     self.LAYER_W, max(1, bottom - top))
+        # 编辑器每次 paintEvent 都会调 place()（连续打字时每秒上百次）。
+        # 几何没变就别再 setGeometry/show：前者可能让 Qt 把覆盖层连同下层
+        # 一起标脏，等于每个字多画一帧波浪。
+        if self.geometry() != geom:
+            self.setGeometry(geom)
+        # 不在这里 raise_()：编辑器每次 paintEvent 都会调 place()，若顺手把
+        # 自己提到最上，会盖掉右上角压在波浪之上的「+」按钮。层级统一由
+        # MainWindow._position_edge_bars() 决定（layer 先、按钮后）。
+        if not self.isVisible():
+            self.show()
+
+    def hideEvent(self, ev):
+        # 隐藏时清空粒子：切回别的页签再回来时，旧坐标会先闪一下残影
+        self._motes = []
+        self._mote_acc = [0.0, 0.0, 0.0]
+        super().hideEvent(ev)
+
+    def paintEvent(self, event):
+        # PyQt 虚拟方法里的未捕获异常会直接终止进程；装饰是纯视觉，兜住。
+        try:
+            ed = self._current_editor()
+            rail = getattr(ed, 'wave_rail', None) if ed is not None else None
+            if rail is None:
+                return
+            w, h = self.width(), self.height()
+            buf = self._wave_buf
+            if buf.width() != w or buf.height() != h:
+                buf = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+                self._wave_buf = buf
+            buf.fill(0)
+            bp = QPainter(buf)
+            try:
+                # 段带算一次共用：波浪基色按它分段（上蓝 → 中紫 → 下金），
+                # 浪面粒子的颜色 / 密度也按它来
+                bands = self._bands(ed, h)
+                # 波形带靠覆盖层右侧对齐，左侧 LEFT_PAD 留给柔光向左溢出
+                rail.paint_to(bp, w, h, w - _WaveRail.RAIL_W,
+                              self._cy_shift, bands)
+                # 浪面粒子：贴着波浪飘散的蓝 / 紫 / 黄三色微粒，段头飞来的
+                # 粒子也并在这里，左右两股在同一层里合成一条循环
+                self._paint_motes(bp, ed, rail, w, h, bands)
+                # 顶部渐隐：上端同样作用在 QImage 上（理由同下），让波形从
+                # 标签栏下沿缓缓长出来，而不是被截成一条齐刷刷的亮线。
+                # 窗口很矮时按剩余高度收紧，免得上下两段遮罩叠在一起双重淡出。
+                fh = min(self.BOTTOM_FADE, h)
+                th = min(self.TOP_FADE, max(0, h - fh))
+                if th > 0:
+                    fade = QLinearGradient(0.0, 0.0, 0.0, float(th))
+                    fade.setColorAt(0.0, QColor(0, 0, 0, 0))
+                    fade.setColorAt(0.35, QColor(0, 0, 0, 70))
+                    fade.setColorAt(0.72, QColor(0, 0, 0, 190))
+                    fade.setColorAt(1.0, QColor(0, 0, 0, 255))
+                    bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+                    bp.fillRect(QRectF(0.0, 0.0, float(w), float(th)),
+                                QBrush(fade))
+                    bp.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                # 底部渐隐：覆盖层止于状态栏上沿，把末端那一段波形连雾光
+                # 一起平滑淡出。遮罩必须作用在 QImage 上——半透明子控件的
+                # widget painter 在 QWidget::render 的合成路径里会吞掉
+                # DestinationIn，直接画在窗口上等于没淡出。
+                if fh > 0:
+                    y0 = float(h - fh)
+                    fade = QLinearGradient(0.0, y0, 0.0, float(h))
+                    fade.setColorAt(0.0, QColor(0, 0, 0, 255))
+                    fade.setColorAt(0.55, QColor(0, 0, 0, 150))
+                    fade.setColorAt(1.0, QColor(0, 0, 0, 0))
+                    bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+                    bp.fillRect(QRectF(0.0, y0, float(w), float(fh)),
+                                QBrush(fade))
+                    bp.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            finally:
+                bp.end()
+            p = QPainter(self)
+            try:
+                p.drawImage(0, 0, buf)
+            finally:
+                p.end()
+        except Exception:
+            pass
+
+
+# ==================== 正文三分区：权利要求书 / 说明书 / 说明书摘要 ====================
+# 顺序即显示顺序：权要最上（套件、权项条数最多人先看），说明书居中（篇幅最大），
+# 摘要最下（最短、写完基本不动）。颜色沿用全局强调色系，一眼能分清段。
+PANE_SPECS = (
+    ('claims', '权利要求书', '#4d8dff', '1.一种……，其特征在于……'),
+    ('desc',   '说明书',     '#a78bfa', '技术领域 / 背景技术 / 发明内容 / 附图说明 / 具体实施方式'),
+    ('abs',    '说明书摘要', '#f3b23c', '本发明公开了一种……，解决了……问题'),
+)
+PANE_KEYS = tuple(k for k, _l, _c, _p in PANE_SPECS)
+PANE_LABEL = dict((k, l) for k, l, _c, _p in PANE_SPECS)
+
+
+def pane_ink(color, t=0.62):
+    """段头文字的「墨色」：段色向白提亮后再用。
+
+    直接用段的饱和色写字（#4d8dff 之类）压在同色渐变上，明度太接近，
+    字会发闷、边缘发糊；提亮 62% 后既保留了「这一段是什么颜色」的身份感，
+    又能在深底上站稳，无需加粗也能读清。
+    """
+    c = QColor(color)
+    return QColor(int(c.red() + (255 - c.red()) * t),
+                  int(c.green() + (255 - c.green()) * t),
+                  int(c.blue() + (255 - c.blue()) * t)).name()
+
+
+def pane_swap_icon(size=13, color='#a8b9cc'):
+    """段头右端的「横排 / 竖排」小图标：一上一下两支箭头。
+
+    `⇅` 这个字形在 11px 下会挤成一团墨点，手画一支才看得出是「切换方向」。
+    按 2 倍分辨率绘制，高 DPI 下也干净。
+    """
+    s = float(size) * 2.0
+    pm = QPixmap(int(s), int(s))
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    try:
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color))
+        pen.setWidthF(s * 0.105)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        u = s / 26.0                     # 以 26 为设计格，缩放方便
+        # 左：向上的箭头
+        p.drawLine(QPointF(8 * u, 20 * u), QPointF(8 * u, 7.5 * u))
+        p.drawLine(QPointF(4.5 * u, 11 * u), QPointF(8 * u, 7.5 * u))
+        p.drawLine(QPointF(11.5 * u, 11 * u), QPointF(8 * u, 7.5 * u))
+        # 右：向下的箭头
+        p.drawLine(QPointF(18 * u, 6 * u), QPointF(18 * u, 18.5 * u))
+        p.drawLine(QPointF(14.5 * u, 15 * u), QPointF(18 * u, 18.5 * u))
+        p.drawLine(QPointF(21.5 * u, 15 * u), QPointF(18 * u, 18.5 * u))
+    finally:
+        p.end()
+    pm.setDevicePixelRatio(2.0)
+    return QIcon(pm)
+
+
+def doc_head_kind(s, maxlen=20):
+    """判断一行是不是文档级大标题：claims / abstract / other / sec / ''。
+
+    「说　明　书」「【说明书】」「（一）说明书：」「说明书（续）」都要认出来——
+    认不出来就会出现「说明书的标题被当成权利要求书最后一行」。
+    与 MainWindow._doc_head_kind 同一口径，抽成模块函数供三分区共用。
+    """
+    s = (s or '').strip('　 \t')
+    if not s or len(s) > maxlen:
+        return ''
+    # 句子级终止标点结尾的是正文行，不是大标题：摘要段里的「摘要。」
+    # 曾被判成 abstract 标题，重分发时整块被吃掉（正文凭空少一行）。
+    # 「摘要：」「（一）说明书：」这类冒号结尾仍按标题处理。
+    if s[-1] in '。，、；！？':
+        return ''
+    try:
+        if fc._canon_section(s):
+            return 'sec'
+    except Exception:
+        pass
+    key = re.sub(r'[\s\u3000]+', '', fc._bare_head(s)).strip('：:')
+    if not key:
+        return ''
+    key = re.sub(r'[（(](续|完|共\d+页)[)）]$', '', key)
+    _MAP = {'权利要求书': 'claims', '权利要求': 'claims',
+            '说明书摘要': 'abstract', '摘要': 'abstract',
+            '说明书': 'other', '说明书附图': 'other', '摘要附图': 'other'}
+    if key in _MAP:
+        return _MAP[key]
+    for name, kind in _MAP.items():
+        if key.startswith(name) and len(key) - len(name) <= 4:
+            return kind
+    return ''
+
+
+_CLAIM_NUM_RE = re.compile(r'^\s*\d{1,3}\s*[.、．]\s*\S')
+_CLAIM_WORD_RE = re.compile(r'其特征在于|其特征是|其特征为|根据权利要求'
+                            r'|如权利要求|根据权利要求书|所述')
+# 摘要段的常见起头：「本发明公开了一种…」「本实用新型涉及…」「一种…」
+# 「本发明不限于…」这类结尾套话不算（去掉「不/并非」开头的写法）。
+_ABS_START_RE = re.compile(
+    r'^(?:本(?:发明|实用新型|申请|公开|发明创造)(?:专利)?(?:实施例)?'
+    r'(?:公开|提供|涉及|属于|请求保护|保护|披露|提出|给出)'
+    r'|一种)')
+_ABS_MIN, _ABS_MAX = 40, 600      # 摘要（含标点）一般 50~300 字，留足余量
+
+
+def _looks_like_claims(reg):
+    """权利要求区域的特征：有编号权项，且出现划界词 / 引用在前权项的写法。"""
+    if not reg or len(reg) < 20:
+        return False
+    hits = 0
+    for ln in reg.split('\n'):
+        if _CLAIM_NUM_RE.match(ln.strip()):
+            hits += 1
+            if hits >= 2:
+                break
+    if hits < 1:
+        return False
+    if _CLAIM_WORD_RE.search(reg):
+        return True
+    # 「1.一种X，包括A和B。」这种不写划界词的写法也认
+    return bool(re.match(r'^\s*1\s*[.、．]\s*一种', reg)) and (
+        '包括' in reg or '包含' in reg)
+
+
+def _match_block(nonempty, block_texts):
+    """在非空行序列里定位一整段（首尾行都要对上），返回起始序号；找不到 None。"""
+    n = len(block_texts)
+    if n <= 0 or n > len(nonempty):
+        return None
+    head, tail = block_texts[0], block_texts[-1]
+    for i in range(len(nonempty) - n + 1):
+        if nonempty[i][1] != head or nonempty[i + n - 1][1] != tail:
+            continue
+        if all(nonempty[i + k][1] == block_texts[k] for k in range(n)):
+            return i
+    return None
+
+
+def _claims_range(lines):
+    """按格式在正文行里认权利要求块，返回 (起始行号, 结束行号)；认不出 None。
+
+    只认「编号权项 + 划界词」这种明确写法，普通段落不会被切走。
+    """
+    raw = '\n'.join(lines)
+    try:
+        reg = fc.claims_region(raw).strip()
+    except Exception:
+        return None
+    if not _looks_like_claims(reg):
+        return None
+    ne = [(i, ln.strip()) for i, ln in enumerate(lines) if ln.strip()]
+    rl = [s for s in (x.strip() for x in reg.split('\n')) if s]
+    at = _match_block(ne, rl)
+    if at is None:
+        return None
+    return (ne[at][0], ne[at + len(rl) - 1][0])
+
+
+def _tail_abstract_at(nonempty):
+    """从后往前找「摘要段」，返回该段在 nonempty 里的起始序号；找不到 None。
+
+    nonempty 是 [(真实行号, 去空白文本)]。判定：以「本发明公开了…/一种…」起头、
+    长度像摘要（40~600 字）、整段没有章节小标题也没有编号权项——避免把
+    「本发明不限于上述实施例」这类结尾套话误当摘要。
+    """
+    for k in range(len(nonempty) - 1, -1, -1):
+        s = re.sub(r'^\[\d{3,5}\]\s*', '', nonempty[k][1])
+        if not _ABS_START_RE.match(s):
+            continue
+        body = [t for _i, t in nonempty[k:]]
+        text = '\n'.join(body)
+        if len(text) < _ABS_MIN or len(text) > _ABS_MAX:
+            continue
+        if any(doc_head_kind(t) for t in body):
+            continue
+        if any(_CLAIM_NUM_RE.match(t) for t in body):
+            continue
+        # 摘要里不会出现「本实施例」，出现就是具体实施方式的描述
+        if '本实施例' in text or '实施例中' in text:
+            continue
+        return k
+    return None
+
+
+def _trim_seg(lines):
+    """去掉段首尾的空行。"""
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return '\n'.join(lines)
+
+
+def panes_split_text(text):
+    """整篇正文 → 三段文本 {'claims','desc','abs'}，标题行本身丢弃（面板上已有段名）。
+
+    ① 有「权利要求书 / 说明书 / 说明书摘要」大标题 → 按标题切；
+    ② 一个标题都没有 → 按**格式**切：规则引擎认出的权利要求块（编号 + 划界词），
+       以及末尾以「本发明…/一种…」起头的短段（摘要）；
+    ③ 有「说明书」标题但没写「权利要求书 / 摘要」标题 → 再从说明书正文里
+       把权要块和末尾摘要段剥出来，剩下的才是说明书。
+    任何一步认不出就不切：宁可整篇归说明书，也不把说明书正文塞进权要框。
+    """
+    raw = (text or '').replace('\u2029', '\n').replace('\r', '\n')
+    lines = raw.split('\n')
+    has_head = any(doc_head_kind(ln) in ('claims', 'abstract', 'other')
+                   for ln in lines)
+    if not has_head:
+        segs = _panes_split_no_head(raw, lines)
+        if segs is not None:
+            return segs
+    out = dict((k, []) for k in PANE_KEYS)
+    cur = None
+    for ln in lines:
+        kind = doc_head_kind(ln)
+        # 只把「权利要求书 / 说明书 / 说明书摘要」这类文档大标题当分区边界；
+        # 「技术领域 / 背景技术」是说明书内部小标题，必须原样留在正文里。
+        if kind in ('claims', 'abstract', 'other'):
+            cur = {'claims': 'claims', 'abstract': 'abs', 'other': 'desc'}[kind]
+            continue
+        out[cur or 'desc'].append(ln)
+    segs = dict((k, _trim_seg(out[k])) for k in PANE_KEYS)
+
+    # ③-a 没写「说明书摘要」标题：说明书末尾那段「本发明公开了…」就是摘要
+    #     （先剥摘要再剥权要：权要识别会把「到文末为止」都算进去，会把摘要一起吞掉）
+    if not segs['abs'].strip() and segs['desc'].strip():
+        dl = segs['desc'].split('\n')
+        ne = [(i, ln.strip()) for i, ln in enumerate(dl) if ln.strip()]
+        at = _tail_abstract_at(ne)
+        if at is not None:
+            cut = ne[at][0]
+            segs['abs'] = _trim_seg(dl[cut:])
+            segs['desc'] = _trim_seg(dl[:cut])
+    # ③-b 没写「权利要求书」标题：正文里按格式把权要块剥出来
+    if not segs['claims'].strip() and segs['desc'].strip():
+        dl = segs['desc'].split('\n')
+        rng = _claims_range(dl)
+        if rng is not None:
+            segs['claims'] = _trim_seg(dl[rng[0]:rng[1] + 1])
+            segs['desc'] = _trim_seg(dl[:rng[0]] + [''] + dl[rng[1] + 1:])
+    return segs
+
+
+def _panes_split_no_head(raw, lines):
+    """无大标题时按格式切：① 权利要求块 ② 末尾摘要段；都认不出返回 None。
+
+    与旧实现的关键差别：权利要求块可能是**整篇开头**，也可能是
+    「说明书在前、权利要求书在后」的**末尾**，所以按行号区间定位，
+    而不是「把前 N 行当权要」——否则说明书在前时会把技术领域塞进权要框。
+    """
+    ne = [(i, ln.strip()) for i, ln in enumerate(lines) if ln.strip()]
+    if not ne:
+        return None
+    # 先找末尾摘要段（它一定在文末），再在剥离摘要后的正文里认权要块——
+    # 反过来的话，claims_region 会把「权要到文末」的摘要一起圈进权要。
+    abs_at = _tail_abstract_at(ne)
+    abs_rng = (ne[abs_at][0], ne[-1][0]) if abs_at is not None else None
+    keep = [i for i in range(len(lines))
+            if not (abs_rng and abs_rng[0] <= i <= abs_rng[1])]
+    body = [lines[i] for i in keep]
+    rng = _claims_range(body)
+    claims_rng = (keep[rng[0]], keep[rng[1]]) if rng is not None else None
+    if claims_rng is None and abs_rng is None:
+        return None
+    out = dict((k, []) for k in PANE_KEYS)
+    for i, ln in enumerate(lines):
+        if claims_rng and claims_rng[0] <= i <= claims_rng[1]:
+            out['claims'].append(ln)
+        elif abs_rng and abs_rng[0] <= i <= abs_rng[1]:
+            out['abs'].append(ln)
+        else:
+            out['desc'].append(ln)
+    return dict((k, _trim_seg(out[k])) for k in PANE_KEYS)
+
+
+class _PaneSplitHandle(QSplitterHandle):
+    """文档分区的分隔条：拖拽热区 4px，看得见的只有居中一条 1px 细线。
+
+    qdarkstyle 给 QSplitter::handle 塞了 5px 高度 + 1px padding + 一条贴图，
+    不管怎么改 QSS 都会留出一条 6~7px 的浅色粗带（像给三块正文各加了边框）。
+    这里直接自绘：底色铺成编辑区色（与正文融为一体），只在正中画一条发丝线。
+    """
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        try:
+            p.fillRect(self.rect(), QColor(PAL['bg']))
+            c = QColor(PAL['accent_soft'] if self.underMouse() else PAL['hairline'])
+            if self.orientation() == Qt.Vertical:
+                p.fillRect(QRect(0, self.height() // 2, self.width(), 1), c)
+            else:
+                p.fillRect(QRect(self.width() // 2, 0, 1, self.height()), c)
+        finally:
+            p.end()
+
+    def enterEvent(self, ev):
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self.update()
+        super().leaveEvent(ev)
+
+
+class _PaneSplit(QSplitter):
+    """把分隔条换成自绘的 1px 细线版。"""
+
+    def createHandle(self):
+        return _PaneSplitHandle(self.orientation(), self)
+
+
+class _PaneHead(QWidget):
+    """段头条：底色由左向右渐隐，段名左侧一条极淡的色标。
+
+    离子流是一条静态的「光缆」：一束极细的多色发光丝线（青/绿/品红/蓝/
+    橙/白），左端最密最亮、向右逐渐散开并淡出，像一束被拉长的光纤光迹。
+    整条头部（段色底纹 + 离子流）一次性烤进缓存图，平时每帧只贴图，零动画开销。
+
+    段内文字越多，离子流越亮（k 由宿主按字数换算）——密度本身就是字数可视化。
+    """
+
+    FADE_TO = 0.68         # 段色到这条线的位置彻底消失（之后只剩离子流）
+    FADE_MAX = 470         # 但最多只铺这么宽
+    # 宽窗（近 1000px 的段头）里若按比例铺色，小一半条都是色块，又闷又抢视线；
+    # 改成「按比例、但封顶一个绝对宽度」，颜色在小半条内就化开，右边留清爽。
+    BAR_GAP = 3.0          # 色标右缘：色标贴住段头左沿（= 正文左边缘）后，
+                           # 渐变就从这个 3px 宽的色标右侧起笔，别压在它上面
+    PEAK_ALPHA = 80        # 段色最浓处的基准不透明度（再按段的亮度微调）
+    # 离子流（光缆）：一束极细的多色发光丝线，左端最密最亮、向右散开淡出。
+    # 配色与参考页同系（青/绿/品红/蓝/橙/白绿）。
+    FIL_COUNT = 1          # 丝线总数：单条极淡的离子流丝线
+    FIL_X0 = 0.05          # 光缆起点（占宽比例），基本贴着色标右侧起笔
+    FIL_FAN = 0.42         # 向右散开的最大垂直幅度（占条高比例）
+    FIL_WIG = 0.11         # 丝线自身正弦摆动的幅度（占条高比例）
+    FIL_HALO = 2.6         # 丝线外层辉光宽度（px）
+    FIL_CORE = 0.85        # 丝线亮芯宽度（px）
+    # 调色板：青 / 绿 / 品红 / 蓝 / 橙 / 白绿
+    FIL_COLORS = ('#34e6ff', '#5dff9e', '#ff5dd0', '#5d8bff', '#ffb14d', '#e8fff3')
+
+    def __init__(self, color, parent=None):
+        super().__init__(parent)
+        self._color = QColor(color)
+        self._base = QColor(PAL['panel2'])      # 与其它面板同底
+        self._hair = QColor(PAL['hairline'])
+        self._fibers = []          # 光缆：一束多色发光丝线
+        self._hover = False        # 悬停时整条稍微提亮，暗示「这一条可以点」
+        # 整条头部的渲染缓存：段色底纹 + 离子流一起烤进一张图，
+        # 平时每帧只 drawPixmap，再重的渐变路径也不占帧时间
+        self._cache_pix = None
+        self._cache_key = None
+        # 段内文字量 →「离子流亮度」：0 = 空段，1 = 两三千字的长段。
+        # 满的段离子流更亮，空段几乎只剩几缕，一眼能看出哪段有货。
+        self._intensity = 0.0
+        # 是否「最后被点过的那一段」：亮字压过另外两条，形成焦点对比。
+        # None 表示尚未判定（首帧由 DocEditorPanes 统一刷一次，必定生效）。
+        self._emph = None
+        self._cap = None           # 段名 QLabel，由 _build_head 注入
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        # 整块底色自己刷满，不需要 Qt 先垫一层
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+
+    def _peak_alpha(self):
+        """按段的明度定最浓处的不透明度。
+
+        同一档 alpha 压在深底上，蓝色段只是「一层薄雾」，金黄段却亮得发脏；
+        按亮度反比调（越亮越淡），三条段的「存在感」才一致。
+        """
+        c = self._color
+        lum = (0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()) / 255.0
+        return max(50, min(88, int(round(self.PEAK_ALPHA - (lum - 0.53) * 130))))
+
+    def _fade_end(self):
+        """颜色彻底消失处的 x（像素）。渐变、粒子生成、淡出都以它为基准。"""
+        return max(1.0, min(self.width() * self.FADE_TO, float(self.FADE_MAX)))
+
+    # ---------- 密度 / 强调 ----------
+    def intensity(self):
+        """段内文字量的归一化值（0..1），右缘粒子浪按它定密度。"""
+        return self._intensity
+
+    def set_intensity(self, k):
+        """段内文字越多，离子流越亮（k 由宿主按字数换算）。
+
+        只改参数、不重建丝线表；参数变化让渲染缓存失效、下次重绘时按新亮度
+        重烤一张图。打字时离子流是「渐渐变亮」，而不是某一刻突然炸出一片。
+        """
+        k = max(0.0, min(1.0, float(k)))
+        if abs(k - self._intensity) < 0.02:
+            return
+        self._intensity = k
+        self._cache_key = None
+        self.update()
+
+    def set_emphasis(self, on):
+        """「最后被点过的那一段」段名更亮，另外两条压暗。
+
+        三条段头同亮度时，眼睛分不出「现在在写哪一段」；点过的那条把墨色
+        提亮到 0.70，其余压到 0.38 —— 仍是同色系，只是没有抢视线的力气，
+        不需要加粗、加框也能一眼定位当前段。
+        """
+        on = bool(on)
+        if on == self._emph:
+            return
+        self._emph = on
+        if self._cap is not None:
+            self._cap.setStyleSheet(
+                'color:%s;background:transparent;border:none;'
+                % pane_ink(self._color.name(), 0.70 if on else 0.38))
+        self._cache_key = None          # 底纹浓度随强调变，缓存要重烤
+        self.update()
+
+    # ---------- 光缆（多色光纤丝线） ----------
+    def _build_fibers(self, w, h, init=False):
+        """生成一束丝线：起点聚集在左端、向右散开，颜色在调色板里轮转。"""
+        cols = self.FIL_COLORS
+        n = self.FIL_COUNT
+        out = []
+        for i in range(n):
+            out.append({
+                'col': QColor(cols[i % len(cols)]),
+                'yoff': random.uniform(-0.16, 0.16),   # 左端起始垂直偏移
+                'fan': random.uniform(-1.0, 1.0),        # 向右散开方向/幅度
+                'wig': random.uniform(0.5, 1.3),         # 自身摆动幅度系数
+                'wk': random.uniform(0.018, 0.040),      # 摆动空间频率
+                'ph': random.uniform(0.0, 6.283),        # 摆动相位
+                'amp': random.uniform(0.62, 1.0),        # 亮度系数（有的暗一点）
+            })
+        self._fibers = out
+
+    def _fiber_y(self, f, x, w, h):
+        """丝线在某 x 处的纵坐标：左端聚拢、向右按 fan 散开，再叠自身正弦摆动。"""
+        x0 = self.FIL_X0 * w
+        u = 0.0 if x <= x0 else (x - x0) / max(1.0, (w - x0))
+        y = h * 0.5
+        y += f['yoff'] * h
+        y += f['fan'] * self.FIL_FAN * h * u
+        y += h * self.FIL_WIG * f['wig'] * math.sin(x * f['wk'] + f['ph'])
+        return y
+
+    # ---------- 生命周期 ----------
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._fibers:
+            self._build_fibers(self.width(), self.height())
+        self.update()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self._cache_key = None    # 让缓存按新亮度重烤一次
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self._cache_key = None
+        self.update()
+        super().leaveEvent(ev)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # 丝线用相对坐标（比例）描述，宽度变化自适配，无需重建；
+        # 只让渲染缓存失效重烤即可
+        self._cache_key = None
+        self.update()
+
+    # ---------- 绘制（整条烤进缓存，平时每帧只贴图） ----------
+
+    def _render(self, w, h):
+        """把「段色底纹 + 多色离子流」整张渲染进缓存，仅参数变化时重建。
+
+        离子流（光缆）是静态的：多色细丝左密右散、永不重画——所以整条头部
+        只在尺寸 / 亮度 / 强调 / 悬停变化时重烤一次，平时每帧只 drawPixmap，
+        把原先每帧 18 条丝线 × 2 遍渐变路径 + 18 个游走光点的开销降到几乎 0。
+        """
+        key = (w, h, round(self._intensity, 3), self._emph, self._hover)
+        if self._cache_pix is not None and self._cache_key == key:
+            return self._cache_pix
+        dpr = self.devicePixelRatioF() if hasattr(self, 'devicePixelRatioF') else 1.0
+        pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            # ① 静态底：面板底 + 横向渐隐的段色 + 底部发丝线
+            p.fillRect(QRect(0, 0, w, h), self._base)
+            span = self._fade_end()
+            # 渐变从色标右侧起笔：色标贴着段头左沿，整片颜色随之一起左移，
+            # 与下方正文的左边缘对齐，左边不再留一条空白底
+            x0g = self.BAR_GAP
+            g = QLinearGradient(x0g, 0.0, x0g + span, 0.0)
+            a = self._peak_alpha() + (16 if self._hover else 0)
+            # 不是「最后点过的那一段」→ 底纹整条压淡一点，把视线留给当前的段
+            if not self._emph:
+                a = int(a * 0.86)
+            for pos, k in ((0.0, 1.0), (0.14, 0.88), (0.36, 0.60),
+                           (0.60, 0.32), (0.82, 0.11), (1.0, 0.0)):
+                c = QColor(self._color)
+                c.setAlpha(int(a * k))
+                g.setColorAt(pos, c)
+            p.fillRect(QRectF(x0g, 0.0, span, float(h)), g)
+            p.fillRect(QRect(0, h - 1, w, 1), self._hair)
+            # ② 离子流（光缆）：静态多色丝线，Screen 叠加交叠处更亮
+            if self._fibers:
+                dim = 1.0 if self._emph else 0.80
+                hover = 1.12 if self._hover else 1.0
+                x0 = self.FIL_X0 * w
+                p.setCompositionMode(QPainter.CompositionMode_Screen)
+                for f in self._fibers:
+                    self._draw_fiber(p, f, x0, w, h, dim, hover)
+                p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        finally:
+            p.end()
+        self._cache_pix = pm
+        self._cache_key = key
+        return pm
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            w, h = self.width(), self.height()
+            if w <= 4:
+                return
+            if not self._fibers:
+                self._build_fibers(w, h)
+            p.drawPixmap(0, 0, self._render(w, h))
+        finally:
+            p.end()
+
+    def _draw_fiber(self, p, f, x0, w, h, dim, hover):
+        """画一条丝线：左亮右淡的渐变笔 + 外层辉光 + 亮芯（静态，无游走粒子）。"""
+        span = max(1.0, w - x0)
+        peak = self._peak_alpha() * (0.55 + 0.55 * self._intensity)
+        peak = peak * f['amp'] * dim * hover
+        peak = max(8.0, min(150.0, peak))
+        g = QLinearGradient(x0, 0.0, w, 0.0)
+        for pos, k in ((0.0, 1.0), (0.16, 0.82), (0.40, 0.50),
+                       (0.66, 0.24), (0.86, 0.09), (1.0, 0.0)):
+            c = QColor(f['col'])
+            c.setAlphaF(min(1.0, (peak / 255.0) * k))
+            g.setColorAt(pos, c)
+        path = QPainterPath()
+        n = max(10, int(span / 5))
+        for i in range(n + 1):
+            x = x0 + span * i / n
+            y = self._fiber_y(f, x, w, h)
+            if i == 0:
+                path.moveTo(QPointF(x, y))
+            else:
+                path.lineTo(QPointF(x, y))
+        p.setPen(QPen(QBrush(g), self.FIL_HALO, Qt.SolidLine, Qt.RoundCap))
+        p.drawPath(path)
+        c2 = QColor(f['col'])
+        c2.setAlphaF(min(1.0, peak / 255.0))
+        p.setPen(QPen(QBrush(c2), self.FIL_CORE, Qt.SolidLine, Qt.RoundCap))
+        p.drawPath(path)
+
+
+class _PaneRail(QWidget):
+    """横排收起后的「导轨」：紧贴边框的一条竖条，竖排段名 + 字数。
+
+    横排三栏把某段一路拖窄时，直接收成 28px 的竖条（文字旋转 90°），
+    而不是留一列半空的宽条 —— 看上去像抽屉收进边框，另外两栏立刻铺满。
+    """
+
+    def __init__(self, label, color, parent=None):
+        super().__init__(parent)
+        self._label = label or ''
+        self._color = QColor(color)
+        self._hover = False
+        self._emph = None      # 「最后点过的那一段」竖轨上的字也更亮
+        self.setObjectName('PaneRail')
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip('点一下展开「%s」' % self._label)
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+
+    def set_emphasis(self, on):
+        """横排收起后只剩这条竖轨：它也必须跟着「当前段」一起明暗。"""
+        on = bool(on)
+        if on == self._emph:
+            return
+        self._emph = on
+        self.update()
+
+    def _draw_rot90(self, p, text, color, font, top):
+        """从上往下竖排一段文字，返回这段文字占的高度。"""
+        p.setFont(font)
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        if not tw:
+            return 0
+        p.setPen(color)
+        p.save()
+        # rotate(-90) 后 +x 指向上方：把原点放到文字段的末端（下沿），文字向上长
+        p.translate(self.width() / 2.0 + fm.ascent() / 2.0 - 1.5, top + tw)
+        p.rotate(-90)
+        p.drawText(0, 0, text)
+        p.restore()
+        return tw
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            w, h = self.width(), self.height()
+            if self._hover:
+                c = QColor(self._color)
+                c.setAlpha(38)
+                p.fillRect(QRect(0, 0, w, h), c)
+            p.fillRect(QRect(0, 0, 3, h), self._color)
+            base = QFont(self.font())
+            f1 = QFont(base)
+            f1.setBold(True)
+            # 与横排段头同一套字色：段色提亮后在深底上才读得清；
+            # 当前段的竖轨同样更亮，与三条段头的明暗关系保持一致
+            self._draw_rot90(p, self._label,
+                             QColor(pane_ink(self._color.name(),
+                                             0.70 if self._emph else 0.42)),
+                             f1, 8)
+        finally:
+            p.end()
+
+
+class DocEditorPanes(QWidget):
+    """一份文档的正文容器，支持两种模式（「视图 → 正文分区」或 Ctrl+Alt+M 切换）。
+
+    分栏模式（默认）：权利要求书（上）/ 说明书（中）/ 说明书摘要（下）
+    * 三段各是独立编辑器 —— 光标、撤销栈、行号、右缘波形互不干扰；
+    * QSplitter 竖排：拖细到 1px 的分隔线改高度，双击三段均分，可整体切横排；
+    * 段头常显色条 + 段名（字数已去掉），**点段头 = 收起 / 展开本段**，收起后
+      相邻两段自动铺满（竖排留一条 26px 段头，横排留一条窄导轨，点一下还原）；
+    * 段头右键：复制本段 / 清空本段 / 收起展开 / 定位光标 / 均分 / 横竖排。
+
+    单框模式：原有的一个主文本框，整篇连续编辑，功能与改造前完全一致。
+
+    两种模式对外都是「一个编辑器」：`toPlainText/setPlainText/toHtml/setHtml/clear`
+    走全文聚合，`section_text` 在单框模式下按标题切分反推三段，其余方法和属性
+    一律转发给「当前有焦点的那一段」，主窗口其它功能（格式化、撤销、插图、
+    右键菜单、查找、导出 PDF…）不用改。
+    """
+
+    textChanged = pyqtSignal()
+
+    def __init__(self, factory, parent=None, on_layout=None):
+        super().__init__(parent)
+        self.setObjectName('DocPanes')
+        self.editors = {}
+        self._boxes = {}
+        self._heads = {}
+        self._rails = {}          # 横排收起后的窄导轨（竖排段名）
+        self._folded = dict((k, False) for k in PANE_KEYS)
+        self._fold_sync = False       # 折叠 / 展开过程中防止 splitterMoved 递归
+        self._restore_sizes = None
+        self._syncing = False
+        self._active = None
+        self._on_layout = on_layout
+        # 拖分隔条时不能每移动一像素就写一次 settings.json
+        self._layout_timer = QTimer(self)
+        self._layout_timer.setSingleShot(True)
+        self._layout_timer.setInterval(600)
+        self._layout_timer.timeout.connect(self._persist_layout)
+        # 段头粒子的密度 / 速度按段内字数走。不能每个按键都数一遍全文，
+        # 停手 350ms 后再换算一次：跟手，也不给输入法添堵。
+        self._density_timer = QTimer(self)
+        self._density_timer.setSingleShot(True)
+        self._density_timer.setInterval(350)
+        self._density_timer.timeout.connect(self._refresh_head_density)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        # 两种模式共用一个 QStackedWidget：
+        #   0 = 分栏（权要 / 说明书 / 摘要三块，可拖高度）
+        #   1 = 单框（原有的一个主文本框，整篇连续编辑）
+        self.mode = 'panes'
+        self.stack = QStackedWidget(self)
+        self.stack.setObjectName('DocPaneStack')
+        outer.addWidget(self.stack, 1)
+
+        self.split = _PaneSplit(Qt.Vertical, self)
+        self.split.setObjectName('PaneSplit')
+        self.split.setChildrenCollapsible(False)
+        # 热区 4px（好抓），可见部分只有 handle 自己画的 1px 细线
+        self.split.setHandleWidth(4)
+        self.split.setOpaqueResize(False)
+        self.split.splitterMoved.connect(lambda *a: self._layout_timer.start())
+        # 拖到很窄时自动收起该段（只留段头），拖回来再展开
+        self.split.splitterMoved.connect(self._on_splitter_moved)
+        self.split_host = QWidget(self)
+        self.split_host.setObjectName('PaneSplitHost')
+        hv = QVBoxLayout(self.split_host)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(0)
+        hv.addWidget(self.split)
+        self.stack.addWidget(self.split_host)
+
+        for key, label, color, ph in PANE_SPECS:
+            ed = factory()
+            ed._pane_key = key
+            ed._pane_host = self
+            ed.setObjectName('PaneEdit_' + key)
+            try:
+                ed.setPlaceholderText(ph)
+            except Exception:
+                pass
+            box = QWidget(self.split)
+            box.setObjectName('PaneBox')
+            v = QVBoxLayout(box)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(0)
+            head = self._build_head(key, label, color)
+            v.addWidget(head)
+            # 正文收起后 box 只剩段头：固定贴顶，否则竖排布局会把它居中
+            v.setAlignment(head, Qt.AlignTop)
+            v.addWidget(ed, 1)
+            # 横排收起时换成窄导轨：段头整条让位，只留一条竖排段名的窄边
+            rail = _PaneRail(label, color, box)
+            rail.hide()
+            v.addWidget(rail, 1)
+            rail.mousePressEvent = lambda ev, k=key: self._rail_clicked(k, ev)
+            # 收起后段头的 ⇅ 按钮也一起藏起来了，右键菜单留一个切换布局的出口
+            rail.setContextMenuPolicy(Qt.CustomContextMenu)
+            rail.customContextMenuRequested.connect(
+                lambda pos, k=key: self._rail_menu(
+                    k, self._rails[k].mapToGlobal(pos)))
+            self._rails[key] = rail
+            self.split.addWidget(box)
+            self.editors[key] = ed
+            self._boxes[key] = box
+            ed.textChanged.connect(self._on_sub_changed)
+            ed.cursorPositionChanged.connect(self._on_cursor_moved)
+            ed.installEventFilter(self)
+            if self._active is None:
+                self._active = ed
+        # 单框模式用的整篇编辑器：与分段编辑器同一工厂（行号 / 波形 / 右键菜单都在）
+        self.single = factory()
+        self.single._pane_key = 'single'
+        self.single._pane_host = self
+        self.single.setObjectName('PaneEdit_single')
+        self.stack.addWidget(self.single)
+        self.single.textChanged.connect(self._on_sub_changed)
+        self.single.cursorPositionChanged.connect(self._on_cursor_moved)
+        self.single.installEventFilter(self)
+        self.stack.setCurrentWidget(self.split_host)
+        for i in range(1, len(PANE_KEYS)):
+            self.split.setCollapsible(i, True)
+        # 分隔条双击 = 三段均分（QSplitterHandle 没有公开信号，只能事件过滤）
+        for i in range(1, self.split.count()):
+            h = self.split.handle(i)
+            if h is not None:
+                h.installEventFilter(self)
+                h.setCursor(Qt.SplitVCursor)
+                h.setToolTip('拖动改高度 · 双击三段均分')
+        self.split.setSizes([300, 620, 220])
+        # 首帧先定一次「谁最亮」与离子流亮度：打开文档就分得出当前段
+        self._refresh_head_emphasis()
+        self._density_timer.start()
+
+    # ---------- 段头 ----------
+    def _build_head(self, key, label, color):
+        # 底色不交给样式表：由 _PaneHead 自绘「左浓右隐的渐变 + 末端粒子流」
+        head = _PaneHead(color, self)
+        head.setObjectName('PaneHead')
+        head.setProperty('pane', key)
+        head.setFixedHeight(26)
+        h = QHBoxLayout(head)
+        # 左留白归零：色标贴住段头左沿，正好和下方正文的左边缘同 x。
+        # 间距补成 18 = 原来的 9（留白）+ 9（色标与段名的间隔），
+        # 这样只把「颜色部分」整体左移 9px，段名文字仍在原来的位置。
+        h.setContentsMargins(0, 0, 6, 0)
+        h.setSpacing(18)
+        # 色条做成一小段圆角竖条（不是顶天立地的宽边）：像一枚色标，
+        # 而不是「左边糊了一条色块」，段头也才有呼吸感
+        bar = QFrame(head)
+        bar.setFixedSize(3, 14)
+        bar.setStyleSheet('background:%s;border:none;border-radius:1.5px;' % color)
+        h.addWidget(bar, 0, Qt.AlignVCenter)
+        cap = QLabel(label, head)
+        cap.setObjectName('PaneTitle')
+        # 内联再声明一次透明底：控件级样式表优先级最高，避免被 qdarkstyle 的
+        # `QLabel { background-color:#19232d }` 抢回去（段头条更浅，会出现深色小方块）
+        cap.setStyleSheet('color:%s;background:transparent;border:none;'
+                          % pane_ink(color))
+        # 中文小字加一点点字距，12px 下不会糊成一团，也更有标题感
+        _f = QFont(cap.font())
+        _f.setLetterSpacing(QFont.AbsoluteSpacing, 0.8)
+        cap.setFont(_f)
+        # 横排三栏时要把某段一路拖窄藏起来，文字不能反过来撑住最小宽度：
+        # 段名给 Ignored + stretch 1 吃掉剩余空间（文字左对齐，窄到放不下自然裁切）。
+        cap.setMinimumWidth(0)
+        cap.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        h.addWidget(cap, 1)
+        # 段头持有段名：强调切换改字色
+        head._cap = cap
+        # 布局切换只挂在第一段的段头右端：段头一行本来就够挤，不另起工具条
+        if key == PANE_KEYS[0]:
+            lay = QToolButton(head)
+            lay.setObjectName('PaneBtn')
+            lay.setIcon(pane_swap_icon())
+            lay.setIconSize(QSize(13, 13))
+            lay.setToolTip('切换布局：三栏竖排（默认）/ 三栏横排')
+            lay.setCursor(Qt.PointingHandCursor)
+            lay.setFixedSize(20, 18)
+            lay.clicked.connect(self.toggle_orientation)
+            h.addWidget(lay, 0, Qt.AlignVCenter)
+            self._lay_btn = lay
+        self._heads[key] = head
+        # 点段头 = 收起 / 展开本段；
+        # 右键 = 复制本段 / 清空本段 / 均分 / 横竖排
+        head.setCursor(Qt.PointingHandCursor)
+        head.setToolTip('点击收起「%s」：空出来的位置由另外两段补上' % label)
+        head.mousePressEvent = lambda ev, k=key: self._head_clicked(k, ev)
+        head.setContextMenuPolicy(Qt.CustomContextMenu)
+        head.customContextMenuRequested.connect(
+            lambda pos, k=key: self._head_menu(k, head.mapToGlobal(pos)))
+        return head
+
+    def _head_clicked(self, key, ev=None):
+        """点段头条 = 收起 / 展开这一段，空出来的位置由相邻两段立刻填满。
+
+        收起后段头仍然留着（竖排一条 26px 的条、横排一条窄导轨），
+        再点一下就还原 —— 不设按钮，段头本身就是开关。
+        """
+        if ev is not None and ev.button() != Qt.LeftButton:
+            return
+        ed = self.editors.get(key)
+        if ed is None:
+            return
+        # 点过哪条，哪条的字就亮起来（哪怕接下来是收起它）
+        self._set_active_editor(ed)
+        if self._folded.get(key):
+            self._set_folded(key, False)
+            self._set_active_editor(ed)
+            ed.setFocus()
+            return
+        # 最后一段正文不许收：三段全收起就成了一块空白，没有落脚点
+        if sum(1 for k in PANE_KEYS if not self._folded.get(k)) <= 1:
+            self._flash_hint('至少保留一段正文', self._heads.get(key))
+            return
+        self._set_folded(key, True)
+
+    def _flash_hint(self, text, widget=None):
+        """在控件上方弹一句短提示（不用 QMessageBox，免得打断操作）。"""
+        try:
+            w = widget if widget is not None else self
+            QToolTip.showText(w.mapToGlobal(w.rect().center()), text, w)
+        except Exception:
+            pass
+
+    def _head_menu(self, key, gpos):
+        """段头右键菜单：本段相关操作，省得去记快捷键。"""
+        ed = self.editors.get(key)
+        if ed is None:
+            return
+        menu = QMenu(self)
+        menu.addAction('复制本段全文', lambda: self._copy_section(key))
+        menu.addAction('清空本段', lambda: self._clear_section(key))
+        menu.addAction('三段均分', self.equalize)
+        menu.addAction('三栏横排 / 竖排', self.toggle_orientation)
+        menu.exec_(gpos)
+
+    def _copy_section(self, key):
+        ed = self.editors.get(key)
+        if ed is None:
+            return
+        try:
+            QApplication.clipboard().setText(ed.toPlainText())
+        except Exception as e:
+            print('Error Code 705', e)
+
+    def _clear_section(self, key):
+        ed = self.editors.get(key)
+        if ed is None or not ed.toPlainText().strip():
+            return
+        if QMessageBox.question(
+                self, '清空本段',
+                '确定清空「%s」的全部内容？该操作可用 Ctrl+Z 撤销。' % PANE_LABEL[key],
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        ed.clear()
+
+    # ---------- 焦点 / 当前段 ----------
+    def eventFilter(self, obj, ev):
+        try:
+            if ev.type() == QEvent.FocusIn and getattr(obj, '_pane_key', None):
+                self._set_active_editor(obj)
+            # 分隔条拖动 / 折叠 / 窗口缩放：当前段 viewport 位置变了，
+            # 右缘波形要跟着重新对齐，否则光标行高亮会错位。
+            elif ev.type() == QEvent.Resize and getattr(obj, '_pane_key', None):
+                self._sync_wave_layer()
+            # 分隔条双击 = 三段均分（QSplitterHandle 没有双击信号）
+            elif (ev.type() == QEvent.MouseButtonDblClick
+                    and isinstance(obj, QSplitterHandle)):
+                self.equalize()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _on_cursor_moved(self):
+        sender = self.sender()
+        if sender is getattr(self, 'single', None):
+            self._set_active_editor(sender)
+        elif sender in self.editors.values():
+            self._set_active_editor(sender)
+
+    def _on_sub_changed(self):
+        if self._syncing:
+            return
+        self.textChanged.emit()
+        if self._density_timer is not None:
+            self._density_timer.start()
+
+    # ---------- 段头：密度 / 强调 / 与右缘波浪的接力 ----------
+    def _refresh_head_density(self):
+        """段内字数 → 段头粒子强度（0..1）。
+
+        用平方根而非线性：几百字就该有「有内容」的密度，两三千字以后再涨
+        得慢一些，免得长段糊成一片光点。
+        """
+        for key, ed in self.editors.items():
+            head = self._heads.get(key)
+            if head is None:
+                continue
+            try:
+                n = len(ed.toPlainText())
+            except Exception:
+                n = 0
+            head.set_intensity(min(1.0, (n / 2600.0) ** 0.5))
+
+    def _refresh_head_emphasis(self):
+        """最后被点过的那一段字最亮，另外两条压暗。"""
+        active = self._active if self._active in self.editors.values() else None
+        for key, ed in self.editors.items():
+            head = self._heads.get(key)
+            if head is not None:
+                head.set_emphasis(ed is active)
+            rail = self._rails.get(key)
+            if rail is not None:
+                rail.set_emphasis(ed is active)
+
+    # ---------- 模式：分栏 / 单框 ----------
+    def set_mode(self, mode, migrate=True, persist=True):
+        """在「三栏分栏」与「单个主文本框」之间切换，正文互相搬运。
+
+        * 分栏 → 单框：三段按顺序 + 段名小标题合成整篇（HTML 搬运，保留字体/图片）；
+        * 单框 → 分栏：按文档大标题切回三段（没有标题时只认领权要写法，
+          其余整篇放说明书，绝不乱猜）；
+        * 新建的空白文档直接换页，不做内容搬运。
+        """
+        mode = 'single' if mode == 'single' else 'panes'
+        if mode == getattr(self, 'mode', 'panes'):
+            return
+        self._syncing = True
+        try:
+            if mode == 'single':
+                if migrate and any(self.editors[k].toPlainText().strip() for k in PANE_KEYS):
+                    self.single.setHtml(self.toHtml())
+                self.stack.setCurrentWidget(self.single)
+                self._active = self.single
+            else:
+                if migrate and self.single.toPlainText().strip():
+                    for k in PANE_KEYS:
+                        self.editors[k].clear()
+                    self._fill_from_document(self.single.document(), replace=False)
+                self.stack.setCurrentWidget(self.split_host)
+                self._active = self.editors['desc']
+        finally:
+            self._syncing = False
+        self.mode = mode
+        self._sync_wave_layer()      # 波形要挂到新模式下真正的编辑器上
+        self._refresh_head_emphasis()
+        if self._density_timer is not None:
+            self._density_timer.start()
+        if persist:
+            self._persist_layout()
+
+    # ---------- 聚合：伪装成一个编辑器 ----------
+    def _is_single(self):
+        return getattr(self, 'mode', 'panes') == 'single'
+
+    def is_panes_mode(self):
+        """给外部（如「生成摘要」）判断当前是三栏还是单框。"""
+        return not self._is_single()
+
+    def wave_editor(self):
+        """右缘波形该跟随哪个编辑器：当前被激活的那一段。
+
+        段被折叠（隐藏）时退回第一个可见段——波形不能挂在看不见的控件上，
+        否则光标行高亮会画在一条不存在的位置。
+        """
+        if self._is_single():
+            return self.single if self.single.isVisible() else None
+        cur = self._active
+        if isinstance(cur, QTextEditWithLineNum) and cur.isVisible():
+            return cur
+        for key in PANE_KEYS:
+            ed = self.editors[key]
+            if ed.isVisible():
+                return ed
+        return None
+
+    def _set_active_editor(self, ed):
+        """切换当前段。段变了就重新对齐右缘波形（每段 viewport 起点不同）。"""
+        if ed is None:
+            return
+        changed = ed is not self._active
+        self._active = ed
+        if changed:
+            # 当前段字更亮、其余压暗；波形的橙色高亮跟着换段
+            self._refresh_head_emphasis()
+            self._sync_wave_layer()
+
+    def _sync_wave_layer(self):
+        """把右缘波形覆盖层对齐到当前段的 viewport，并唤醒它的动画。"""
+        try:
+            win = self.window()
+            layer = getattr(win, '_border_wave_layer', None)
+            if layer is None or not self.isVisible():
+                return
+            layer.place()
+            layer.update()
+            rail = getattr(self._active, 'wave_rail', None)
+            if rail is not None and not rail._timer.isActive():
+                rail.set_active(True)
+        except Exception as e:
+            print('Error Code 706', e)
+
+    def _split_single(self):
+        """单框模式下的整篇 → 三段（带缓存，按文档版本号失效）。"""
+        text = self.single.toPlainText()
+        try:
+            rev = (self.single.document().revision(), len(text))
+        except Exception:
+            rev = None
+        cache = getattr(self, '_split_cache', None)
+        if rev and cache and cache[0] == rev:
+            return cache[1]
+        out = panes_split_text(text)
+        self._split_cache = (rev, out)
+        return out
+
+    def toPlainText(self):
+        if self._is_single():
+            return self.single.toPlainText()
+        parts = []
+        for key in PANE_KEYS:
+            t = self.editors[key].toPlainText().strip('\n')
+            if t.strip():
+                parts.append(PANE_LABEL[key] + '\n' + t)
+        return '\n\n'.join(parts)
+
+    def section_text(self, key):
+        if self._is_single():
+            return self._split_single().get(key, '')
+        ed = self.editors.get(key)
+        return ed.toPlainText() if ed is not None else ''
+
+    def set_section_text(self, key, text):
+        if self._is_single():
+            segs = dict(self._split_single())
+            segs[key] = text or ''
+            parts = [PANE_LABEL[k] + '\n' + segs[k] for k in PANE_KEYS if segs[k].strip()]
+            self.setPlainText('\n\n'.join(parts))
+            return
+        ed = self.editors.get(key)
+        if ed is None:
+            return
+        self._syncing = True
+        try:
+            ed.setPlainText(text or '')
+        finally:
+            self._syncing = False
+
+    def setPlainText(self, text):
+        self._syncing = True
+        try:
+            if self._is_single():
+                self.single.setPlainText(text or '')
+            else:
+                segs = panes_split_text(text)
+                for key in PANE_KEYS:
+                    self.editors[key].setPlainText(segs[key])
+        finally:
+            self._syncing = False
+        self._split_cache = None
+        if self._density_timer is not None:
+            self._density_timer.start()
+
+    def clear(self):
+        """两种模式一起清：切过去时不会凭空冒出旧内容。"""
+        self._syncing = True
+        try:
+            for key in PANE_KEYS:
+                self.editors[key].clear()
+            self.single.clear()
+        finally:
+            self._syncing = False
+        self._split_cache = None
+
+    def toHtml(self):
+        """三段按顺序拼成一份 HTML，段名单独占一段（草稿/导出都能再拆回来）。
+
+        不能用 insertHtml 拼：insertHtml 会把内容并进当前段落，段名和第一段
+        正文挤成一行（「权利要求书1.一种…」），切回去时标题就认不出来了。
+        这里段名用 insertText 单独落段，正文用 insertFragment 保留原分块。
+        """
+        if self._is_single():
+            return self.single.document().toHtml()
+        doc = QTextDocument()
+        cur = QTextCursor(doc)
+        cur.movePosition(QTextCursor.End)
+        bold = QTextCharFormat()
+        bold.setFontWeight(QFont.Bold)
+        first = True
+        for key in PANE_KEYS:
+            ed = self.editors[key]
+            if not ed.toPlainText().strip():
+                continue
+            if not first:
+                cur.insertBlock()
+            cur.insertText(PANE_LABEL[key], bold)
+            cur.insertBlock()
+            cur.insertFragment(QTextDocumentFragment(ed.document()))
+            cur.movePosition(QTextCursor.End)
+            first = False
+        return doc.toHtml()
+
+    def setHtml(self, html):
+        """把一份 HTML 按段名切回三段，逐块搬运以保留字体/颜色/图片。"""
+        self._syncing = True
+        try:
+            if self._is_single():
+                self.single.setHtml(html or '')
+                return
+            for key in PANE_KEYS:
+                self.editors[key].clear()
+            if not (html or '').strip():
+                return
+            tmp = QTextDocument()
+            tmp.setHtml(html)
+            self._fill_from_document(tmp, replace=False)
+        except Exception as e:
+            print('Error Code 701', e)
+        finally:
+            self._syncing = False
+
+    def _fill_from_document(self, src, replace=True):
+        """把一份文档按大标题搬进三段（保留每块的字体/颜色/图片）。
+
+        没有大标题时（用户自己写的连续稿）不能一股脑儿塞进说明书：
+        先用 fc.claims_region 认出开头的权利要求块，按块数切走，剩下归说明书。
+        """
+        if replace:
+            for key in PANE_KEYS:
+                self.editors[key].clear()
+        cursors = dict((k, QTextCursor(self.editors[k].document())) for k in PANE_KEYS)
+        filled = dict((k, False) for k in PANE_KEYS)
+        section = None
+        lead, lead_left = 'desc', None
+        heads = None
+        try:
+            # 只有「权利要求书 / 说明书 / 说明书摘要」才算大标题；
+            # 「技术领域 / 背景技术」是说明书内部小标题，认成边界会把它们从正文里抹掉
+            heads = [b for b in self._iter_blocks(src)
+                     if doc_head_kind(b.text()) in ('claims', 'abstract', 'other')]
+            if not heads:
+                # 没有标题就按格式分（编号权项 / 「本发明公开了…」摘要），
+                # 位置无关——权要在文末也能认出来，不像 _lead_plan 只认开头
+                if self._fill_by_format(src):
+                    return
+                lead, lead_left = self._lead_plan(src)
+        except Exception:
+            lead, lead_left = 'desc', None
+        for block in self._iter_blocks(src):
+            kind = doc_head_kind(block.text())
+            if kind in ('claims', 'abstract', 'other'):
+                section = {'claims': 'claims', 'abstract': 'abs',
+                           'other': 'desc'}[kind]
+                continue
+            if section is not None:
+                target = section
+            elif lead_left is None:
+                target = lead
+            else:
+                target = lead if lead_left > 0 else 'desc'
+                if block.text().strip():
+                    lead_left -= 1
+            if not block.text().strip():
+                continue
+            bc = QTextCursor(block)
+            bc.select(QTextCursor.BlockUnderCursor)
+            html_frag = QTextDocumentFragment(bc).toHtml()
+            c = cursors[target]
+            c.movePosition(QTextCursor.End)
+            # 不要先 insertBlock()：fragment 是块级片段，插入时自己会另起一段，
+            # 再加一个空块就等于每两段之间多留一整行空白（F5 反复执行会不断累积）。
+            c.insertHtml(html_frag)
+            cursors[target] = c
+            filled[target] = True
+        for k in PANE_KEYS:
+            self._trim_doc(self.editors[k])      # 去掉搬运时多出的首尾空段落
+        self._split_cache = None
+
+    def _fill_by_format(self, src=None):
+        """没有分区大标题时按格式分三段（编号权项 / 「本发明公开了…」摘要）。
+
+        与 _lead_plan 的区别是**位置无关**：权要可能在文首，也可能在文末
+        （说明书在前、权利要求书在后的常见排版），按行号区间切才不会切错。
+        文档里有图片就放弃——纯文本搬运会丢图，宁可整篇留在说明书里。
+        返回 True 表示已经填好三段。
+        """
+        doc = src if src is not None else self.single.document()
+        try:
+            if '<img' in doc.toHtml():
+                return False
+        except Exception:
+            return False
+        segs = panes_split_text(doc.toPlainText())
+        if not (segs['claims'].strip() or segs['abs'].strip()):
+            return False
+        old = self._syncing
+        self._syncing = True
+        try:
+            for k in PANE_KEYS:
+                self.editors[k].setPlainText(segs[k])
+        finally:
+            self._syncing = old
+        self._split_cache = None
+        return True
+
+    @staticmethod
+    def _block_blank(block):
+        """真空段落才算空白：带图片的段落 text() 也是空，不能删。"""
+        if block.text().strip():
+            return False
+        try:
+            return block.begin().atEnd()
+        except Exception:
+            return False
+
+    @classmethod
+    def _trim_doc(cls, ed):
+        doc = ed.document()
+        while doc.blockCount() > 1 and cls._block_blank(doc.firstBlock()):
+            c = QTextCursor(doc)
+            c.movePosition(QTextCursor.Start)
+            c.deleteChar()
+        while doc.blockCount() > 1 and cls._block_blank(doc.lastBlock()):
+            c = QTextCursor(doc)
+            c.movePosition(QTextCursor.End)
+            c.deletePreviousChar()
+
+    @staticmethod
+    def _iter_blocks(doc):
+        block = doc.begin()
+        while block.isValid():
+            yield block
+            block = block.next()
+
+    @staticmethod
+    def _lead_plan(src):
+        """无大标题时：开头算不算权利要求书，以及它占多少块。"""
+        text = src.toPlainText()
+        try:
+            reg = fc.claims_region(text).strip()
+        except Exception:
+            reg = ''
+        if reg and len(reg) >= 20 and ('其特征在于' in reg
+                                       or re.match(r'^\s*1\s*[.、．]', reg)):
+            n = len([ln for ln in reg.split('\n') if ln.strip()])
+            if n < len([ln for ln in text.split('\n') if ln.strip()]):
+                return 'claims', n
+        return 'desc', None
+
+    # ---------- 跨段查找 ----------
+    def _order(self):
+        if self._is_single():
+            return ['single']
+        order = list(PANE_KEYS)
+        try:
+            cur = self._active._pane_key
+            i = order.index(cur)
+            return order[i:] + order[:i]
+        except Exception:
+            return order
+
+    def _editor_of(self, key):
+        return self.single if key == 'single' else self.editors[key]
+
+    def find_forward(self, needle):
+        if not needle:
+            return False
+        for i, key in enumerate(self._order()):
+            ed = self._editor_of(key)
+            doc = ed.document()
+            start = ed.textCursor() if i == 0 else QTextCursor(doc)
+            found = doc.find(needle, start)
+            if not found.isNull():
+                self._set_active_editor(ed)
+                ed.setFocus()
+                ed.setTextCursor(found)
+                ed.ensureCursorVisible()
+                return True
+        return False
+
+    def find_backward(self, needle):
+        if not needle:
+            return False
+        for i, key in enumerate(self._order()):
+            ed = self._editor_of(key)
+            doc = ed.document()
+            if i == 0:
+                start = ed.textCursor()
+            else:
+                start = QTextCursor(doc)
+                start.movePosition(QTextCursor.End)
+            found = doc.find(needle, start, QTextDocument.FindBackward)
+            if not found.isNull():
+                self._set_active_editor(ed)
+                ed.setFocus()
+                ed.setTextCursor(found)
+                ed.ensureCursorVisible()
+                return True
+        return False
+
+    # ---------- 折叠 / 布局 ----------
+    # 折叠没有任何按钮：把某段一路拖到很窄（竖排拖到只剩段头、横排拖到只剩
+    # 一条竖导轨）就自动收起；点一下收起的段头 / 导轨再展开。
+    MIN_PANE_V = 26         # 竖排收起后只剩段头高度
+    MIN_RAIL_H = 28         # 横排收起后的宽：贴边框一条竖轨，段名竖排
+    FOLD_SLACK = 6          # 拖到「极限 + 这个值」就认定用户想收起
+
+    def _fold_limit(self, key):
+        """拖到小于这个尺寸就收起。
+
+        竖排时布局压不下去（编辑器自身有最小高度），所以阈值要按「段头 +
+        编辑器最小高」算，用户拖到底才会触发；横排同理用宽度判断。
+        """
+        head = self._heads.get(key)
+        if head is None:
+            return self.MIN_PANE_V
+        if self.split.orientation() == Qt.Horizontal:
+            # 段头里的段名 / 字数 / ⇅ 撑住了最小宽度，横排压到 90 多像素就到底了；
+            # 阈值必须按「这段能压到的最小宽」算，否则永远拖不到 34px 的判定线。
+            box = self._boxes.get(key)
+            try:
+                w_min = box.minimumSizeHint().width() if box is not None else 0
+            except Exception:
+                w_min = 0
+            return max(self.MIN_RAIL_H, w_min) + self.FOLD_SLACK
+        ed = self.editors.get(key)
+        try:
+            ed_min = ed.minimumSizeHint().height() if ed is not None else 40
+        except Exception:
+            ed_min = 40
+        return (head.height() or 26) + ed_min + self.FOLD_SLACK
+
+    def _fold_size(self, key):
+        if self.split.orientation() == Qt.Horizontal:
+            return self.MIN_RAIL_H
+        head = self._heads.get(key)
+        return (head.height() if head is not None else 26) or 26
+
+    def _on_splitter_moved(self, pos, index):
+        """拖分隔条：拖到极限就收起，收起的段被「钉」在导轨尺寸上。
+
+        收起只看这条手柄两侧的两段：拖别人的手柄不该把已收起的段「弹开」；
+        展开不靠拖，点一下段头 / 导轨就行（余量总往收起段上跑，自动展开
+        会让人莫名其妙丢一条导轨）。
+        """
+        if self._fold_sync:
+            return
+        self._fold_sync = True
+        try:
+            sizes = self.split.sizes()
+            # 还没排版时 QSplitter 给的是 6/6/6 这类占位值，别把它当成「用户拖到底」
+            if sum(sizes) <= 3 * (self.MIN_PANE_V + self.FOLD_SLACK):
+                return
+            cand = [i for i in (index - 1, index)
+                    if 0 <= i < len(PANE_KEYS)]
+            # ① 先把这次拖到极限的那段收起来（最后一段不收：全收完就没正文可看了）
+            for i in cand:
+                k = PANE_KEYS[i]
+                if self._folded[k] or sizes[i] > self._fold_limit(k):
+                    continue
+                if all(self._folded[o] for o in PANE_KEYS if o != k):
+                    continue
+                self._set_folded(k, True)
+                sizes = self.split.sizes()
+            # ② 所有还收着的段一律钉回导轨尺寸，余出来的空间给没收回的段，
+            #    否则 QSplitter 会按比例把它又撑胖，导轨又变成一条空列
+            self._apply_sizes()
+        finally:
+            self._fold_sync = False
+
+    def _clamped_sizes(self, sizes=None):
+        """把收起的段夹回导轨尺寸，其余原样交给 QSplitter。
+
+        真正防止「导轨被撑胖」的是 _apply_fold 里设的 min==max 尺寸：
+        QSplitter 分配余量时会绕开它，多出来的空间自然落到没收起的段上。
+        """
+        out = list(self.split.sizes() if sizes is None else sizes)
+        for i, k in enumerate(PANE_KEYS):
+            if self._folded.get(k):
+                out[i] = self._fold_size(k)
+        return out
+
+    def _apply_sizes(self, sizes=None):
+        """setSizes + 折叠夹尺寸（内部自己压住 splitterMoved 的递归）。"""
+        fixed = self._clamped_sizes(sizes)
+        if fixed == self.split.sizes():
+            return
+        prev = self._fold_sync
+        self._fold_sync = True
+        try:
+            self.split.setSizes(fixed)
+        finally:
+            self._fold_sync = prev
+
+    def _set_folded(self, key, on):
+        """收起 / 展开某一段，并把该段尺寸调到「只剩段头」。"""
+        if key not in self.editors:
+            return
+        on = bool(on)
+        if self._folded.get(key) == on:
+            return
+        self._folded[key] = on
+        self._apply_fold(key)
+        sizes = self.split.sizes()
+        i = PANE_KEYS.index(key)
+        if on:
+            sizes[i] = self._fold_size(key)
+        else:
+            # 展开时至少给回「三段平均高度」。注意不能只把这一项改大就交给
+            # QSplitter：总和对不上时它会等比缩放所有项，刚展开的这段又被压扁，
+            # 所以这里直接从另外两段身上按比例扣回来。
+            total = sum(sizes)
+            need = max(self._fold_size(key) + 120, int(total / len(PANE_KEYS)))
+            if sizes[i] < need:
+                others = [j for j in range(len(sizes))
+                          if j != i and not self._folded.get(PANE_KEYS[j])]
+                base = sum(sizes[j] for j in others) or 1
+                add = need - sizes[i]
+                for j in others:
+                    cut = int(round(add * sizes[j] / float(base)))
+                    sizes[j] = max(self._fold_size(PANE_KEYS[j]) + 60, sizes[j] - cut)
+                sizes[i] = max(need, total - sum(sizes[j] for j in others))
+        self._apply_sizes(sizes)
+        self._layout_timer.start()
+
+    def toggle_fold(self, key):
+        if key not in self.editors:
+            return
+        self._set_folded(key, not self._folded[key])
+
+    def _apply_fold(self, key):
+        ed = self.editors[key]
+        folded = bool(self._folded[key])
+        horiz = self.split.orientation() == Qt.Horizontal
+        # 竖排收起留一条段头（26px 高），横排收起换成一条 28px 宽的竖导轨
+        rail_mode = folded and horiz
+        ed.setVisible(not folded)
+        head = self._heads.get(key)
+        if head is not None:
+            head.setVisible(not rail_mode)
+        rail = self._rails.get(key)
+        if rail is not None:
+            rail.setVisible(rail_mode)
+        # 收起的那一段把折叠方向的 min / max 都钉死：QSplitter 分配余量时
+        # 会绕开它，多出来的宽度只能给别的段，导轨也就不会「长胖」
+        box = self._boxes.get(key)
+        if box is None:
+            return
+        pin = self._fold_size(key)
+        if folded and horiz:
+            box.setMinimumWidth(pin)
+            box.setMaximumWidth(pin)
+        else:
+            box.setMaximumWidth(QWIDGETSIZE_MAX)
+            box.setMinimumWidth(0)
+        if folded and not horiz:
+            box.setMinimumHeight(pin)
+            box.setMaximumHeight(pin)
+        else:
+            box.setMaximumHeight(QWIDGETSIZE_MAX)
+            box.setMinimumHeight(0)
+        # 提示跟着状态走：收起时点它就是展开
+        if head is not None:
+            head.setToolTip(('点击展开「%s」' % PANE_LABEL[key]) if folded else
+                            ('点击收起「%s」：空出来的位置由另外两段补上'
+                             % PANE_LABEL[key]))
+
+    def _rail_clicked(self, key, ev=None):
+        """点竖导轨 = 展开该段，并把光标送回去。"""
+        if ev is not None and ev.button() != Qt.LeftButton:
+            return
+        self._set_folded(key, False)
+        ed = self.editors.get(key)
+        if ed is not None:
+            self._set_active_editor(ed)
+            ed.setFocus()
+
+    def _rail_menu(self, key, gpos):
+        # 展开不放在菜单里：点一下导轨就展开，菜单只留版面操作
+        menu = QMenu(self)
+        menu.addAction('三段均分', self.equalize)
+        menu.addAction('三栏横排 / 竖排', self.toggle_orientation)
+        menu.exec_(gpos)
+
+    def toggle_orientation(self):
+        if self.split.orientation() == Qt.Vertical:
+            self.split.setOrientation(Qt.Horizontal)
+            self._lay_btn.setText('⇄')
+            self._lay_btn.setToolTip('切换布局：三栏横排 / 三栏竖排（当前：横排）')
+        else:
+            self.split.setOrientation(Qt.Vertical)
+            self._lay_btn.setText('⇅')
+            self._lay_btn.setToolTip('切换布局：三栏竖排（默认）/ 三栏横排（当前：竖排）')
+        # 先换装配（竖排段头 ↔ 横排竖导轨），再定尺寸：
+        # 反过来的话，段头还没让位，28px 会被它的最小宽度顶回 90 多。
+        for k in PANE_KEYS:
+            self._apply_fold(k)
+        # 已收起的段按新方向的收起尺寸重设（竖排 26 高 ↔ 横排 28 宽）
+        if any(self._folded.values()):
+            self._apply_sizes()
+        self._persist_layout()
+
+    def equalize(self):
+        n = len(PANE_KEYS)
+        full = sum(self.split.sizes())
+        self._apply_sizes([full // n] * n)
+        self._persist_layout()
+
+    # ---------- 与主窗口的兼容层 ----------
+    def each_editor(self):
+        if self._is_single():
+            return [self.single]
+        return [self.editors[k] for k in PANE_KEYS]
+
+    def active_editor(self):
+        return self._active
+
+    def focus_editor(self, index=1):
+        if self._is_single():
+            self._set_active_editor(self.single)
+            self.single.setFocus()
+            return self.single
+        key = PANE_KEYS[index] if 0 <= index < len(PANE_KEYS) else PANE_KEYS[1]
+        ed = self.editors[key]
+        self._set_active_editor(ed)
+        ed.setFocus()
+        return ed
+
+    def setFocus(self, *a):
+        if self._active is not None:
+            self._active.setFocus()
+
+    def hasFocus(self):
+        return any(ed.hasFocus() for ed in self.each_editor())
+
+    def next_section(self, step=1):
+        """Ctrl+Tab 风格：在三段之间上下跳（单框模式下无效）。"""
+        if self._is_single():
+            return
+        try:
+            i = PANE_KEYS.index(self._active._pane_key)
+        except Exception:
+            i = 0
+        self.focus_editor((i + step) % len(PANE_KEYS))
+
+    def floats_payload(self):
+        out = []
+        for ed in self.each_editor():
+            try:
+                out.extend(ed.floats_payload())
+            except Exception:
+                pass
+        return out
+
+    def load_floats(self, data):
+        # 浮动图不参与分段：统一放在说明书段（篇幅最大、最适合放图）
+        try:
+            target = self.single if self._is_single() else self.editors['desc']
+            target.load_floats(data)
+        except Exception as e:
+            print('Error Code 702', e)
+
+    @property
+    def image_insert_mode(self):
+        return getattr(self._active, 'image_insert_mode', 'inline')
+
+    @image_insert_mode.setter
+    def image_insert_mode(self, mode):
+        for ed in self.each_editor():
+            try:
+                ed.image_insert_mode = mode
+            except Exception:
+                pass
+
+    # ---------- 必须显式转发的方法 ----------
+    # 工具栏是「构造期把信号连到方法对象」的：`bt_bold.toggled.connect(editor.setFontWeight)`
+    # 在 connect 那一刻就把绑定方法取走了。若交给 __getattr__ 转发，取到的是
+    # 「当时那一段」的绑定方法 → 加粗永远只作用在权利要求书上。所以这几个
+    # 必须在类上真定义，让方法在**调用时**才去问「当前是哪一段」。
+    def setFontWeight(self, w):
+        self._active.setFontWeight(w)
+
+    def setFontItalic(self, on):
+        self._active.setFontItalic(on)
+
+    def setFontUnderline(self, on):
+        self._active.setFontUnderline(on)
+
+    def setAlignment(self, a):
+        self._active.setAlignment(a)
+
+    def setCurrentFont(self, f):
+        self._active.setCurrentFont(f)
+
+    def setFontPointSize(self, s):
+        self._active.setFontPointSize(s)
+
+    def setText(self, text):
+        """QTextEdit.setText 的等价物：整篇替换（清空文档走的就是这里）。"""
+        if not (text or '').strip():
+            self.clear()
+        else:
+            self.setPlainText(text)
+
+    def setOverwriteMode(self, on):
+        for ed in self.each_editor():
+            try:
+                ed.setOverwriteMode(on)
+            except Exception:
+                pass
+
+    @property
+    def line_height(self):
+        return getattr(self._active, 'line_height', 1.5)
+
+    @line_height.setter
+    def line_height(self, v):
+        for ed in self._all_editors():
+            try:
+                ed.line_height = v
+            except Exception:
+                pass
+
+    # QWidget 自带 setFont/setStyleSheet，会挡住 __getattr__：不覆盖的话
+    # 「字体设置」「背景色」只会糊在容器上，正文一点不变。
+    def _all_editors(self):
+        eds = list(getattr(self, 'editors', {}).values())
+        s = getattr(self, 'single', None)
+        if s is not None:
+            eds.append(s)
+        return eds
+
+    def setFont(self, f):
+        for ed in self._all_editors():
+            try:
+                ed.setFont(f)
+            except Exception:
+                pass
+
+    def setStyleSheet(self, css):
+        for ed in self._all_editors():
+            try:
+                ed.setStyleSheet(css)
+            except Exception:
+                pass
+
+    def print_all(self, printer):
+        for i, ed in enumerate(self.each_editor()):
+            if not ed.toPlainText().strip():
+                continue
+            if i:
+                printer.newPage()
+            ed.document().print_(printer)
+
+    def layout_state(self):
+        return {'sizes': list(self.split.sizes()),
+                'orient': 'h' if self.split.orientation() == Qt.Horizontal else 'v',
+                'mode': getattr(self, 'mode', 'panes'),
+                'folded': [k for k in PANE_KEYS if self._folded.get(k)]}
+
+    def restore_layout(self, state):
+        try:
+            if not state:
+                return
+            if state.get('orient') == 'h':
+                self.split.setOrientation(Qt.Horizontal)
+                self._lay_btn.setText('⇄')
+            sizes = state.get('sizes') or []
+            if len(sizes) == len(PANE_KEYS) and sum(sizes) > 40:
+                self.split.setSizes(sizes)
+            # 收起状态一起恢复：28px 的导轨里塞不进正文，只留竖排段名
+            folded = set(state.get('folded') or [])
+            fixed = self.split.sizes()
+            for k in PANE_KEYS:
+                want = k in folded
+                if want != self._folded.get(k):
+                    self._folded[k] = want
+                    self._apply_fold(k)
+            # 尺寸和收起标记对不上（老版本存过 0 / 很窄）时，一律按收起处理，
+            # 否则会看到一条几十像素宽、里面还硬塞着正文的窄缝。
+            # 只认「小到只剩导轨」的尺寸；窗口还没 show 时分到的 6/6/6 是占位值，
+            # sum 太小就整段跳过，别把三段都当成收起。
+            if sum(fixed) > 3 * (self.MIN_PANE_V + self.FOLD_SLACK):
+                for i, k in enumerate(PANE_KEYS):
+                    if (not self._folded.get(k)
+                            and fixed[i] <= self._fold_size(k) + self.FOLD_SLACK):
+                        self._folded[k] = True
+                        self._apply_fold(k)
+            for i, k in enumerate(PANE_KEYS):
+                if self._folded.get(k):
+                    fixed[i] = self._fold_size(k)
+            if fixed != self.split.sizes():
+                self._apply_sizes(fixed)
+            # 模式恢复不搬正文：新建/打开文档时正文要么为空，要么随后由 setHtml 灌入
+            if state.get('mode') == 'single':
+                self.set_mode('single', migrate=False, persist=False)
+        except Exception:
+            pass
+
+    def _persist_layout(self):
+        """把三分区的模式 / 高度 / 横竖排记进 settings.json（防抖后调用）。"""
+        if self._on_layout is None:
+            return
+        try:
+            self._on_layout(self.layout_state())
+        except Exception as e:
+            print('Error Code 704', e)
+
+    # ---------- 兜底转发：没显式定义的属性都交给当前段 ----------
+    def __getattr__(self, name):
+        try:
+            ed = object.__getattribute__(self, '_active')
+        except Exception:
+            raise AttributeError(name)
+        if ed is None:
+            raise AttributeError(name)
+        return getattr(ed, name)
+
+
 class QTextEditWithLineNum(QTextEdit):
     """带左侧行号栏的多行文本编辑器，是 Fenrir 的核心编辑组件。"""
     sendmsg = pyqtSignal(object)
@@ -11649,7 +16572,7 @@ class QTextEditWithLineNum(QTextEdit):
 
         # 滚动时只需重画右缘窄带；显示半透明子控件会让 Qt 重绘整篇文档
         self.verticalScrollBar().valueChanged.connect(
-            self.wave_rail.invalidate)
+            lambda *_: self.wave_rail.invalidate())
         self.cursorPositionChanged.connect(self.update_cursor_doc_y)
         self.textChanged.connect(self.update_cursor_doc_y)
 
@@ -11672,26 +16595,26 @@ class QTextEditWithLineNum(QTextEdit):
         self._init_image_support()
 
     def paintEvent(self, event):
-        """文档由 QTextEdit 绘制完成后，把波形叠在右缘 26px 窄带上。
+        """文档仍由 QTextEdit 正常绘制；波形已迁到窗口右缘的覆盖层。
 
-        定时器只 update 这条窄带，因此 Qt 会把文档绘制裁剪到 26px，
-        不会像半透明子控件那样每帧重绘整篇文档（卡顿的主因）。
-        PyQt 虚拟方法里的异常会直接终止进程，这里全部兜住。
+        这里只在「切回本 tab / 窗口重新可见」时把自停的波浪定时器唤醒，并让
+        覆盖层重新对齐刷新。paintEvent 只在可见时触发，作恢复信号最可靠。
+        PyQt 虚拟方法里的异常会直接终止进程，全部兜住。
         """
         try:
             super().paintEvent(event)
             rail = getattr(self, 'wave_rail', None)
             if rail is None:
                 return
-            # 切回这个 tab / 窗口重新可见时，把之前自停的动画唤醒。
-            # paintEvent 只在可见时触发，用它当恢复信号最可靠。
+            win = self.window()
             if rail._active and self.isVisible() and not rail._timer.isActive():
-                rail.resume()
-            p = QPainter(self.viewport())
-            try:
-                rail.paint(p, event.rect())
-            finally:
-                p.end()
+                # 分栏时三段都「可见」，但只有被激活那一段的波形会被画；
+                # 其余两段跟着一起跑定时器纯属空转（还会互相抢 update）。
+                if _is_wave_editor(win, self):
+                    rail.resume()
+            layer = getattr(win, '_border_wave_layer', None) if win else None
+            if layer is not None and _is_wave_editor(win, self):
+                layer.place()
         except Exception:
             pass
 
@@ -11706,12 +16629,10 @@ class QTextEditWithLineNum(QTextEdit):
             num.setGeometry(QRect(cr.left(), cr.top(),
                                   self.lineNumberAreaWidth(), cr.height()))
         rail = getattr(self, 'wave_rail', None)
-        if rail is not None:
-            # rail 是隐藏的控制器，保留几何只为定位 / 校验；坐标系仍用
-            # viewport 自身，不能用 QTextEdit 的 contentsRect（差一个 frame）。
-            vr = self.viewport().rect()
-            rail.setGeometry(QRect(vr.right() - _WaveRail.RAIL_W + 1,
-                                   vr.top(), _WaveRail.RAIL_W, vr.height()))
+        if rail is not None and rail.isVisible():
+            # 波形已迁出 viewport，rail 只是隐藏的相位/缓存控制器，不该作为
+            # 半透明子控件参与 viewport 合成；缩到 0 彻底不占布局。
+            rail.setGeometry(QRect(0, 0, 0, 0))
         return result
 
     def focusInEvent(self, event):
@@ -12264,13 +17185,13 @@ def _inform_already_running():
     except Exception:
         pass
 
-
 if __name__ == '__main__':
     import traceback as _tb
     _startup_err = None
     try:
         # 隐藏控制台窗口（仅在存在控制台时有效；失败不影响启动）
         try:
+            import win32api, win32gui   # 局部导入：启动期省去 ~32ms
             ct = win32api.GetConsoleTitle()
             hd = win32gui.FindWindow(0, ct)
             if hd:
@@ -12309,11 +17230,21 @@ if __name__ == '__main__':
         app.setStyleSheet(_load_app_stylesheet())
         window_main = MainWindow()
         window_main.show()
-        # 设计调整服务延后到首帧显示之后、在后台线程启动：加载 server.py（Pillow）
+        # 设计调整服务延后到首帧显示之后、在后台线程启动：模块导入（Pillow）
         # 与首次绑定端口都不占用 UI 线程；用户先点到功能按钮时 ensure_started()
-        # 会惰性兜底，两者靠同一把锁保证只启动一次。
-        QTimer.singleShot(0, design_service.start_async)
-        app.aboutToQuit.connect(design_service.stop)
+        # 会惰性兜底，两者靠同一把锁保证只启动一次。连「取 start_async 属性」
+        # 也放进子线程，模块导入就不会在窗口刚显示时卡主线程一下。
+        def _boot_design_service():
+            import threading
+            threading.Thread(target=lambda: design_service.start_async(),
+                             name='FenrirDesignAdjustLazy', daemon=True).start()
+        QTimer.singleShot(1500, _boot_design_service)
+        # 从未打开过该功能时不必为了关闭服务而在退出时再导入一次 Pillow。
+        app.aboutToQuit.connect(
+            lambda: design_service.stop() if design_service.loaded else None)
+        # 图标缓存由 2.5s 延迟定时器落盘；会话不足 2.5s 时退出前补写一次，
+        # 保证「首次启动生成、之后启动提速」在短会话里也成立。
+        app.aboutToQuit.connect(_icon_3d.flush_icon_cache)
         app.exec_()
     except Exception as _e:
         _startup_err = _tb.format_exc()

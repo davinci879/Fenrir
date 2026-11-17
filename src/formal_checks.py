@@ -31,6 +31,27 @@ SECTION_ALIASES = {
     '发明内容或实用新型内容': '发明内容',
 }
 
+# —— 说明书 / 权利要求书 的分区边界 ——
+# 一份文档里常同时含「说明书各章节」与「权利要求书」。说明书章节由
+# SECTION_SET 识别，但「权利要求书」「说明书摘要」不是说明书章节，却必须
+# 作为分区的硬边界：否则最后一段说明书（具体实施方式）会把后面的权利要求
+# 整段吞进去，导致「说明书正文不应加括号」误伤权利要求里本就带括号的标记。
+def _bare_head(s):
+    """去装饰括号 / 章节编号 / 冒号，供标题判定（与 _canon_section 同口径）。"""
+    t = (s or '').strip('　 :：').strip('【】[]（）() ').strip('　 :：')
+    t = re.sub(r'^[一二三四五六七八九十\d]{1,3}\s*[、.．]\s*', '', t)
+    return t.strip()
+
+
+def _is_claims_heading(s):
+    return _bare_head(s) in ('权利要求书', '权利要求')
+
+
+def _is_tail_heading(s):
+    """权利要求书之后可能出现的收尾章节，同样作为分区边界。"""
+    return _bare_head(s) in ('说明书摘要', '摘要', '摘要附图', '说明书附图', '说明书')
+
+
 # 编号与名称之间允许的分隔符（论文的「顿号 / 逗号 / 自定义符号分隔」）
 DEFAULT_PAIR_SEPS = '、，,．.：:；;—-—~ '
 PAIR_SEP_PRESETS = {
@@ -46,8 +67,22 @@ MARK_NUM = r'\d{1,4}[a-zA-Z]?'
 
 CLAIM_HEAD_LINE = re.compile(r'(?m)^\s*(\d{1,2})\s*[.、．]\s*')
 CLAIM_HEAD_INLINE = re.compile(r'(?:^|(?<=。))\s*(\d{1,2})\s*[.、．]\s*')
+# 单条权利要求的起始编号（匹配整行开头，用于定位权利要求区）：1. / 1、 / 1．，
+# 编号后必须紧跟正文（非纯数字列表），避免把「附图说明」的「1、壳体」当成权要。
+CLAIM_NUM_LINE = re.compile(r'^\s*(\d{1,2})\s*[.、．]\s*(.+)$')
 MENTION = re.compile(
     r'([\u4e00-\u9fa5]{2,12})\s*([（(])?\s*(' + MARK_NUM + r')\s*([)）])?')
+# 「公开号 / 申请号 / 公开日」等数字标识符的前缀：这些数字是编号，不是附图标记。
+# 只匹配紧邻数字之前的中文片段（结尾 $），不会把「图1所示的电机2」整段误判。
+# 只收完整的复合名词，不收「公开/申请」等单字动词，避免误伤含这些字的部件名。
+_IDENTIFIER_PREFIX = re.compile(
+    r'(授权公告号|申请公布号|发明专利申请号|实用新型申请号|'
+    r'公开号|公布号|公告号|申请号|专利号|优先权号|登记号|证书编号|证书号|'
+    r'公开日|申请日|公告日|授权日|优先权日|'
+    r'第[一二三四五六七八九十0-9]{0,4}[条款项页]|步骤|版本)'
+    r'\s*[：:为]?\s*$')
+# 数字后紧跟这些字符 → 数字属于更长的编号/日期，而非独立附图标记
+_NUMBER_TAIL = re.compile(r'[A-Za-z0-9年月日]')
 CITATION = re.compile(r'根据权利要求\s*(\d{1,2})\s*(?:或|、|，|,|至|~|-|\s)*'
                       r'(?:\d{1,2}\s*)*(?:所述|中任一项|任一|之一)?')
 BOUNDARY_WORDS = re.compile(r'其特征在于|其特征是|其特点在于|特征在于')
@@ -148,24 +183,33 @@ def find_sections(text):
     text = (text or '').replace('\u2029', '\n').replace('\r', '\n')
     lines = text.split('\n')
     heads = []
+    # 所有「分区边界」行号：说明书章节标题 + 权利要求书 / 说明书摘要等收尾标题。
+    # 章节正文在遇到任意一个边界时必须停止，不能把后面的权利要求吞进来。
+    boundaries = []
     for i, raw in enumerate(lines):
         s = raw.strip().strip('　')
         canon = _canon_section(s)
-        if canon is None:
-            continue
-        # 原文与标准名不同（别名/组合写法）时记为非标准小标题；
-        # 「实用新型内容」及「发明内容、实用新型内容」组合写法视为标准，
-        # 不再提示「应写作发明内容」
-        plain = re.sub(r'^[（(]?[一二三四五六七八九十\d]{1,3}[)）、.．]?\s*', '',
-                       s.strip('　 :：'))
-        plain_ok = (plain == canon or plain == '实用新型内容'
-                    or re.match(r'^(发明内容|实用新型内容)\s*[、和或/／]\s*'
-                                r'(实用新型内容|发明内容)$', plain))
-        raw_name = '' if plain_ok else s.strip('　 :：')
-        heads.append((i, canon, raw_name))
+        if canon is not None:
+            boundaries.append(i)
+            # 原文与标准名不同（别名/组合写法）时记为非标准小标题；
+            # 「实用新型内容」及「发明内容、实用新型内容」组合写法视为标准，
+            # 不再提示「应写作发明内容」
+            plain = re.sub(r'^[（(]?[一二三四五六七八九十\d]{1,3}[)）、.．]?\s*', '',
+                           s.strip('　 :：'))
+            plain_ok = (plain == canon or plain == '实用新型内容'
+                        or re.match(r'^(发明内容|实用新型内容)\s*[、和或/／]\s*'
+                                    r'(实用新型内容|发明内容)$', plain))
+            raw_name = '' if plain_ok else s.strip('　 :：')
+            heads.append((i, canon, raw_name))
+        elif _is_claims_heading(s) or _is_tail_heading(s):
+            boundaries.append(i)
+    boundaries.sort()
     sections, order, wrong = {}, [], []
     for k, (ln, name, raw) in enumerate(heads):
-        end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
+        # 章节正文止于下一个边界（章节标题 / 权利要求书 / 说明书摘要）；
+        # 若之后没有任何边界才延伸到文末。
+        next_bounds = [b for b in boundaries if b > ln]
+        end = next_bounds[0] if next_bounds else len(lines)
         body = '\n'.join(lines[ln + 1:end]).strip()
         canonical = name
         if canonical not in sections or len(body) > len(sections[canonical]):
@@ -236,6 +280,25 @@ def extract_mentions(text):
     text = (text or '').replace('\u2029', '\n')
     out = []
     for m in MENTION.finditer(text):
+        num = m.group(3)
+        # —— 排除非附图标记的数字（公开号/申请号/日期/长编号的一部分）——
+        # 1) 数字右侧紧接字母/数字/年月日：如 CN121823222A、2020年、
+        #    202310123456.7，说明它是更长标识符的一段，不是独立标记。
+        tail = text[m.end(3):m.end(3) + 1]
+        if tail and _NUMBER_TAIL.match(tail):
+            # 例外：MARK_NUM 允许的字母后缀（如 2a）已被 m.group(3) 吃进，
+            # 这里再出现字母/数字只可能是更长编号，予以排除。
+            continue
+        # 2) 数字左侧是公开号/申请号/公开日等标识符前缀（如「公开号为1218」）。
+        #    取数字前的上下文窗口，允许夹一个 CN/字母与冒号。
+        left = text[max(0, m.start(3) - 18):m.start(3)]
+        if _IDENTIFIER_PREFIX.search(left):
+            continue
+        # 3) 4 位年份（19xx/20xx）且带年月日尾，已在 1) 排除；这里再兜住
+        #    裸年份（如「公开于2020」后接标点）。
+        if re.fullmatch(r'(?:19|20)\d{2}', num) and re.search(
+                r'(?:公开|公布|公告|申请|授权|日期|年|于)\s*[：:为]?\s*$', left):
+            continue
         core = _strip_prefix(m.group(1))
         if len(core) < 2 or core.isdigit():
             continue
@@ -348,28 +411,58 @@ def _norm_head_line(raw):
 
 
 def claims_region(text):
-    """截取整篇文档中的权利要求书部分。
+    """只截取「权利要求书」正文，兼容三种排版，绝不把说明书正文算进来。
 
-    权利要求书在前、说明书在后的排版很常见：不截断的话 split_claims 会让
-    最后一条权利要求吞并说明书正文——「两个以上句号」「缺少划界词」全部
-    误报，「附图标记须加括号」也会错误地作用到具体实施方式。
-    说明书在前、权利要求在后时不截断（每条权利要求自带编号标题，切分无碍）。
+    1) 有显式「权利要求书」标题：取该标题之后、到下个说明书/摘要标题为止。
+       —— 这是最关键的一种：说明书在前、权利要求书在后时，旧实现会返回全文，
+       使「权利要求书标记须加括号」错误地作用到具体实施方式（那里本不加括号）。
+    2) 无标题、权利要求在前、说明书在后：取第一个说明书章节标题之前的块。
+    3) 纯权利要求书单文档（无任何说明书章节）：取全文。
+
+    返回空串表示本文本中没有可识别的权利要求书区域。
     """
     text = (text or '').replace('\u2029', '\n').replace('\r', '\n')
     lines = text.split('\n')
+
+    # 1) 显式「权利要求书」标题 → 之后到下一个说明书/摘要标题
+    for i, raw in enumerate(lines):
+        if _is_claims_heading(raw.strip().strip('　')):
+            end = len(lines)
+            for j in range(i + 1, len(lines)):
+                s = lines[j].strip().strip('　')
+                if (_canon_section(s) is not None
+                        or _is_claims_heading(s) or _is_tail_heading(s)):
+                    end = j
+                    break
+            return '\n'.join(lines[i + 1:end]).strip()
+
+    # 找第一个说明书章节标题
     cut = None
     for i, raw in enumerate(lines):
-        s = _norm_head_line(raw)
-        if s in SECTION_SET or s in SECTION_ALIASES:
+        if _canon_section(raw.strip().strip('　')) is not None:
             cut = i
             break
-    if not cut:                       # 无说明书章节 / 说明书写在第 0 行
+    if cut is None:                   # 纯权利要求书 / 无说明书章节 → 全文
         return text
     head = '\n'.join(lines[:cut])
     claims = split_claims(head)
+    # 2) 说明书之前的块确实是权利要求（含划界词）：只返回它
     if claims and any(BOUNDARY_WORDS.search(c['text']) for c in claims):
         return head
-    return text
+    # 3) 说明书在前、权利要求书在后，但没写「权利要求书」标题：
+    #    取最后一个说明书章节之后、由编号权利要求行起始的尾部块。
+    tail_lines = lines[cut:]
+    claim_start = None
+    for k, raw in enumerate(tail_lines):
+        m = CLAIM_NUM_LINE.match(raw)
+        # 编号行正文含划界词或「一种…包括」，且不是「N、技术特征」的附图说明列表
+        if m and (BOUNDARY_WORDS.search(m.group(2))
+                  or ('一种' in m.group(2) and ('包括' in m.group(2) or '包含' in m.group(2)))):
+            claim_start = k
+            break
+    if claim_start is None:
+        return ''                     # 纯说明书，没有权利要求书
+    return '\n'.join(tail_lines[claim_start:]).strip()
 
 
 def split_claims(text):

@@ -126,6 +126,7 @@ def _split_and_load(legacy_state=None):
         'compare': _state.get('compare') or {'main': {'text': '', 'marks': ''}, 'files': []},
         'format_preset': _state.get('format_preset') or '',
         'ai_check': _state.get('ai_check') or {},
+        'panes': _state.get('panes') or {},
     }
     if 'migrated_at' in _state:
         settings['migrated_at'] = _state['migrated_at']
@@ -168,6 +169,7 @@ def ensure_loaded(force=False):
         state['version'] = settings_raw.get('version', VERSION)
         state['format_preset'] = settings_raw.get('format_preset') or ''
         state['ai_check'] = settings_raw.get('ai_check') or {}
+        state['panes'] = settings_raw.get('panes') or {}
         if 'migrated_at' in settings_raw:
             state['migrated_at'] = settings_raw['migrated_at']
         _state = state
@@ -211,6 +213,7 @@ def _save():
         'compare': _state.get('compare') or {'main': {'text': '', 'marks': ''}, 'files': []},
         'format_preset': _state.get('format_preset') or '',
         'ai_check': _state.get('ai_check') or {},
+        'panes': _state.get('panes') or {},
     }
     if 'migrated_at' in _state:
         settings['migrated_at'] = _state['migrated_at']
@@ -271,6 +274,20 @@ def set_ai_config(cfg):
     state = ensure_loaded()
     state['ai_check'] = dict(cfg or {})
     _save()
+
+
+def panes_layout():
+    """正文分区的显示设置：{'mode': 'panes'|'single', 'sizes': [...], 'orient': 'v'|'h'}。"""
+    return dict(ensure_loaded().get('panes') or {})
+
+
+def set_panes_layout(state):
+    """记住「分栏 / 单框」模式、三块高度与横竖排，下次启动沿用。"""
+    state = dict(state or {})
+    cur = ensure_loaded()
+    if (cur.get('panes') or {}) != state:
+        cur['panes'] = state
+        _save()
 
 
 def _ensure_tabs(count):
