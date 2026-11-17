@@ -1,11 +1,11 @@
-# Fenrir 专利写作助手 v3.5.15
+# Fenrir 专利写作助手 v3.5.16
 
 基于 PyQt5 的专利申请文件撰写辅助工具，面向专利代理师/工程师，集成多 Tab 编辑、附图标记管理、结构导航、文本校验、OCR、AI 辅助撰写等功能。
 
 ## 运行环境
 
 - Windows x64（依赖 win32api / win32gui）
-- Python 3.8+（开发环境 3.15）
+- Python 3.8+
 - 依赖：`PyQt5 qtawesome requests opencv-python numpy pywin32`
 
 ```
